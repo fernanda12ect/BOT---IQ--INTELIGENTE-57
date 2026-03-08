@@ -1,18 +1,21 @@
-import time
-import pandas as pd
 from iqoptionapi.stable_api import IQ_Option
-
+from datetime import datetime, timedelta
+import pandas as pd
+import time
 
 class IQBot:
 
-    def __init__(self,email,password,logger):
+    def __init__(self,email,password,log):
 
         self.email=email
         self.password=password
+        self.log=log
         self.API=None
-        self.log=logger
 
 
+    # -----------------------------
+    # CONECTAR A IQ OPTION
+    # -----------------------------
     def connect(self):
 
         try:
@@ -25,6 +28,8 @@ class IQBot:
 
                 self.log("Conectado a IQ Option")
 
+                self.API.change_balance("PRACTICE")
+
                 return True
 
             else:
@@ -35,49 +40,76 @@ class IQBot:
 
         except Exception as e:
 
-            self.log("Error conectando")
-            self.log(str(e))
+            self.log(f"Error conectando: {e}")
+
             return False
 
 
+    # -----------------------------
+    # BALANCE
+    # -----------------------------
     def get_balance(self):
 
         try:
+
             return self.API.get_balance()
+
         except:
-            return 0
+
+            return "0"
 
 
+    # -----------------------------
+    # OBTENER ACTIVOS
+    # -----------------------------
     def get_assets(self):
+
+        assets=[]
 
         try:
 
-            data=self.API.get_all_open_time()
+            all_assets=self.API.get_all_open_time()
 
-            activos=[]
+            # FOREX
+            for asset,data in all_assets["forex"].items():
 
-            for market in data:
+                if data["open"]:
 
-                for asset in data[market]:
+                    assets.append(asset)
 
-                    if data[market][asset]["open"]:
+            # CRYPTO
+            for asset,data in all_assets["crypto"].items():
 
-                        activos.append(asset)
+                if data["open"]:
 
-            return activos
+                    assets.append(asset)
 
-        except:
+            # DIGITAL
+            if "digital" in all_assets:
 
-            self.log("Error obteniendo activos")
+                for asset,data in all_assets["digital"].items():
 
-            return []
+                    if data["open"]:
+
+                        assets.append(asset)
+
+        except Exception as e:
+
+            self.log(f"Error obteniendo activos: {e}")
+
+        self.log(f"{len(assets)} activos encontrados")
+
+        return assets
 
 
+    # -----------------------------
+    # OBTENER VELAS
+    # -----------------------------
     def get_candles(self,asset):
 
         try:
 
-            candles=self.API.get_candles(asset,60,60,time.time())
+            candles=self.API.get_candles(asset,60,120,time.time())
 
             df=pd.DataFrame(candles)
 
@@ -85,41 +117,61 @@ class IQBot:
 
         except:
 
-            self.log(f"Error velas {asset}")
-
             return None
 
 
+    # -----------------------------
+    # ANALISIS DE TENDENCIA
+    # -----------------------------
     def analyze(self,asset):
 
-        try:
+        df=self.get_candles(asset)
 
-            self.log(f"Analizando {asset}")
-
-            df=self.get_candles(asset)
-
-            if df is None or df.empty:
-
-                return None
-
-            close=df["close"]
-
-            sma_fast=close.rolling(5).mean()
-
-            sma_slow=close.rolling(10).mean()
-
-            if sma_fast.iloc[-1] > sma_slow.iloc[-1]:
-
-                return "CALL"
-
-            elif sma_fast.iloc[-1] < sma_slow.iloc[-1]:
-
-                return "PUT"
+        if df is None:
 
             return None
 
-        except:
-
-            self.log(f"Error analizando {asset}")
+        if len(df)<50:
 
             return None
+
+
+        # medias
+        df["ema20"]=df["close"].ewm(span=20).mean()
+        df["ema50"]=df["close"].ewm(span=50).mean()
+
+
+        last=df.iloc[-1]
+
+
+        # tendencia
+        if last["ema20"]>last["ema50"]:
+
+            signal="CALL"
+
+        elif last["ema20"]<last["ema50"]:
+
+            signal="PUT"
+
+        else:
+
+            return None
+
+
+        # tiempo actual
+        now=datetime.now()
+
+        # entrada en 2 minutos
+        entry=now+timedelta(minutes=2)
+
+        detected=now
+
+
+        return {
+
+            "asset":asset,
+            "signal":signal,
+            "entry":entry,
+            "detected":detected
+
+        }
