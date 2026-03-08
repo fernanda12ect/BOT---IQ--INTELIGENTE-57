@@ -77,7 +77,7 @@ class IQBot:
 
         try:
 
-            candles=self.API.get_candles(asset,60,50,time.time())
+            candles=self.API.get_candles(asset,60,60,time.time())
 
             df=pd.DataFrame(candles)
 
@@ -93,6 +93,8 @@ class IQBot:
     def analyze(self,asset):
 
         try:
+
+            self.log(f"Analizando {asset}")
 
             df=self.get_candles(asset)
 
