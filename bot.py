@@ -139,8 +139,11 @@ def calcular_indicadores(df):
     # Detectar soportes y resistencias simples (máximos y mínimos de las últimas 20 velas)
     soporte = df['min'].rolling(20).min().iloc[-1]
     resistencia = df['max'].rolling(20).max().iloc[-1]
-    cerca_soporte = abs(last['close'] - soporte) <= 0.001  # Ajusta según el activo
-    cerca_resistencia = abs(last['close'] - resistencia) <= 0.001
+    # Distancia relativa (ajustable según el activo)
+    distancia_soporte = abs(last['close'] - soporte) / (last['close'] + 1e-10)
+    distancia_resistencia = abs(last['close'] - resistencia) / (last['close'] + 1e-10)
+    cerca_soporte = distancia_soporte < 0.001  # 0.1% de distancia
+    cerca_resistencia = distancia_resistencia < 0.001
 
     return {
         'close': last['close'],
@@ -175,7 +178,7 @@ def calcular_indicadores(df):
 
 def estrategia_soporte_resistencia(indicators):
     """
-    Retorna (dirección, fuerza, nombre_estrategia, estado) si se cumplen condiciones.
+    Retorna (dirección, fuerza, nombre_estrategia) si se cumplen condiciones.
     fuerza: 0-100
     """
     fuerza = 0
