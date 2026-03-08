@@ -1,11 +1,13 @@
-import streamlit as st
+         import streamlit as st
+import pandas as pd
 import html
 import time
 from datetime import datetime, timedelta
 import pytz
 from bot import (
-    escanear_activos_por_grupos,
     obtener_activos_abiertos,
+    calcular_indicadores,
+    calcular_probabilidad,
     REAL_ASSETS,
     OTC_ASSETS
 )
@@ -36,32 +38,34 @@ if 'historial' not in st.session_state:
 if 'mercado_real_abierto' not in st.session_state:
     st.session_state.mercado_real_abierto = True
 
+# Zona horaria Ecuador
+ecuador = pytz.timezone("America/Guayaquil")
+
 # Sidebar
 with st.sidebar:
     st.header("⚙️ Configuración")
     email = st.text_input("📧 Email")
     password = st.text_input("🔑 Password", type="password")
-    
+
     # Umbral de probabilidad
     umbral = st.slider("🎯 Umbral de probabilidad mínima (%)", 50, 95, 80, 5)
-    
+
     # Tiempo de espera entre rondas completas (segundos)
     pausa_entre_rondas = st.number_input("⏱️ Pausa entre rondas (seg)", min_value=5, max_value=120, value=30)
-    
+
     col1, col2 = st.columns(2)
     with col1:
         conectar = st.button("🔌 Conectar")
     with col2:
         desconectar = st.button("⛔ Desconectar")
-    
+
     # Botón para iniciar/detener escaneo continuo
     if st.session_state.api is not None:
         if not st.session_state.escaneando:
             iniciar = st.button("▶️ Iniciar escaneo 1x1")
             if iniciar:
-                # Reiniciar índice y obtener activos abiertos
+                # Reiniciar estado
                 st.session_state.activos_reales, st.session_state.activos_otc = obtener_activos_abiertos(st.session_state.api)
-                # Determinar lista a escanear según disponibilidad
                 if st.session_state.activos_reales:
                     st.session_state.mercado_real_abierto = True
                     st.session_state.activos_a_escanear = st.session_state.activos_reales + st.session_state.activos_otc
@@ -110,27 +114,27 @@ if desconectar:
 # Área principal
 if st.session_state.api is not None:
     st.info("🔌 Conectado.")
-    
+
     # Mostrar estado del mercado
     if st.session_state.activos_reales:
         st.success(f"✅ Mercado REAL abierto: {len(st.session_state.activos_reales)} activos disponibles")
     else:
         st.warning("⚠️ Mercado REAL cerrado - analizando solo activos OTC")
-    
+
     # Mostrar historial en tiempo real
     if st.session_state.historial:
         with st.expander("📋 Historial de análisis", expanded=True):
             for linea in st.session_state.historial[-20:]:  # últimos 20
                 st.text(linea)
-    
+
     # Lógica de escaneo continuo 1x1
     if st.session_state.escaneando:
+        now = datetime.now(ecuador)
+
         # Verificar cooldown
-        now = datetime.now(pytz.timezone("America/Guayaquil"))
         if st.session_state.cooldown_until and now < st.session_state.cooldown_until:
             tiempo_restante = (st.session_state.cooldown_until - now).total_seconds()
             st.warning(f"⏳ Cooldown activo. Esperando {tiempo_restante:.0f} segundos...")
-            # Esperar un poco y rerun
             time.sleep(1)
             st.rerun()
         else:
@@ -159,39 +163,33 @@ if st.session_state.api is not None:
                 # Escanear el activo actual
                 asset = st.session_state.activos_a_escanear[st.session_state.indice_activo]
                 st.markdown(f"### 🔍 Analizando: {asset}")
-                
-                # Llamar a la función de escaneo para un solo activo (adaptamos)
-                # Podemos usar una versión simplificada que analice un activo y devuelva señal o None
-                # Reutilizaremos la lógica interna de escanear_activos_por_grupos pero para un solo activo.
-                # Para simplificar, haremos inline el análisis.
+
                 try:
                     # Añadir al historial
                     st.session_state.historial.append(f"🔎 Analizando {asset}...")
-                    
+
                     candles = st.session_state.api.get_candles(asset, 60, 100, time.time())
                     if not candles or len(candles) < 50:
                         st.session_state.historial.append(f"⏭️ {asset}: datos insuficientes")
                         time.sleep(0.25)
                         st.session_state.indice_activo += 1
                         st.rerun()
-                    
+
                     df = pd.DataFrame(candles)
                     for col in ['open', 'max', 'min', 'close', 'volume']:
                         df[col] = pd.to_numeric(df[col], errors='coerce')
                     df.dropna(inplace=True)
-                    
+
                     if len(df) < 50:
                         st.session_state.historial.append(f"⏭️ {asset}: datos insuficientes después de limpieza")
                         time.sleep(0.25)
                         st.session_state.indice_activo += 1
                         st.rerun()
-                    
+
                     # Calcular indicadores
-                    # Necesitamos importar calcular_indicadores y calcular_probabilidad desde bot
-                    from bot import calcular_indicadores, calcular_probabilidad
                     indicators = calcular_indicadores(df)
                     result = calcular_probabilidad(indicators, umbral)
-                    
+
                     if result:
                         prob, direction, strategy = result
                         # Obtener hora servidor
@@ -200,15 +198,14 @@ if st.session_state.api is not None:
                             now_utc = datetime.fromtimestamp(server_time, tz=pytz.UTC)
                         except:
                             now_utc = datetime.now(pytz.UTC)
-                        
+
                         entry_dt = now_utc + timedelta(minutes=1)
                         entry_dt = entry_dt.replace(second=0, microsecond=0)
                         expiry_dt = entry_dt + timedelta(minutes=5)
-                        
-                        ecuador = pytz.timezone("America/Guayaquil")
+
                         entry_local = entry_dt.astimezone(ecuador)
                         expiry_local = expiry_dt.astimezone(ecuador)
-                        
+
                         senal = {
                             "asset": asset,
                             "direction": direction,
@@ -220,20 +217,20 @@ if st.session_state.api is not None:
                             "expiry_utc": expiry_dt.strftime("%Y-%m-%d %H:%M:%S")
                         }
                         st.session_state.ultima_senal = senal
-                        # Calcular cooldown
+                        # Calcular cooldown (entrada + 1 minuto)
                         cooldown = entry_dt + timedelta(minutes=1)
                         st.session_state.cooldown_until = cooldown.astimezone(ecuador)
                         st.session_state.historial.append(f"🎯 ¡Señal encontrada en {asset}!")
                         st.balloons()
-                        # Detener escaneo hasta que pase cooldown (el escaneo se reanudará automáticamente al hacer rerun)
-                        st.session_state.indice_activo += 1  # Avanzamos para no repetir, pero la señal ya se mostró
+                        # Avanzamos índice para no repetir el activo (aunque ya se detendrá por cooldown)
+                        st.session_state.indice_activo += 1
                         st.rerun()
                     else:
                         st.session_state.historial.append(f"❌ {asset}: no cumple umbral")
                         time.sleep(0.25)
                         st.session_state.indice_activo += 1
                         st.rerun()
-                        
+
                 except Exception as e:
                     st.session_state.historial.append(f"⚠️ Error en {asset}: {str(e)[:50]}")
                     time.sleep(0.25)
