@@ -54,15 +54,6 @@ with st.sidebar:
     with col2:
         desconectar = st.button("⛔ Desconectar")
 
-    if st.session_state.api is not None and not st.session_state.escaneando:
-        if st.button("▶️ Iniciar búsqueda"):
-            st.session_state.escaneando = True
-            st.session_state.fase = "seleccion"
-            st.session_state.activos_seleccionados = []
-            st.session_state.señales_activas = []
-            st.session_state.historial = []
-            st.rerun()
-
 # Lógica de conexión
 if conectar:
     if not email or not password:
@@ -73,15 +64,21 @@ if conectar:
             check, reason = API.connect()
             if check:
                 st.session_state.api = API
+                # Obtener activos inmediatamente
                 real, otc = obtener_activos_abiertos(API)
                 st.session_state.activos_reales = real
                 st.session_state.activos_otc = otc
-                st.session_state.escaneando = False
-                st.success("✅ Conectado")
+                st.session_state.escaneando = True  # Iniciar escaneo automáticamente
+                st.session_state.fase = "seleccion"
+                st.session_state.activos_seleccionados = []
+                st.session_state.señales_activas = []
+                st.session_state.historial = []
+                st.success("✅ Conectado - Iniciando búsqueda de activos...")
+                st.rerun()
             else:
-                st.error(f"❌ Error: {reason}")
+                st.error(f"❌ Error de conexión: {reason}")
         except Exception as e:
-            st.error(f"Error: {e}")
+            st.error(f"Error inesperado: {e}")
 
 if desconectar:
     st.session_state.api = None
@@ -140,6 +137,15 @@ if st.session_state.api is not None:
             st.info("🔍 Buscando los 2 mejores activos con tendencia...")
             # Escanear todos los activos (reales + otc)
             todos_activos = st.session_state.activos_reales + st.session_state.activos_otc
+            if not todos_activos:
+                st.warning("No hay activos disponibles. Reintentando en {} segundos...".format(pausa_entre_rondas))
+                time.sleep(pausa_entre_rondas)
+                # Intentar obtener activos nuevamente
+                real, otc = obtener_activos_abiertos(st.session_state.api)
+                st.session_state.activos_reales = real
+                st.session_state.activos_otc = otc
+                st.rerun()
+
             candidatos = []
             for asset in todos_activos:
                 try:
@@ -168,6 +174,7 @@ if st.session_state.api is not None:
                                 'indicators': indicators
                             })
                 except Exception as e:
+                    st.session_state.historial.append(f"⚠️ Error con {asset}: {str(e)[:50]}")
                     continue
                 time.sleep(0.1)  # pausa entre activos
 
@@ -190,7 +197,7 @@ if st.session_state.api is not None:
             st.subheader("🔎 SIGUIENDO ACTIVOS SELECCIONADOS")
             for idx, activo in enumerate(st.session_state.activos_seleccionados):
                 asset = activo['asset']
-                st.write(f"**{idx+1}. {asset}** - Tendencia: {activo['direccion']} - Nivel retroceso: {activo['nivel_retroceso']:.5f}")
+                st.write(f"**{idx+1}. {asset}** - Tendencia: {activo['direccion']} - Nivel retroceso: {activo['nivel_retroceso']:.5f} - Precio actual: {activo.get('precio_actual', 'N/A'):.5f}")
 
                 try:
                     candles = st.session_state.api.get_candles(asset, 60, 5, time.time())  # últimas 5 velas
