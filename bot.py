@@ -25,26 +25,46 @@ OTC_ASSETS = ["EURUSD-OTC", "GBPUSD-OTC", "AUDUSD-OTC", "USDJPY-OTC"]
 def obtener_activos_abiertos(api):
     """
     Obtiene listas de activos REAL y OTC que están actualmente abiertos para trading binario.
+    Considera que los activos REAL solo operan de lunes a viernes (días de semana).
     Retorna (real_abiertos, otc_abiertos)
     """
     try:
         open_time = api.get_all_open_time()
         real = []
         otc = []
-        # La estructura puede variar; asumimos que 'binary' contiene los activos binarios
+        # Determinar si es fin de semana (hora UTC)
+        now_utc = datetime.now(pytz.UTC)
+        dia_semana = now_utc.weekday()  # 0=lunes, 6=domingo
+        es_fin_semana = dia_semana >= 5  # sábado o domingo
+
         if 'binary' in open_time:
             for asset, data in open_time['binary'].items():
                 if data.get('open', False):
                     if '-OTC' in asset:
                         otc.append(asset)
                     else:
-                        real.append(asset)
+                        # Solo agregar REAL si no es fin de semana
+                        if not es_fin_semana:
+                            real.append(asset)
+                        else:
+                            logging.debug(f"Activo REAL {asset} ignorado por fin de semana")
+
+        # Si es fin de semana y no hay OTC, usar lista predefinida como fallback
+        if es_fin_semana and not otc:
+            logging.info("Fin de semana sin OTC detectados, usando lista predefinida OTC")
+            otc = OTC_ASSETS.copy()
+
         logging.info(f"Activos abiertos: {len(real)} REAL, {len(otc)} OTC")
         return real, otc
+
     except Exception as e:
         logging.error(f"Error obteniendo activos abiertos: {e}")
-        # Fallback a listas predefinidas (sin filtrar por apertura)
-        return REAL_ASSETS, OTC_ASSETS
+        # Fallback con filtro de fin de semana
+        now_utc = datetime.now(pytz.UTC)
+        dia_semana = now_utc.weekday()
+        es_fin_semana = dia_semana >= 5
+        real = [] if es_fin_semana else REAL_ASSETS
+        return real, OTC_ASSETS
 
 # =========================
 # INDICADORES (optimizados)
@@ -116,18 +136,20 @@ def calcular_indicadores(df):
     }
 
 # =========================
-# PROBABILIDAD (con umbral)
+# PROBABILIDAD (siempre devuelve score si hay tendencia)
 # =========================
 
-def calcular_probabilidad(indicators, umbral=80):
+def calcular_probabilidad(indicators):
     """
-    Retorna (probabilidad, dirección, estrategia) si la probabilidad >= umbral, sino None.
+    Retorna (probabilidad, dirección, estrategia) si hay tendencia definida,
+    de lo contrario retorna None.
+    La probabilidad es un valor entre 0 y 100.
     """
     score = 0
     direction = None
     strategy = None
 
-    # Tendencia
+    # Tendencia (requisito mínimo)
     if indicators['ema20'] > indicators['ema50']:
         score += 25
         direction = "CALL"
@@ -137,7 +159,7 @@ def calcular_probabilidad(indicators, umbral=80):
         direction = "PUT"
         strategy = "Tendencia bajista"
     else:
-        return None
+        return None  # Sin tendencia, no hay señal posible
 
     # Volatilidad
     if indicators['atr'] > indicators['atr_mean']:
@@ -168,7 +190,4 @@ def calcular_probabilidad(indicators, umbral=80):
 
     score = min(score, 100)
 
-    if score >= umbral:
-        return score, direction, strategy
-    else:
-        return None
+    return score, direction, strategy
