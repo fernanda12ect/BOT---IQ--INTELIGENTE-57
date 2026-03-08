@@ -1,159 +1,56 @@
 import streamlit as st
-from bot import IQBot
-from datetime import datetime
-import pytz
-import time
-
-ecuador=pytz.timezone("America/Guayaquil")
+from bot import escanear_activos
+from iqoptionapi.stable_api import IQ_Option
 
 st.set_page_config(layout="wide")
 
-st.title("🤖 IQ OPTION AUTO SCANNER PRO")
+st.title("BOT SEÑALES IQ OPTION")
 
-if "logs" not in st.session_state:
-    st.session_state.logs=[]
+email = st.text_input("Email")
+password = st.text_input("Password", type="password")
 
-if "signals" not in st.session_state:
-    st.session_state.signals={}
+if st.button("Conectar"):
 
-if "assets" not in st.session_state:
-    st.session_state.assets=[]
+    API = IQ_Option(email,password)
+    API.connect()
 
-if "index" not in st.session_state:
-    st.session_state.index=0
+    st.success("Conectado")
 
-def log(msg):
+    while True:
 
-    now=datetime.now(ecuador).strftime("%H:%M:%S")
+        signal = escanear_activos(API)
 
-    st.session_state.logs.insert(0,f"[{now}] {msg}")
+        if signal:
 
-with st.sidebar:
+            st.markdown(f"""
+            <div style="
+            background:#111;
+            padding:30px;
+            border-radius:20px;
+            font-size:24px;
+            display:flex;
+            justify-content:space-between">
 
-    st.header("Conexión")
+            <div>
 
-    email=st.text_input("Email")
+            <h2>{signal['activo']}</h2>
 
-    password=st.text_input("Password",type="password")
+            <p>OPERAR</p>
+            <h1>{signal['operar']}</h1>
 
-    if st.button("Conectar"):
+            <p>EXPIRA</p>
+            <h2>{signal['expira']}</h2>
 
-        bot=IQBot(email,password,log)
+            </div>
 
-        if bot.connect():
+            <div>
 
-            st.session_state.bot=bot
+            <h1>{signal['direccion']}</h1>
 
-            st.session_state.assets=bot.get_assets()
+            <p>PROBABILIDAD</p>
+            <h1>{signal['prob']}%</h1>
 
-            log("Escáner iniciado")
+            </div>
 
-        else:
-
-            st.error("Error conexión")
-
-if "bot" in st.session_state:
-
-    bot=st.session_state.bot
-
-    assets=st.session_state.assets
-
-    if len(assets)>0:
-
-        asset=assets[st.session_state.index%len(assets)]
-
-        log(f"Analizando {asset}")
-
-        result=bot.analyze(asset)
-
-        if result:
-
-            name=result["asset"]
-
-            if name not in st.session_state.signals:
-
-                st.session_state.signals[name]=result
-
-                log(f"SEÑAL {name} {result['signal']} operar {result['entry'].strftime('%H:%M:%S')}")
-
-        st.session_state.index+=1
-
-
-signals=list(st.session_state.signals.values())
-
-cols=st.columns(4)
-
-remove=[]
-
-for i,signal in enumerate(signals[:4]):
-
-    entry=signal["entry"]
-
-    expiry=signal["expiry"]
-
-    now=datetime.now(ecuador)
-
-    remaining=(entry-now).total_seconds()
-
-    if remaining<=0:
-        remove.append(signal["asset"])
-        continue
-
-    minutes=int(remaining//60)
-    seconds=int(remaining%60)
-
-    countdown=f"{minutes:02}:{seconds:02}"
-
-    if signal["signal"]=="CALL":
-        color="#00ff88"
-        bg="#002b22"
-    else:
-        color="#ff4b4b"
-        bg="#2b0000"
-
-    with cols[i]:
-
-        st.markdown(f"""
-        <div style="
-        background:{bg};
-        border-radius:15px;
-        padding:25px;
-        text-align:center;
-        border:3px solid {color};
-        ">
-
-        <h2>{signal["asset"]}</h2>
-
-        <h1 style="color:{color}">
-        {signal["signal"]}
-        </h1>
-
-        <h3>OPERAR A LAS</h3>
-
-        <h2>
-        {entry.strftime('%H:%M:%S')}
-        </h2>
-
-        <h3>EXPIRA</h3>
-
-        <h2>
-        {expiry.strftime('%H:%M:%S')}
-        </h2>
-
-        <h2>⏳ {countdown}</h2>
-
-        </div>
-        """,unsafe_allow_html=True)
-
-
-for r in remove:
-    del st.session_state.signals[r]
-
-st.subheader("Historial del Scanner")
-
-for l in st.session_state.logs[:30]:
-    st.text(l)
-
-time.sleep(1)
-
-st.rerun()
+            </div>
+            """, unsafe_allow_html=True)
