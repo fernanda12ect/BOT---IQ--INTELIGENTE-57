@@ -1,28 +1,34 @@
 import streamlit as st
 from bot import IQBot
+from datetime import datetime, timedelta
 import time
-from datetime import datetime
-
 
 st.set_page_config(layout="wide")
 
-st.title("🤖 IQ OPTION AUTO BOT")
+st.title("🤖 IQ OPTION AUTO SCANNER PRO")
 
-
+# estados
 if "logs" not in st.session_state:
     st.session_state.logs=[]
 
 if "signals" not in st.session_state:
-    st.session_state.signals=[]
+    st.session_state.signals={}
+
+if "alerts" not in st.session_state:
+    st.session_state.alerts=[]
+
+if "index" not in st.session_state:
+    st.session_state.index=0
 
 
 def log(msg):
 
     now=datetime.now().strftime("%H:%M:%S")
 
-    st.session_state.logs.append(f"[{now}] {msg}")
+    st.session_state.logs.insert(0,f"[{now}] {msg}")
 
 
+# SIDEBAR
 with st.sidebar:
 
     st.header("Conexión")
@@ -41,59 +47,168 @@ with st.sidebar:
 
             st.session_state.assets=bot.get_assets()
 
+            log("Bot conectado correctamente")
+
         else:
 
-            st.error("No se pudo conectar")
+            st.error("Error conexión")
 
 
+# BOT ACTIVO
 if "bot" in st.session_state:
 
     bot=st.session_state.bot
 
-    st.success(f"Saldo: {bot.get_balance()}")
+    saldo=bot.get_balance()
+
+    st.success(f"Saldo: {saldo}")
 
     assets=st.session_state.assets
 
-    for asset in assets[:10]:
+    i=st.session_state.index
 
-        signal=bot.analyze(asset)
+    asset=assets[i % len(assets)]
 
-        if signal:
+    try:
 
-            st.session_state.signals.append((asset,signal))
+        result=bot.analyze(asset)
+
+        if result:
+
+            name=result["asset"]
+
+            if name not in st.session_state.signals:
+
+                entry=result["entry"]
+
+                expiry=entry+timedelta(minutes=5)
+
+                st.session_state.signals[name]={
+
+                    "asset":name,
+                    "signal":result["signal"],
+                    "entry":entry,
+                    "expiry":expiry,
+                    "detected":result["detected"]
+
+                }
+
+                alert=f"ALERTA: OPERAR {name} {result['signal']} A LAS {entry.strftime('%H:%M:%S')}"
+
+                st.session_state.alerts.append(alert)
+
+                log(alert)
+
+    except:
+        pass
+
+    st.session_state.index+=1
 
 
+# ALERTA GRANDE
+if st.session_state.alerts:
+
+    last=st.session_state.alerts[-1]
+
+    st.markdown(f"""
+
+    <div style="
+    background:#300000;
+    color:#ff4444;
+    padding:30px;
+    font-size:35px;
+    text-align:center;
+    border-radius:12px;
+    margin-bottom:20px;
+    ">
+
+    ⚠️ {last}
+
+    </div>
+
+    """,unsafe_allow_html=True)
+
+
+# TARJETAS
 cols=st.columns(4)
 
-for i,signal in enumerate(st.session_state.signals[:4]):
+remove_list=[]
 
-    asset,action=signal
+signals=list(st.session_state.signals.values())
 
-    if action=="CALL":
+for i,signal in enumerate(signals[:4]):
+
+    entry=signal["entry"]
+
+    remaining=(entry-datetime.now()).total_seconds()
+
+    if remaining<=0:
+
+        remove_list.append(signal["asset"])
+
+        continue
+
+    minutes=int(remaining//60)
+    seconds=int(remaining%60)
+
+    countdown=f"{minutes:02}:{seconds:02}"
+
+    if signal["signal"]=="CALL":
 
         color="#00ff00"
+        bg="#002200"
 
     else:
 
-        color="#ff0000"
+        color="#ff4444"
+        bg="#220000"
 
     with cols[i]:
 
         st.markdown(f"""
-        <div style="background:#111;padding:20px;border-radius:10px;border:2px solid {color}">
-        <h2 style="color:white">{asset}</h2>
-        <h1 style="color:{color}">{action}</h1>
+
+        <div style="
+        background:{bg};
+        border:3px solid {color};
+        padding:30px;
+        border-radius:15px;
+        text-align:center;
+        ">
+
+        <h2>{signal["asset"]}</h2>
+
+        <h1 style="color:{color}">{signal["signal"]}</h1>
+
+        <h2>OPERAR A LAS</h2>
+
+        <h1 style="color:{color}">
+        {signal["entry"].strftime('%H:%M:%S')}
+        </h1>
+
+        <h3>⏳ {countdown}</h3>
+
+        <p>Detectado: {signal["detected"].strftime('%H:%M:%S')}</p>
+
+        <p>Cierre: {signal["expiry"].strftime('%H:%M:%S')}</p>
+
         </div>
+
         """,unsafe_allow_html=True)
 
 
-st.subheader("Historial")
+for r in remove_list:
 
-for logmsg in st.session_state.logs[-20:]:
+    del st.session_state.signals[r]
+
+
+# HISTORIAL
+st.subheader("Historial del Bot")
+
+for logmsg in st.session_state.logs[:50]:
 
     st.text(logmsg)
 
 
-time.sleep(2)
+time.sleep(1)
 
 st.rerun()
