@@ -1,177 +1,94 @@
-from iqoptionapi.stable_api import IQ_Option
+import streamlit as st
+from bot import IQBot
 from datetime import datetime, timedelta
-import pandas as pd
 import time
 
-class IQBot:
+st.set_page_config(layout="wide")
 
-    def __init__(self,email,password,log):
+st.title("🤖 IQ OPTION AUTO SCANNER PRO")
 
-        self.email=email
-        self.password=password
-        self.log=log
-        self.API=None
+# ----------------------------
+# SESSION STATE
+# ----------------------------
 
+if "logs" not in st.session_state:
+    st.session_state.logs=[]
 
-    # -----------------------------
-    # CONECTAR A IQ OPTION
-    # -----------------------------
-    def connect(self):
+if "signals" not in st.session_state:
+    st.session_state.signals={}
 
-        try:
+if "alerts" not in st.session_state:
+    st.session_state.alerts=[]
 
-            self.API=IQ_Option(self.email,self.password)
+if "index" not in st.session_state:
+    st.session_state.index=0
 
-            check,reason=self.API.connect()
+if "assets" not in st.session_state:
+    st.session_state.assets=[]
 
-            if check:
 
-                self.log("Conectado a IQ Option")
+# ----------------------------
+# LOG FUNCION
+# ----------------------------
 
-                self.API.change_balance("PRACTICE")
+def log(msg):
 
-                return True
+    now=datetime.now().strftime("%H:%M:%S")
 
-            else:
+    st.session_state.logs.insert(0,f"[{now}] {msg}")
 
-                self.log(f"Error conexión: {reason}")
 
-                return False
+# ----------------------------
+# SIDEBAR LOGIN
+# ----------------------------
 
-        except Exception as e:
+with st.sidebar:
 
-            self.log(f"Error conectando: {e}")
+    st.header("Conexión")
 
-            return False
+    email=st.text_input("Email")
 
+    password=st.text_input("Password",type="password")
 
-    # -----------------------------
-    # BALANCE
-    # -----------------------------
-    def get_balance(self):
+    if st.button("Conectar"):
 
-        try:
+        bot=IQBot(email,password,log)
 
-            return self.API.get_balance()
+        if bot.connect():
 
-        except:
+            st.session_state.bot=bot
 
-            return "0"
+            assets=bot.get_assets()
 
+            st.session_state.assets=assets
 
-    # -----------------------------
-    # OBTENER ACTIVOS
-    # -----------------------------
-    def get_assets(self):
+            log("Bot conectado correctamente")
 
-        assets=[]
-
-        try:
-
-            all_assets=self.API.get_all_open_time()
-
-            # FOREX
-            for asset,data in all_assets["forex"].items():
-
-                if data["open"]:
-
-                    assets.append(asset)
-
-            # CRYPTO
-            for asset,data in all_assets["crypto"].items():
-
-                if data["open"]:
-
-                    assets.append(asset)
-
-            # DIGITAL
-            if "digital" in all_assets:
-
-                for asset,data in all_assets["digital"].items():
-
-                    if data["open"]:
-
-                        assets.append(asset)
-
-        except Exception as e:
-
-            self.log(f"Error obteniendo activos: {e}")
-
-        self.log(f"{len(assets)} activos encontrados")
-
-        return assets
-
-
-    # -----------------------------
-    # OBTENER VELAS
-    # -----------------------------
-    def get_candles(self,asset):
-
-        try:
-
-            candles=self.API.get_candles(asset,60,120,time.time())
-
-            df=pd.DataFrame(candles)
-
-            return df
-
-        except:
-
-            return None
-
-
-    # -----------------------------
-    # ANALISIS DE TENDENCIA
-    # -----------------------------
-    def analyze(self,asset):
-
-        df=self.get_candles(asset)
-
-        if df is None:
-
-            return None
-
-        if len(df)<50:
-
-            return None
-
-
-        # medias
-        df["ema20"]=df["close"].ewm(span=20).mean()
-        df["ema50"]=df["close"].ewm(span=50).mean()
-
-
-        last=df.iloc[-1]
-
-
-        # tendencia
-        if last["ema20"]>last["ema50"]:
-
-            signal="CALL"
-
-        elif last["ema20"]<last["ema50"]:
-
-            signal="PUT"
+            log(f"{len(assets)} activos encontrados")
 
         else:
 
-            return None
+            st.error("Error de conexión")
 
 
-        # tiempo actual
-        now=datetime.now()
+# ----------------------------
+# BOT ACTIVO
+# ----------------------------
 
-        # entrada en 2 minutos
-        entry=now+timedelta(minutes=2)
+if "bot" in st.session_state:
 
-        detected=now
+    bot=st.session_state.bot
+
+    saldo=bot.get_balance()
+
+    st.success(f"Saldo: {saldo}")
+
+    assets=st.session_state.assets
 
 
-        return {
+    # PROTECCION SI NO HAY ACTIVOS
+    if not assets:
 
-            "asset":asset,
-            "signal":signal,
-            "entry":entry,
-            "detected":detected
+        st.warning("⏳ Esperando activos disponibles...")
 
-        }
+        log("Esperando lista de activos...
