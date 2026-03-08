@@ -1,94 +1,146 @@
-import streamlit as st
-from bot import IQBot
+from iqoptionapi.stable_api import IQ_Option
 from datetime import datetime, timedelta
+import pandas as pd
 import time
 
-st.set_page_config(layout="wide")
+class IQBot:
 
-st.title("🤖 IQ OPTION AUTO SCANNER PRO")
+    def __init__(self,email,password,log):
 
-# ----------------------------
-# SESSION STATE
-# ----------------------------
-
-if "logs" not in st.session_state:
-    st.session_state.logs=[]
-
-if "signals" not in st.session_state:
-    st.session_state.signals={}
-
-if "alerts" not in st.session_state:
-    st.session_state.alerts=[]
-
-if "index" not in st.session_state:
-    st.session_state.index=0
-
-if "assets" not in st.session_state:
-    st.session_state.assets=[]
+        self.email=email
+        self.password=password
+        self.log=log
+        self.API=None
 
 
-# ----------------------------
-# LOG FUNCION
-# ----------------------------
+    # ------------------------
+    # CONECTAR
+    # ------------------------
+    def connect(self):
 
-def log(msg):
+        try:
 
-    now=datetime.now().strftime("%H:%M:%S")
+            self.API=IQ_Option(self.email,self.password)
 
-    st.session_state.logs.insert(0,f"[{now}] {msg}")
+            check,reason=self.API.connect()
+
+            if check:
+
+                self.log("Conectado a IQ Option")
+
+                self.API.change_balance("PRACTICE")
+
+                return True
+
+            else:
+
+                self.log(f"Error conexión: {reason}")
+
+                return False
+
+        except Exception as e:
+
+            self.log(f"Error conectando: {e}")
+
+            return False
 
 
-# ----------------------------
-# SIDEBAR LOGIN
-# ----------------------------
+    # ------------------------
+    # BALANCE
+    # ------------------------
+    def get_balance(self):
 
-with st.sidebar:
+        try:
+            return self.API.get_balance()
 
-    st.header("Conexión")
+        except:
+            return 0
 
-    email=st.text_input("Email")
 
-    password=st.text_input("Password",type="password")
+    # ------------------------
+    # ACTIVOS DISPONIBLES
+    # ------------------------
+    def get_assets(self):
 
-    if st.button("Conectar"):
+        assets=[]
 
-        bot=IQBot(email,password,log)
+        try:
 
-        if bot.connect():
+            all_assets=self.API.get_all_open_time()
 
-            st.session_state.bot=bot
+            for market in all_assets:
 
-            assets=bot.get_assets()
+                for asset,data in all_assets[market].items():
 
-            st.session_state.assets=assets
+                    if data["open"]:
 
-            log("Bot conectado correctamente")
+                        assets.append(asset)
 
-            log(f"{len(assets)} activos encontrados")
+        except Exception as e:
+
+            self.log(f"Error obteniendo activos: {e}")
+
+        return assets
+
+
+    # ------------------------
+    # VELAS
+    # ------------------------
+    def get_candles(self,asset):
+
+        try:
+
+            candles=self.API.get_candles(asset,60,120,time.time())
+
+            df=pd.DataFrame(candles)
+
+            return df
+
+        except:
+
+            return None
+
+
+    # ------------------------
+    # ANALISIS
+    # ------------------------
+    def analyze(self,asset):
+
+        df=self.get_candles(asset)
+
+        if df is None or len(df)<50:
+
+            return None
+
+
+        df["ema20"]=df["close"].ewm(span=20).mean()
+        df["ema50"]=df["close"].ewm(span=50).mean()
+
+        last=df.iloc[-1]
+
+
+        if last["ema20"]>last["ema50"]:
+
+            signal="CALL"
+
+        elif last["ema20"]<last["ema50"]:
+
+            signal="PUT"
 
         else:
 
-            st.error("Error de conexión")
+            return None
 
 
-# ----------------------------
-# BOT ACTIVO
-# ----------------------------
+        now=datetime.now()
 
-if "bot" in st.session_state:
+        entry=now+timedelta(minutes=2)
 
-    bot=st.session_state.bot
+        return {
 
-    saldo=bot.get_balance()
+            "asset":asset.upper(),
+            "signal":signal,
+            "entry":entry,
+            "detected":now
 
-    st.success(f"Saldo: {saldo}")
-
-    assets=st.session_state.assets
-
-
-    # PROTECCION SI NO HAY ACTIVOS
-    if not assets:
-
-        st.warning("⏳ Esperando activos disponibles...")
-
-        log("Esperando lista de activos...
+        }
