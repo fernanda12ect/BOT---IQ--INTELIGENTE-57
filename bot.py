@@ -16,44 +16,32 @@ class IQBot:
 
     def connect(self):
 
-        try:
-            self.API=IQ_Option(self.email,self.password)
-            self.API.connect()
+        self.API = IQ_Option(self.email,self.password)
+        self.API.connect()
 
-            if self.API.check_connect():
-                self.log("Conectado a IQ Option")
-                return True
-            else:
-                self.log("Error conectando")
-                return False
-        except:
-            self.log("Error conexión")
+        if self.API.check_connect():
+            self.log("Conectado a IQ Option")
+            return True
+        else:
+            self.log("Error conectando")
             return False
 
-    def get_balance(self):
-        try:
-            return self.API.get_balance()
-        except:
-            return 0
 
     def get_assets(self):
 
-        activos=set()
+        activos=[]
 
-        try:
-            all_assets=self.API.get_all_open_time()
+        all_assets=self.API.get_all_open_time()
 
-            for tipo in all_assets:
+        for tipo in all_assets:
 
-                for asset,data in all_assets[tipo].items():
+            for asset,data in all_assets[tipo].items():
 
-                    if data["open"]:
-                        activos.add(asset)
+                if data["open"]:
+                    activos.append(asset)
 
-        except:
-            pass
+        return activos
 
-        return list(activos)
 
     def get_candles(self,asset):
 
@@ -73,10 +61,7 @@ class IQBot:
 
         df=self.get_candles(asset)
 
-        if df is None:
-            return None
-
-        if len(df)<50:
+        if df is None or len(df)<60:
             return None
 
         close=df["close"]
@@ -93,27 +78,64 @@ class IQBot:
 
         rsi=100-(100/(1+rs))
 
-        trend=None
+        score=0
+        signal=None
 
+        # tendencia
         if ema20.iloc[-1]>ema50.iloc[-1]:
-            trend="CALL"
+            signal="CALL"
+            score+=30
 
-        if ema20.iloc[-1]<ema50.iloc[-1]:
-            trend="PUT"
+        elif ema20.iloc[-1]<ema50.iloc[-1]:
+            signal="PUT"
+            score+=30
 
-        if trend is None:
-            self.log(f"{asset} sin tendencia clara")
+        else:
+            self.log(f"{asset} sin tendencia")
             return None
+
+
+        price=close.iloc[-1]
+        ema20_now=ema20.iloc[-1]
+
+        # retroceso
+        if abs(price-ema20_now)/price<0.0015:
+            score+=20
 
         rsi_now=rsi.iloc[-1]
 
-        if trend=="CALL" and rsi_now>70:
-            self.log(f"{asset} sobrecomprado")
+        # fuerza
+        if signal=="CALL" and 45<rsi_now<65:
+            score+=20
+
+        if signal=="PUT" and 35<rsi_now<55:
+            score+=20
+
+
+        last_open=df["open"].iloc[-1]
+        last_close=df["close"].iloc[-1]
+
+        # vela confirmación
+        if signal=="CALL" and last_close>last_open:
+            score+=15
+
+        if signal=="PUT" and last_close<last_open:
+            score+=15
+
+        body=abs(last_close-last_open)
+
+        if body/price>0.0005:
+            score+=15
+
+
+        prob=score
+
+        if prob<75:
+
+            self.log(f"{asset} señal débil {prob}%")
+
             return None
 
-        if trend=="PUT" and rsi_now<30:
-            self.log(f"{asset} sobrevendido")
-            return None
 
         now=datetime.now(ecuador)
 
@@ -123,10 +145,13 @@ class IQBot:
 
         expiry=entry+timedelta(minutes=5)
 
+        self.log(f"{asset} señal fuerte {prob}%")
+
         return {
 
             "asset":asset,
-            "signal":trend,
+            "signal":signal,
+            "prob":prob,
             "entry":entry,
             "expiry":expiry,
             "detected":now
