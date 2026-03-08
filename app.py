@@ -1,7 +1,8 @@
 import streamlit as st
 import html
 from datetime import datetime, timedelta
-from bot import escanear_activos, obtener_todos_activos, REAL_ASSETS, OTC_ASSETS
+import pytz
+from bot import escanear_activos_por_grupos, obtener_todos_activos, REAL_ASSETS, OTC_ASSETS
 from iqoptionapi.stable_api import IQ_Option
 
 st.set_page_config(layout="wide")
@@ -26,14 +27,12 @@ with st.sidebar:
     conjunto_activos = st.selectbox("📊 Conjunto de activos", 
                                     ["Predefinidos (REAL/OTC)", "Todos los disponibles"])
     
-    # Solo mostramos tipo_activos si se eligió predefinidos
     if conjunto_activos == "Predefinidos (REAL/OTC)":
         tipo_activos = st.radio("Tipo", ["REAL", "OTC", "AMBOS"])
     else:
         tipo_activos = "AMBOS"  # Para todos, no aplica filtro
     
-    max_activos = st.number_input("🔢 Máx. activos a escanear", 
-                                  min_value=1, max_value=200, value=20)
+    # NOTA: Se eliminó el campo "Máx. activos"
     
     col1, col2 = st.columns(2)
     with col1:
@@ -51,7 +50,6 @@ if conectar:
             check, reason = API.connect()  # Ajustar según documentación real
             if check:
                 st.session_state.api = API
-                # Limpiar lista de activos al conectar (se obtendrá cuando se necesite)
                 st.session_state.todos_activos = None
                 st.session_state.ultima_senal = None
                 st.session_state.cooldown_until = None
@@ -72,12 +70,12 @@ if desconectar:
 if st.session_state.api is not None:
     st.info("🔌 Conectado. Listo para escanear.")
 
-    # Botón de escaneo con control de cooldown
-    escanear_btn = st.button("🔍 Escanear ahora", disabled=st.session_state.cooldown_until and datetime.now() < st.session_state.cooldown_until)
+    # Botón de escaneo con cooldown (siempre booleano)
+    cooldown_active = st.session_state.cooldown_until is not None and datetime.now() < st.session_state.cooldown_until
+    escanear_btn = st.button("🔍 Escanear ahora", disabled=cooldown_active)
     
     if escanear_btn:
-        # Verificar cooldown (doble verificación)
-        if st.session_state.cooldown_until and datetime.now() < st.session_state.cooldown_until:
+        if cooldown_active:
             st.warning(f"⏳ Cooldown activo. Espera hasta las {st.session_state.cooldown_until.strftime('%H:%M:%S')} para escanear de nuevo.")
         else:
             # Construir lista de activos
@@ -93,38 +91,32 @@ if st.session_state.api is not None:
                         st.session_state.todos_activos = obtener_todos_activos(st.session_state.api)
                 activos = st.session_state.todos_activos
 
-            # Escanear
-            with st.spinner(f"Escaneando {min(len(activos), max_activos)} activos..."):
+            # Escanear por grupos (sin límite de activos)
+            with st.spinner(f"Escaneando {len(activos)} activos en grupos de 20..."):
                 try:
-                    senal = escanear_activos(
+                    senal = escanear_activos_por_grupos(
                         st.session_state.api,
                         activos=activos,
-                        max_activos=int(max_activos),
-                        timeout_seconds=30
+                        batch_size=20,
+                        timeout_seconds=60  # Puedes ajustar
                     )
                     if senal:
                         st.session_state.ultima_senal = senal
                         # Calcular cooldown (entrada + 1 minuto)
-                        entry_time = datetime.strptime(senal['entry'], "%H:%M:%S").time()
-                        now = datetime.now()
-                        entry_dt = datetime.combine(now.date(), entry_time)
-                        # Si la entrada ya pasó hoy, asumimos que es para hoy (puede ocurrir si la señal es de un minuto anterior)
-                        if entry_dt < now:
-                            entry_dt = entry_dt + timedelta(days=1)  # podría ser para mañana? mejor usar UTC
-                        # Para evitar problemas, usamos la hora UTC guardada
                         entry_utc = datetime.strptime(senal['entry_utc'], "%Y-%m-%d %H:%M:%S")
                         entry_utc = entry_utc.replace(tzinfo=pytz.UTC)
                         cooldown = entry_utc + timedelta(minutes=1)
                         st.session_state.cooldown_until = cooldown.astimezone(ecuador)
+                        st.success("✅ Señal encontrada!")
                     else:
-                        st.warning("No se encontraron señales con probabilidad ≥80% en esta ronda.")
+                        st.warning("No se encontraron señales con probabilidad ≥80% después de revisar todos los activos.")
                 except Exception as e:
                     st.error(f"Error durante el escaneo: {e}")
 
     # Mostrar última señal si existe
     if st.session_state.ultima_senal:
         signal = st.session_state.ultima_senal
-        # Determinar tipo de activo para el badge
+        # Determinar tipo de activo
         asset = signal['asset']
         if "-OTC" in asset:
             tipo_mostrar = "OTC"
@@ -133,10 +125,8 @@ if st.session_state.api is not None:
             tipo_mostrar = "REAL"
             asset_clean = asset
 
-        # Colores profesionales
         color = "#006400" if signal["direction"] == "CALL" else "#8B0000"
 
-        # Escapar para seguridad
         asset_display = html.escape(f"{asset_clean} {tipo_mostrar}")
         direction = html.escape(signal['direction'])
         entry = html.escape(signal['entry'])
@@ -163,7 +153,6 @@ if st.session_state.api is not None:
         """
         st.markdown(html_code, unsafe_allow_html=True)
 
-        # Mostrar información UTC en expander
         with st.expander("📅 Ver detalles UTC"):
             st.write(f"**Entrada UTC:** {signal['entry_utc']}")
             st.write(f"**Expiración UTC:** {signal['expiry_utc']}")
