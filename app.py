@@ -25,7 +25,7 @@ if 'activos_reales' not in st.session_state:
 if 'activos_otc' not in st.session_state:
     st.session_state.activos_otc = []
 if 'señales_activas' not in st.session_state:
-    st.session_state.señales_activas = []  # Lista de dicts con señal + estado
+    st.session_state.señales_activas = []
 if 'escaneando' not in st.session_state:
     st.session_state.escaneando = False
 if 'indice_activo' not in st.session_state:
@@ -44,14 +44,14 @@ with st.sidebar:
     email = st.text_input("📧 Email")
     password = st.text_input("🔑 Password", type="password")
 
-    # Umbral de fuerza mínima para considerar una señal
-    umbral_fuerza = st.slider("🎯 Fuerza mínima para mostrar (%)", 0, 100, 40, 5)
+    # Umbral de fuerza mínima para mostrar señal
+    umbral_fuerza = st.slider("🎯 Fuerza mínima para mostrar (%)", 0, 100, 30, 5)
 
     # Número máximo de tarjetas a mostrar
     max_tarjetas = 4
 
     # Tiempo de espera entre rondas completas (segundos)
-    pausa_entre_rondas = st.number_input("⏱️ Pausa entre rondas (seg)", min_value=5, max_value=120, value=20)
+    pausa_entre_rondas = st.number_input("⏱️ Pausa entre rondas (seg)", min_value=5, max_value=120, value=15)
 
     col1, col2 = st.columns(2)
     with col1:
@@ -119,20 +119,24 @@ if st.session_state.api is not None:
     else:
         st.warning(f"⚠️ Mercado REAL cerrado - Solo OTC ({otc_count} disponibles)")
 
-    # --- SECCIÓN DE SEÑALES ACTIVAS (hasta 4 tarjetas) ---
+    # --- SECCIÓN DE SEÑALES ACTIVAS ---
     st.subheader(f"📊 Señales activas (máx {max_tarjetas})")
 
-    # Eliminar señales que ya perdieron validez (por tiempo o fuerza)
+    # Eliminar señales que ya perdieron validez
     now = datetime.now(ecuador)
     señales_vigentes = []
     for senal in st.session_state.señales_activas:
-        # Si ya fue confirmada y la hora de entrada ya pasó, se considera expirada
-        if senal.get('confirmada', False) and senal['entry_time'] <= now:
+        # Si está confirmada y la hora de entrada ya pasó, se considera ejecutada
+        if senal.get('estado') == 'CONFIRMADA' and senal['entry_time'] <= now:
             st.session_state.historial.append(f"🗑️ Señal ejecutada: {senal['asset']}")
             continue
-        # Si no está confirmada pero pasó mucho tiempo (ej. 10 min) desde que se creó, se puede eliminar
-        # (opcional, para no acumular)
-        if not senal.get('confirmada', False) and (now - senal['creacion']).total_seconds() > 600:  # 10 min
+        # Si está en pre-entrada (PREPARANDO) y la hora de entrada ya pasó, pasa a confirmada (esto no debería pasar porque se actualiza)
+        if senal.get('estado') == 'PREPARANDO' and senal['entry_time'] <= now:
+            # Cambiar a confirmada
+            senal['estado'] = 'CONFIRMADA'
+            # No se elimina
+        # Si está en espera y ha pasado mucho tiempo (10 min) sin activarse, se elimina
+        if senal.get('estado') == 'ESPERA' and (now - senal['creacion']).total_seconds() > 600:
             st.session_state.historial.append(f"⏳ Señal caducada por espera: {senal['asset']}")
             continue
         señales_vigentes.append(senal)
@@ -140,9 +144,10 @@ if st.session_state.api is not None:
 
     # Mostrar tarjetas
     if st.session_state.señales_activas:
-        # Ordenar: primero las confirmadas (listas para operar), luego por fuerza
+        # Prioridad: confirmadas, luego preparando, luego espera, y por fuerza
         def prioridad(s):
-            return (1 if s.get('confirmada', False) else 0, s['fuerza'])
+            orden = {'CONFIRMADA': 3, 'PREPARANDO': 2, 'ESPERA': 1}
+            return (orden.get(s.get('estado', 'ESPERA'), 0), s['fuerza'])
         señales_ordenadas = sorted(st.session_state.señales_activas, key=prioridad, reverse=True)[:max_tarjetas]
 
         cols = st.columns(len(señales_ordenadas))
@@ -159,19 +164,38 @@ if st.session_state.api is not None:
                 color = "#006400" if senal['direccion'] == "CALL" else "#8B0000"
 
                 # Determinar estado visual
-                if senal.get('confirmada', False):
+                estado = senal.get('estado', 'ESPERA')
+                if estado == 'CONFIRMADA':
                     estado_texto = "✅ CONFIRMADO - ENTRA AHORA"
-                    countdown = ""  # No necesario
-                else:
+                    # Mostrar hora de entrada
+                    entry_show = senal['entry']
+                    expiry_show = senal['expiry']
+                    # Calcular tiempo restante para la entrada (si es futuro)
+                    if senal['entry_time'] > now:
+                        resto = (senal['entry_time'] - now).total_seconds()
+                        mins, secs = divmod(int(resto), 60)
+                        countdown = f" (en {mins}m {secs}s)"
+                    else:
+                        countdown = " (YA)"
+                elif estado == 'PREPARANDO':
+                    estado_texto = f"⏳ ENTRADA EN 1 MINUTO - {senal['entry']}"
+                    entry_show = senal['entry']
+                    expiry_show = senal['expiry']
+                    resto = (senal['entry_time'] - now).total_seconds()
+                    if resto > 0:
+                        mins, secs = divmod(int(resto), 60)
+                        countdown = f" (faltan {mins}m {secs}s)"
+                    else:
+                        countdown = " (YA)"
+                else:  # ESPERA
                     estado_texto = "⏳ ESPERANDO RETROCESO"
-                    # Tiempo de espera (opcional)
+                    entry_show = "---"
+                    expiry_show = "---"
                     countdown = ""
 
                 asset_display = html.escape(f"{asset_clean} {tipo_mostrar}")
                 direccion = html.escape(senal['direccion'])
                 estrategia = html.escape(senal['estrategia'])
-                entry = html.escape(senal['entry']) if senal.get('confirmada', False) else "---"
-                expiry = html.escape(senal['expiry']) if senal.get('confirmada', False) else "---"
                 fuerza = html.escape(str(senal['fuerza']))
 
                 html_code = f"""
@@ -180,9 +204,9 @@ if st.session_state.api is not None:
                     <p style="color:{color}; font-size:1.5rem; margin:5px 0;">{direccion}</p>
                     <p><strong>Estrategia:</strong> {estrategia}</p>
                     <p><strong>Fuerza:</strong> {fuerza}%</p>
-                    <p><strong>Entrada:</strong> {entry}</p>
-                    <p><strong>Expira:</strong> {expiry}</p>
-                    <p><strong>Estado:</strong> {estado_texto}</p>
+                    <p><strong>Entrada:</strong> {entry_show}</p>
+                    <p><strong>Expira:</strong> {expiry_show}</p>
+                    <p><strong>Estado:</strong> {estado_texto}{countdown}</p>
                 </div>
                 """
                 st.markdown(html_code, unsafe_allow_html=True)
@@ -191,8 +215,8 @@ if st.session_state.api is not None:
 
     # Historial
     if st.session_state.historial:
-        with st.expander("📋 Historial de análisis", expanded=False):
-            for linea in st.session_state.historial[-20:]:
+        with st.expander("📋 Historial de análisis", expanded=True):
+            for linea in st.session_state.historial[-30:]:
                 st.text(linea)
 
     # Lógica de escaneo continuo
@@ -219,6 +243,7 @@ if st.session_state.api is not None:
             st.markdown(f"### 🔍 Analizando: {tipo} {asset}")
 
             try:
+                # Añadir línea de análisis
                 st.session_state.historial.append(f"{tipo} Analizando {asset}...")
 
                 candles = st.session_state.api.get_candles(asset, 60, 100, time.time())
@@ -242,21 +267,22 @@ if st.session_state.api is not None:
                 indicators = calcular_indicadores(df)
                 señales_encontradas = evaluar_estrategias(indicators)
 
-                # Determinar la mejor señal para este activo
+                # Mostrar en historial los valores clave para depuración
+                debug_msg = f"📊 {asset}: ADX={indicators['adx']:.1f}, RSI={indicators['rsi']:.1f}, Vol rel={indicators['vol_actual']/indicators['vol_promedio']:.2f}, cerca Sop={indicators['cerca_soporte']}, cerca Res={indicators['cerca_resistencia']}"
+                st.session_state.historial.append(debug_msg)
+
                 mejor_senal = None
                 if señales_encontradas:
                     mejor_senal = max(señales_encontradas, key=lambda x: x['fuerza'])
 
-                # Obtener hora actual del servidor
+                # Obtener hora del servidor
                 try:
                     server_time = st.session_state.api.get_server_time()
                     now_utc = datetime.fromtimestamp(server_time, tz=pytz.UTC)
                 except:
                     now_utc = datetime.now(pytz.UTC)
-
                 now_local = now_utc.astimezone(ecuador)
 
-                # Buscar si el activo ya tiene una señal activa
                 señal_existente = next((s for s in st.session_state.señales_activas if s['asset'] == asset), None)
 
                 if mejor_senal and mejor_senal['fuerza'] >= umbral_fuerza:
@@ -266,23 +292,26 @@ if st.session_state.api is not None:
                         señal_existente['fuerza'] = mejor_senal['fuerza']
                         señal_existente['estrategia'] = mejor_senal['estrategia']
                         señal_existente['direccion'] = mejor_senal['direccion']
-                        # No cambiar confirmación si ya estaba confirmada
-                        if not señal_existente.get('confirmada', False):
-                            # Evaluar punto de entrada
+                        # Si está en espera, verificar si se alcanza punto de entrada
+                        if señal_existente.get('estado') == 'ESPERA':
                             if evaluar_punto_entrada(indicators, mejor_senal['direccion']):
-                                señal_existente['confirmada'] = True
-                                # Fijar hora de entrada ahora
-                                entrada_dt = now_utc + timedelta(minutes=1)  # 1 minuto para prepararse
+                                # Punto de entrada alcanzado: pasar a PREPARANDO con entrada en 1 minuto
+                                entrada_dt = now_utc + timedelta(minutes=1)
                                 entrada_dt = entrada_dt.replace(second=0, microsecond=0)
                                 expiry_dt = entrada_dt + timedelta(minutes=5)
+                                señal_existente['estado'] = 'PREPARANDO'
                                 señal_existente['entry'] = entrada_dt.astimezone(ecuador).strftime("%H:%M:%S")
                                 señal_existente['expiry'] = expiry_dt.astimezone(ecuador).strftime("%H:%M:%S")
                                 señal_existente['entry_time'] = entrada_dt.astimezone(ecuador)
-                                st.session_state.historial.append(f"✅ Confirmada entrada para {asset} a las {señal_existente['entry']}")
-                            # Si no se confirma, se mantiene en espera
-                        # La señal existente se actualiza, no se crea duplicado
+                                st.session_state.historial.append(f"⏳ {asset}: punto de entrada alcanzado, operar a las {señal_existente['entry']}")
+                        elif señal_existente.get('estado') == 'PREPARANDO':
+                            # Si ya está en preparando, verificar si ya es hora de confirmar
+                            if señal_existente['entry_time'] <= now_local:
+                                señal_existente['estado'] = 'CONFIRMADA'
+                                st.session_state.historial.append(f"✅ {asset}: ¡ENTRA AHORA!")
+                        # Si está confirmada, no hacemos nada (ya se operó)
                     else:
-                        # Nueva señal, aún no confirmada
+                        # Nueva señal, estado inicial ESPERA
                         nueva_senal = {
                             "asset": asset,
                             "direccion": mejor_senal['direccion'],
@@ -291,7 +320,7 @@ if st.session_state.api is not None:
                             "entry": "---",
                             "expiry": "---",
                             "entry_time": None,
-                            "confirmada": False,
+                            "estado": "ESPERA",
                             "creacion": now_local
                         }
                         st.session_state.señales_activas.append(nueva_senal)
@@ -299,18 +328,20 @@ if st.session_state.api is not None:
                 else:
                     # No hay señal válida para este activo
                     if señal_existente:
-                        # Eliminar la señal si existe
-                        st.session_state.señales_activas.remove(señal_existente)
-                        st.session_state.historial.append(f"❌ Señal eliminada: {asset} (dejó de cumplir)")
+                        # Eliminar la señal si existe (excepto si ya está confirmada o preparando? mejor eliminarla porque perdió fuerza)
+                        # Pero si está confirmada, no debería eliminarse aunque ya no cumpla, porque la operación está en curso
+                        if señal_existente.get('estado') not in ['CONFIRMADA', 'PREPARANDO']:
+                            st.session_state.señales_activas.remove(señal_existente)
+                            st.session_state.historial.append(f"❌ Señal eliminada: {asset} (dejó de cumplir)")
 
-                # Después de modificar, ordenar y limitar a las 4 más fuertes (priorizando confirmadas)
-                # Primero separamos confirmadas y no confirmadas
-                confirmadas = [s for s in st.session_state.señales_activas if s.get('confirmada', False)]
-                no_confirmadas = [s for s in st.session_state.señales_activas if not s.get('confirmada', False)]
-                # Ordenar no confirmadas por fuerza
-                no_confirmadas.sort(key=lambda x: x['fuerza'], reverse=True)
-                # Unir: todas las confirmadas (sin límite) más las no confirmadas hasta completar max_tarjetas
-                final = confirmadas + no_confirmadas[:max_tarjetas - len(confirmadas)]
+                # Reordenar y limitar a máximo de tarjetas
+                # Priorizamos las confirmadas y preparando sobre las de espera
+                confirmadas = [s for s in st.session_state.señales_activas if s.get('estado') == 'CONFIRMADA']
+                preparando = [s for s in st.session_state.señales_activas if s.get('estado') == 'PREPARANDO']
+                espera = [s for s in st.session_state.señales_activas if s.get('estado') == 'ESPERA']
+                espera.sort(key=lambda x: x['fuerza'], reverse=True)
+                # Primero todas las confirmadas, luego todas las preparando, luego las espera hasta completar
+                final = confirmadas + preparando + espera[:max_tarjetas - len(confirmadas) - len(preparando)]
                 st.session_state.señales_activas = final
 
                 time.sleep(0.25)
