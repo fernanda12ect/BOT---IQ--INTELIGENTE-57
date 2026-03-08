@@ -1,134 +1,159 @@
-from iqoptionapi.stable_api import IQ_Option
-import pandas as pd
-from datetime import datetime, timedelta
+import streamlit as st
+from bot import IQBot
+from datetime import datetime
 import pytz
 import time
 
-ecuador = pytz.timezone("America/Guayaquil")
+ecuador=pytz.timezone("America/Guayaquil")
 
-class IQBot:
+st.set_page_config(layout="wide")
 
-    def __init__(self,email,password,log):
-        self.email=email
-        self.password=password
-        self.log=log
-        self.API=None
+st.title("🤖 IQ OPTION AUTO SCANNER PRO")
 
-    def connect(self):
+if "logs" not in st.session_state:
+    st.session_state.logs=[]
 
-        try:
-            self.API=IQ_Option(self.email,self.password)
-            self.API.connect()
+if "signals" not in st.session_state:
+    st.session_state.signals={}
 
-            if self.API.check_connect():
-                self.log("Conectado a IQ Option")
-                return True
-            else:
-                self.log("Error conectando")
-                return False
-        except:
-            self.log("Error conexión")
-            return False
+if "assets" not in st.session_state:
+    st.session_state.assets=[]
 
-    def get_balance(self):
-        try:
-            return self.API.get_balance()
-        except:
-            return 0
+if "index" not in st.session_state:
+    st.session_state.index=0
 
-    def get_assets(self):
+def log(msg):
 
-        activos=set()
+    now=datetime.now(ecuador).strftime("%H:%M:%S")
 
-        try:
-            all_assets=self.API.get_all_open_time()
+    st.session_state.logs.insert(0,f"[{now}] {msg}")
 
-            for tipo in all_assets:
+with st.sidebar:
 
-                for asset,data in all_assets[tipo].items():
+    st.header("Conexión")
 
-                    if data["open"]:
-                        activos.add(asset)
+    email=st.text_input("Email")
 
-        except:
-            pass
+    password=st.text_input("Password",type="password")
 
-        return list(activos)
+    if st.button("Conectar"):
 
-    def get_candles(self,asset):
+        bot=IQBot(email,password,log)
 
-        try:
+        if bot.connect():
 
-            candles=self.API.get_candles(asset,60,100,time.time())
+            st.session_state.bot=bot
 
-            df=pd.DataFrame(candles)
+            st.session_state.assets=bot.get_assets()
 
-            return df
+            log("Escáner iniciado")
 
-        except:
-            return None
+        else:
+
+            st.error("Error conexión")
+
+if "bot" in st.session_state:
+
+    bot=st.session_state.bot
+
+    assets=st.session_state.assets
+
+    if len(assets)>0:
+
+        asset=assets[st.session_state.index%len(assets)]
+
+        log(f"Analizando {asset}")
+
+        result=bot.analyze(asset)
+
+        if result:
+
+            name=result["asset"]
+
+            if name not in st.session_state.signals:
+
+                st.session_state.signals[name]=result
+
+                log(f"SEÑAL {name} {result['signal']} operar {result['entry'].strftime('%H:%M:%S')}")
+
+        st.session_state.index+=1
 
 
-    def analyze(self,asset):
+signals=list(st.session_state.signals.values())
 
-        df=self.get_candles(asset)
+cols=st.columns(4)
 
-        if df is None:
-            return None
+remove=[]
 
-        if len(df)<50:
-            return None
+for i,signal in enumerate(signals[:4]):
 
-        close=df["close"]
+    entry=signal["entry"]
 
-        ema20=close.ewm(span=20).mean()
-        ema50=close.ewm(span=50).mean()
+    expiry=signal["expiry"]
 
-        delta=close.diff()
+    now=datetime.now(ecuador)
 
-        gain=(delta.where(delta>0,0)).rolling(14).mean()
-        loss=(-delta.where(delta<0,0)).rolling(14).mean()
+    remaining=(entry-now).total_seconds()
 
-        rs=gain/loss
+    if remaining<=0:
+        remove.append(signal["asset"])
+        continue
 
-        rsi=100-(100/(1+rs))
+    minutes=int(remaining//60)
+    seconds=int(remaining%60)
 
-        trend=None
+    countdown=f"{minutes:02}:{seconds:02}"
 
-        if ema20.iloc[-1]>ema50.iloc[-1]:
-            trend="CALL"
+    if signal["signal"]=="CALL":
+        color="#00ff88"
+        bg="#002b22"
+    else:
+        color="#ff4b4b"
+        bg="#2b0000"
 
-        if ema20.iloc[-1]<ema50.iloc[-1]:
-            trend="PUT"
+    with cols[i]:
 
-        if trend is None:
-            self.log(f"{asset} sin tendencia clara")
-            return None
+        st.markdown(f"""
+        <div style="
+        background:{bg};
+        border-radius:15px;
+        padding:25px;
+        text-align:center;
+        border:3px solid {color};
+        ">
 
-        rsi_now=rsi.iloc[-1]
+        <h2>{signal["asset"]}</h2>
 
-        if trend=="CALL" and rsi_now>70:
-            self.log(f"{asset} sobrecomprado")
-            return None
+        <h1 style="color:{color}">
+        {signal["signal"]}
+        </h1>
 
-        if trend=="PUT" and rsi_now<30:
-            self.log(f"{asset} sobrevendido")
-            return None
+        <h3>OPERAR A LAS</h3>
 
-        now=datetime.now(ecuador)
+        <h2>
+        {entry.strftime('%H:%M:%S')}
+        </h2>
 
-        entry=now+timedelta(minutes=1)
+        <h3>EXPIRA</h3>
 
-        entry=entry.replace(second=0,microsecond=0)
+        <h2>
+        {expiry.strftime('%H:%M:%S')}
+        </h2>
 
-        expiry=entry+timedelta(minutes=5)
+        <h2>⏳ {countdown}</h2>
 
-        return {
+        </div>
+        """,unsafe_allow_html=True)
 
-            "asset":asset,
-            "signal":trend,
-            "entry":entry,
-            "expiry":expiry,
-            "detected":now
 
-        }
+for r in remove:
+    del st.session_state.signals[r]
+
+st.subheader("Historial del Scanner")
+
+for l in st.session_state.logs[:30]:
+    st.text(l)
+
+time.sleep(1)
+
+st.rerun()
