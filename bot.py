@@ -1,22 +1,16 @@
 import time
-import json
 import pandas as pd
 from iqoptionapi.stable_api import IQ_Option
 
 
-class TradingBot:
+class IQBot:
 
-    def __init__(self,email,password):
+    def __init__(self,email,password,logger):
 
         self.email=email
         self.password=password
         self.API=None
-        self.running=False
-
-
-    def log(self,msg):
-
-        print(f"[BOT] {msg}")
+        self.log=logger
 
 
     def connect(self):
@@ -29,15 +23,14 @@ class TradingBot:
 
             if check:
 
-                self.log("Conectado correctamente a IQ Option")
-
-                self.API.change_balance("PRACTICE")
+                self.log("Conectado a IQ Option")
 
                 return True
 
             else:
 
                 self.log(f"Error conexión: {reason}")
+
                 return False
 
         except Exception as e:
@@ -45,6 +38,14 @@ class TradingBot:
             self.log("Error conectando")
             self.log(str(e))
             return False
+
+
+    def get_balance(self):
+
+        try:
+            return self.API.get_balance()
+        except:
+            return 0
 
 
     def get_assets(self):
@@ -65,9 +66,10 @@ class TradingBot:
 
             return activos
 
-        except Exception as e:
+        except:
 
             self.log("Error obteniendo activos")
+
             return []
 
 
@@ -81,17 +83,16 @@ class TradingBot:
 
             return df
 
-        except Exception as e:
+        except:
 
-            self.log(f"Error obteniendo velas {asset}")
+            self.log(f"Error velas {asset}")
+
             return None
 
 
     def analyze(self,asset):
 
         try:
-
-            self.log(f"Analizando {asset}")
 
             df=self.get_candles(asset)
 
@@ -102,73 +103,21 @@ class TradingBot:
             close=df["close"]
 
             sma_fast=close.rolling(5).mean()
+
             sma_slow=close.rolling(10).mean()
 
             if sma_fast.iloc[-1] > sma_slow.iloc[-1]:
 
-                return "call"
+                return "CALL"
 
             elif sma_fast.iloc[-1] < sma_slow.iloc[-1]:
 
-                return "put"
+                return "PUT"
 
             return None
 
-        except Exception as e:
+        except:
 
             self.log(f"Error analizando {asset}")
+
             return None
-
-
-    def trade(self,asset,action):
-
-        try:
-
-            amount=1
-            duration=1
-
-            check,id=self.API.buy(amount,asset,action,duration)
-
-            if check:
-
-                self.log(f"Trade ejecutado {asset} {action}")
-
-            else:
-
-                self.log(f"Trade falló {asset}")
-
-        except Exception as e:
-
-            self.log("Error ejecutando trade")
-
-
-    def start(self):
-
-        self.running=True
-
-        while self.running:
-
-            try:
-
-                activos=self.get_assets()
-
-                for asset in activos:
-
-                    signal=self.analyze(asset)
-
-                    if signal:
-
-                        self.trade(asset,signal)
-
-                    time.sleep(2)
-
-            except Exception as e:
-
-                self.log("Error ciclo bot")
-                time.sleep(5)
-
-
-    def stop(self):
-
-        self.running=False
-        self.log("Bot detenido")
