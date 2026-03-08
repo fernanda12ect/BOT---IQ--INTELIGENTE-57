@@ -42,7 +42,8 @@ def obtener_activos_abiertos(api):
         if es_fin_semana and not otc:
             otc = OTC_ASSETS.copy()
         return real, otc
-    except:
+    except Exception as e:
+        logging.error(f"Error obteniendo activos: {e}")
         return REAL_ASSETS, OTC_ASSETS
 
 # =========================
@@ -51,6 +52,11 @@ def obtener_activos_abiertos(api):
 
 def calcular_indicadores(df):
     df = df.copy()
+    # Asegurar nombres de columnas correctos
+    # La API devuelve: 'open', 'close', 'max', 'min', 'volume'
+    # Renombramos internamente para mayor claridad
+    df.rename(columns={'max': 'high', 'min': 'low'}, inplace=True)
+
     # EMA
     df['ema20'] = df['close'].ewm(span=20).mean()
     df['ema50'] = df['close'].ewm(span=50).mean()
@@ -63,8 +69,8 @@ def calcular_indicadores(df):
     rs = avg_gain / avg_loss
     df['rsi'] = 100 - (100 / (1 + rs))
     # ATR
-    high = df['max']
-    low = df['min']
+    high = df['high']
+    low = df['low']
     close = df['close']
     tr = pd.concat([high - low, abs(high - close.shift()), abs(low - close.shift())], axis=1).max(axis=1)
     df['atr'] = tr.rolling(14).mean()
@@ -96,8 +102,8 @@ def calcular_indicadores(df):
 
     return {
         'close': last['close'],
-        'high': last['max'],
-        'low': last['min'],
+        'high': last['high'],
+        'low': last['low'],
         'ema20': last['ema20'],
         'ema50': last['ema50'],
         'adx': last['adx'],
@@ -106,7 +112,7 @@ def calcular_indicadores(df):
         'tendencia': tendencia,
         'fuerza': fuerza,
         'volumen_rel': vol_now / vol_avg if vol_avg else 1,
-        'df': df
+        'df': df  # df ya con columnas renombradas
     }
 
 # =========================
@@ -117,6 +123,7 @@ def calcular_nivel_retroceso(df, tendencia):
     """
     Para tendencia alcista: retroceso 38.2% del último movimiento alcista.
     Para tendencia bajista: retroceso 38.2% del último movimiento bajista.
+    df debe tener columnas 'high' y 'low'.
     """
     df = df.iloc[-50:].copy()
     if tendencia == "CALL":
