@@ -72,7 +72,8 @@ def obtener_activos_abiertos(api):
 
 def calcular_indicadores(df):
     """
-    Calcula todos los indicadores comunes para la última vela y devuelve un dict con los valores.
+    Calcula todos los indicadores comunes y devuelve un dict con los valores de la última vela
+    y también las últimas 5 velas para análisis de punto de entrada.
     """
     df = df.copy()
 
@@ -119,6 +120,13 @@ def calcular_indicadores(df):
     df['dx'] = 100 * (abs(df['plus_di'] - df['minus_di']) / (df['plus_di'] + df['minus_di']))
     df['adx'] = df['dx'].rolling(14).mean()
 
+    # Últimas 5 velas para análisis de punto de entrada
+    ultimas_5 = df.iloc[-5:].copy()
+    ultimas_5['body'] = abs(ultimas_5['close'] - ultimas_5['open'])
+    ultimas_5['rango'] = ultimas_5['max'] - ultimas_5['min']
+    ultimas_5['candle_bullish'] = ultimas_5['close'] > ultimas_5['open']
+    ultimas_5['volumen_rel'] = ultimas_5['volume'] / ultimas_5['vol_ma20']
+
     # Última fila
     last = df.iloc[-1]
 
@@ -139,20 +147,15 @@ def calcular_indicadores(df):
     # Detectar soportes y resistencias simples (máximos y mínimos de las últimas 20 velas)
     soporte = df['min'].rolling(20).min().iloc[-1]
     resistencia = df['max'].rolling(20).max().iloc[-1]
-    # Distancia relativa (ajustable según el activo)
+    # Distancia relativa
     distancia_soporte = abs(last['close'] - soporte) / (last['close'] + 1e-10)
     distancia_resistencia = abs(last['close'] - resistencia) / (last['close'] + 1e-10)
-    cerca_soporte = distancia_soporte < 0.001  # 0.1% de distancia
+    cerca_soporte = distancia_soporte < 0.001
     cerca_resistencia = distancia_resistencia < 0.001
 
-    # Calcular el tamaño de las últimas velas para detectar agotamiento
-    # Tomamos las últimas 3 velas
-    ultimas_velas = df.tail(3)
-    cuerpos = abs(ultimas_velas['close'] - ultimas_velas['open'])
-    rangos = ultimas_velas['max'] - ultimas_velas['min']
-    # Velas pequeñas: cuerpo < 30% del rango
-    velas_pequenas = (cuerpos / (rangos + 1e-10)) < 0.3
-    agotamiento = velas_pequenas.all()  # True si las últimas 3 son pequeñas
+    # Determinar niveles de soporte/resistencia cercanos (últimos 20)
+    # Para punto de entrada, necesitamos saber si hay soporte cerca en tendencia bajista, etc.
+    # Esto se usará en la función de punto de entrada
 
     return {
         'close': last['close'],
@@ -178,9 +181,58 @@ def calcular_indicadores(df):
         'resistencia': resistencia,
         'cerca_soporte': cerca_soporte,
         'cerca_resistencia': cerca_resistencia,
-        'agotamiento': agotamiento,  # Indicador de posible retroceso agotado
+        'ultimas_velas': ultimas_5.to_dict('records'),  # para punto de entrada
         'df': df
     }
+
+# =========================
+# EVALUAR PUNTO DE ENTRADA (retroceso agotado)
+# =========================
+
+def evaluar_punto_entrada(indicators, direccion):
+    """
+    Determina si se ha alcanzado el punto de entrada ideal.
+    Para CALL (compra): se espera que después de un retroceso bajista, las velas de bajada sean pequeñas y con bajo volumen,
+    y que la última vela muestre fuerza alcista.
+    Para PUT (venta): similar pero con retroceso alcista.
+    Retorna True si se cumplen las condiciones.
+    """
+    velas = indicators['ultimas_velas']
+    if len(velas) < 3:
+        return False
+
+    # Dirección principal de la tendencia
+    if direccion == "CALL":  # Tendencia alcista, buscamos agotamiento de vendedores
+        # Buscar si ha habido un retroceso (velas bajistas) en las últimas velas
+        retroceso_detectado = False
+        for v in velas[-3:]:
+            if not v['candle_bullish'] and v['body'] > 0:  # vela bajista
+                retroceso_detectado = True
+                break
+        if not retroceso_detectado:
+            return False  # No ha habido retroceso, no es punto de entrada
+
+        # Verificar que las velas bajistas recientes sean pequeñas y con bajo volumen
+        # y que la última vela sea alcista con volumen
+        ultima = velas[-1]
+        if ultima['candle_bullish'] and ultima['body'] > 0 and ultima['volumen_rel'] > 1.2:
+            # Además, comprobar que no haya soporte fuerte muy cerca (que podría detener la subida)
+            if indicators['close'] - indicators['soporte'] > 0.001 * indicators['close']:  # no demasiado cerca
+                return True
+    else:  # PUT, tendencia bajista, buscamos agotamiento de compradores
+        retroceso_detectado = False
+        for v in velas[-3:]:
+            if v['candle_bullish'] and v['body'] > 0:  # vela alcista (retroceso)
+                retroceso_detectado = True
+                break
+        if not retroceso_detectado:
+            return False
+
+        ultima = velas[-1]
+        if not ultima['candle_bullish'] and ultima['body'] > 0 and ultima['volumen_rel'] > 1.2:
+            if indicators['resistencia'] - indicators['close'] > 0.001 * indicators['close']:
+                return True
+    return False
 
 # =========================
 # ESTRATEGIA 1: SOPORTE Y RESISTENCIA FUERTE
@@ -189,23 +241,19 @@ def calcular_indicadores(df):
 def estrategia_soporte_resistencia(indicators):
     """
     Retorna (dirección, fuerza, nombre_estrategia) si se cumplen condiciones.
-    fuerza: 0-100
     """
     fuerza = 0
     direccion = None
     nombre = "Soporte/Resistencia Fuerte"
 
-    # Condiciones para CALL (cerca de soporte, vela alcista fuerte, volumen alto)
     if indicators['cerca_soporte'] and indicators['candle_bullish'] and indicators['strong_candle'] and indicators['strong_volume']:
         direccion = "CALL"
         fuerza = 60 + (10 if indicators['very_strong_volume'] else 0) + (10 if indicators['candle_bullish'] else 0)
-    # Condiciones para PUT (cerca de resistencia, vela bajista fuerte, volumen alto)
     elif indicators['cerca_resistencia'] and not indicators['candle_bullish'] and indicators['strong_candle'] and indicators['strong_volume']:
         direccion = "PUT"
         fuerza = 60 + (10 if indicators['very_strong_volume'] else 0) + (10 if not indicators['candle_bullish'] else 0)
 
     if direccion:
-        # Normalizar fuerza a máximo 100
         fuerza = min(fuerza, 100)
         return direccion, fuerza, nombre
     return None
@@ -225,7 +273,7 @@ def estrategia_tendencia_adx(indicators):
     if adx < 50:
         return None
 
-    fuerza = adx  # El ADX ya es un porcentaje de fuerza
+    fuerza = adx
     direccion = None
     nombre = "Tendencia Fuerte + ADX"
 
@@ -236,7 +284,6 @@ def estrategia_tendencia_adx(indicators):
     else:
         return None
 
-    # Volumen alto refuerza
     if indicators['strong_volume']:
         fuerza = min(fuerza + 10, 100)
 
@@ -254,11 +301,9 @@ def estrategia_reversion_bb_rsi(indicators):
     nombre = "Reversión BB + RSI"
     fuerza = 0
 
-    # Condiciones para CALL (sobreventa, banda inferior, vela de reversión alcista)
     if indicators['rsi'] < 25 and indicators['close'] <= indicators['bb_lower'] and indicators['candle_bullish'] and indicators['very_strong_volume']:
         direccion = "CALL"
         fuerza = 70 + (10 if indicators['strong_candle'] else 0)
-    # Condiciones para PUT (sobrecompra, banda superior, vela de reversión bajista)
     elif indicators['rsi'] > 75 and indicators['close'] >= indicators['bb_upper'] and not indicators['candle_bullish'] and indicators['very_strong_volume']:
         direccion = "PUT"
         fuerza = 70 + (10 if indicators['strong_candle'] else 0)
@@ -269,7 +314,7 @@ def estrategia_reversion_bb_rsi(indicators):
     return None
 
 # =========================
-# ESTRATEGIA 4: IMBALANCE + NIVELES OCULTOS (versión simplificada)
+# ESTRATEGIA 4: IMBALANCE + NIVELES OCULTOS
 # =========================
 
 def estrategia_imbalance(indicators):
@@ -300,7 +345,7 @@ def estrategia_imbalance(indicators):
     return None
 
 # =========================
-# EVALUADOR PRINCIPAL (llama a todas las estrategias)
+# EVALUADOR PRINCIPAL
 # =========================
 
 def evaluar_estrategias(indicators):
@@ -313,41 +358,20 @@ def evaluar_estrategias(indicators):
     if res1:
         direccion, fuerza, nombre = res1
         señales.append({'direccion': direccion, 'fuerza': fuerza, 'estrategia': nombre})
+
     res2 = estrategia_tendencia_adx(indicators)
     if res2:
         direccion, fuerza, nombre = res2
         señales.append({'direccion': direccion, 'fuerza': fuerza, 'estrategia': nombre})
+
     res3 = estrategia_reversion_bb_rsi(indicators)
     if res3:
         direccion, fuerza, nombre = res3
         señales.append({'direccion': direccion, 'fuerza': fuerza, 'estrategia': nombre})
+
     res4 = estrategia_imbalance(indicators)
     if res4:
         direccion, fuerza, nombre = res4
         señales.append({'direccion': direccion, 'fuerza': fuerza, 'estrategia': nombre})
+
     return señales
-
-# =========================
-# DETECCIÓN DE PUNTO DE ENTRADA (AGOTAMIENTO)
-# =========================
-
-def detectar_punto_entrada(indicators, direccion_tendencia):
-    """
-    Dada una dirección de tendencia (CALL o PUT) y los indicadores actuales,
-    determina si se ha alcanzado un punto de entrada ideal (agotamiento del retroceso).
-    Retorna True/False y un mensaje.
-    """
-    # Para tendencia alcista (CALL): esperamos un retroceso bajista que se agote
-    if direccion_tendencia == "CALL":
-        # Condiciones de agotamiento de vendedores:
-        # - Velas pequeñas (agotamiento = True)
-        # - Volumen bajo o decreciente (podríamos comparar con promedio, pero simplificamos)
-        # - El precio no rompe soporte importante (por ejemplo, no está cerca de soporte)
-        # - RSI no está sobrecomprado (opcional)
-        if indicators['agotamiento'] and not indicators['strong_volume'] and not indicators['cerca_soporte']:
-            return True, "Retroceso bajista agotado"
-    elif direccion_tendencia == "PUT":
-        # Para tendencia bajista: esperamos un retroceso alcista que se agote
-        if indicators['agotamiento'] and not indicators['strong_volume'] and not indicators['cerca_resistencia']:
-            return True, "Retroceso alcista agotado"
-    return False, ""
