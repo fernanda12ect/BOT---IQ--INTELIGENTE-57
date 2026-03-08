@@ -14,7 +14,7 @@ from bot import (
 from iqoptionapi.stable_api import IQ_Option
 
 st.set_page_config(layout="wide")
-st.title("🤖 IQ OPTION PRO SIGNAL BOT - ESCANEO 1X1 EN TIEMPO REAL")
+st.title("🤖 IQ OPTION PRO SIGNAL BOT - ESCANEO AUTOMÁTICO AL CONECTAR")
 
 # Inicializar session_state
 if 'api' not in st.session_state:
@@ -57,26 +57,17 @@ with st.sidebar:
     with col2:
         desconectar = st.button("⛔ Desconectar")
 
-    # Botón para iniciar/detener escaneo continuo
-    if st.session_state.api is not None:
-        if not st.session_state.escaneando:
-            iniciar = st.button("▶️ Iniciar escaneo 1x1")
-            if iniciar:
-                # Reiniciar estado
-                real, otc = obtener_activos_abiertos(st.session_state.api)
-                st.session_state.activos_reales = real
-                st.session_state.activos_otc = otc
-                st.session_state.activos_a_escanear = real + otc
-                st.session_state.indice_activo = 0
-                st.session_state.historial = []
-                st.session_state.escaneando = True
-                st.rerun()
-        else:
-            detener = st.button("⏹️ Detener escaneo")
-            if detener:
-                st.session_state.escaneando = False
-                st.session_state.indice_activo = 0
-                st.rerun()
+    # Botón para reiniciar escaneo manualmente (si está detenido)
+    if st.session_state.api is not None and not st.session_state.escaneando:
+        if st.button("▶️ Reiniciar escaneo"):
+            real, otc = obtener_activos_abiertos(st.session_state.api)
+            st.session_state.activos_reales = real
+            st.session_state.activos_otc = otc
+            st.session_state.activos_a_escanear = real + otc
+            st.session_state.indice_activo = 0
+            st.session_state.historial = []
+            st.session_state.escaneando = True
+            st.rerun()
 
 # Lógica de conexión
 if conectar:
@@ -90,8 +81,19 @@ if conectar:
                 st.session_state.api = API
                 st.session_state.ultima_senal = None
                 st.session_state.cooldown_until = None
-                st.session_state.escaneando = False
-                st.success("✅ Conectado a IQ Option")
+
+                # Obtener activos disponibles
+                real, otc = obtener_activos_abiertos(API)
+                st.session_state.activos_reales = real
+                st.session_state.activos_otc = otc
+                st.session_state.activos_a_escanear = real + otc
+                st.session_state.indice_activo = 0
+                st.session_state.historial = []
+                # Iniciar escaneo automáticamente
+                st.session_state.escaneando = True
+
+                st.success("✅ Conectado a IQ Option - Escaneo automático iniciado")
+                st.rerun()
             else:
                 st.error(f"❌ Error de conexión: {reason}")
         except Exception as e:
@@ -104,7 +106,11 @@ if desconectar:
     st.session_state.ultima_senal = None
     st.session_state.cooldown_until = None
     st.session_state.escaneando = False
+    st.session_state.indice_activo = 0
+    st.session_state.activos_a_escanear = []
+    st.session_state.historial = []
     st.success("Desconectado")
+    st.rerun()
 
 # Área principal
 if st.session_state.api is not None:
@@ -288,6 +294,6 @@ if st.session_state.api is not None:
                 st.write(f"**Próximo escaneo permitido:** {st.session_state.cooldown_until.strftime('%H:%M:%S')} (hora Ecuador)")
     else:
         if st.session_state.api is not None and not st.session_state.escaneando:
-            st.info("Presiona 'Iniciar escaneo 1x1' para comenzar.")
+            st.info("Presiona 'Reiniciar escaneo' en la barra lateral para comenzar.")
 else:
     st.warning("🔒 Por favor, conéctate primero desde el panel izquierdo.")
