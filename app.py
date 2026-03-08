@@ -8,13 +8,14 @@ from bot import (
     obtener_activos_abiertos,
     calcular_indicadores,
     evaluar_estrategias,
+    detectar_punto_entrada,
     REAL_ASSETS,
     OTC_ASSETS
 )
 from iqoptionapi.stable_api import IQ_Option
 
 st.set_page_config(layout="wide")
-st.title("🤖 IQ OPTION PRO - 4 ESTRATEGIAS DE 5 MINUTOS")
+st.title("🤖 IQ OPTION PRO - ESTRATEGIA DE TENDENCIA CON PUNTO DE ENTRADA")
 
 # Inicializar session_state
 if 'api' not in st.session_state:
@@ -23,8 +24,8 @@ if 'activos_reales' not in st.session_state:
     st.session_state.activos_reales = []
 if 'activos_otc' not in st.session_state:
     st.session_state.activos_otc = []
-if 'señales_activas' not in st.session_state:
-    st.session_state.señales_activas = []  # Lista de dicts con señal + timestamps
+if 'tarjetas' not in st.session_state:
+    st.session_state.tarjetas = []  # Lista de dicts: {asset, direccion, fuerza, estrategia, estado, entry_time (cuando se activa), expiry_time, timestamp_inicio}
 if 'escaneando' not in st.session_state:
     st.session_state.escaneando = False
 if 'indice_activo' not in st.session_state:
@@ -43,10 +44,10 @@ with st.sidebar:
     email = st.text_input("📧 Email")
     password = st.text_input("🔑 Password", type="password")
 
-    # Umbral de fuerza mínima para considerar una señal (se puede bajar para obtener más señales)
-    umbral_fuerza = st.slider("🎯 Fuerza mínima para mostrar (%)", 0, 100, 30, 5)
+    # Umbral de fuerza mínima para considerar un activo como candidato
+    umbral_fuerza = st.slider("🎯 Fuerza mínima para candidato (%)", 0, 100, 50, 5)
 
-    # Número máximo de tarjetas a mostrar
+    # Número máximo de tarjetas
     max_tarjetas = 4
 
     # Tiempo de espera entre rondas completas (segundos)
@@ -59,14 +60,14 @@ with st.sidebar:
         desconectar = st.button("⛔ Desconectar")
 
     if st.session_state.api is not None and not st.session_state.escaneando:
-        if st.button("▶️ Reiniciar escaneo"):
+        if st.button("▶️ Iniciar escaneo"):
             real, otc = obtener_activos_abiertos(st.session_state.api)
             st.session_state.activos_reales = real
             st.session_state.activos_otc = otc
             st.session_state.activos_a_escanear = real + otc
             st.session_state.indice_activo = 0
             st.session_state.historial = []
-            st.session_state.señales_activas = []
+            st.session_state.tarjetas = []
             st.session_state.escaneando = True
             st.rerun()
 
@@ -87,7 +88,7 @@ if conectar:
                 st.session_state.activos_a_escanear = real + otc
                 st.session_state.indice_activo = 0
                 st.session_state.historial = []
-                st.session_state.señales_activas = []
+                st.session_state.tarjetas = []
                 st.session_state.escaneando = True
                 st.success("✅ Conectado - Escaneo iniciado")
                 st.rerun()
@@ -103,7 +104,7 @@ if desconectar:
     st.session_state.activos_a_escanear = []
     st.session_state.indice_activo = 0
     st.session_state.historial = []
-    st.session_state.señales_activas = []
+    st.session_state.tarjetas = []
     st.session_state.escaneando = False
     st.success("Desconectado")
     st.rerun()
@@ -120,28 +121,27 @@ if st.session_state.api is not None:
     else:
         st.warning(f"⚠️ Mercado REAL cerrado - Solo OTC ({otc_count} disponibles)")
 
-    # --- SECCIÓN DE SEÑALES ACTIVAS (hasta 4 tarjetas) ---
-    st.subheader(f"📊 Señales activas (máx {max_tarjetas})")
+    # --- SECCIÓN DE TARJETAS ACTIVAS ---
+    st.subheader(f"📊 Tarjetas de monitoreo (máx {max_tarjetas})")
 
-    # Eliminar señales cuyo tiempo de entrada ya pasó (por si acaso no se actualizaron)
+    # Eliminar tarjetas cuyo vencimiento ya pasó (por si acaso)
     now = datetime.now(ecuador)
-    señales_vigentes = []
-    for senal in st.session_state.señales_activas:
-        if senal['entry_time'] > now:
-            señales_vigentes.append(senal)
-        else:
-            st.session_state.historial.append(f"🗑️ Señal expirada: {senal['asset']} (hora pasada)")
-    st.session_state.señales_activas = señales_vigentes
+    tarjetas_vigentes = []
+    for tarj in st.session_state.tarjetas:
+        if tarj['estado'] == "ACTIVA" and tarj.get('expiry_time') and tarj['expiry_time'] < now:
+            st.session_state.historial.append(f"🗑️ Operación finalizada: {tarj['asset']}")
+            continue
+        tarjetas_vigentes.append(tarj)
+    st.session_state.tarjetas = tarjetas_vigentes
 
     # Mostrar tarjetas
-    if st.session_state.señales_activas:
-        # Ordenar por fuerza descendente
-        señales_ordenadas = sorted(st.session_state.señales_activas, key=lambda x: x['fuerza'], reverse=True)[:max_tarjetas]
-        cols = st.columns(len(señales_ordenadas))
-        for idx, senal in enumerate(señales_ordenadas):
+    if st.session_state.tarjetas:
+        # Ordenar por fuerza descendente (las más fuertes primero)
+        tarjetas_ordenadas = sorted(st.session_state.tarjetas, key=lambda x: x['fuerza'], reverse=True)
+        cols = st.columns(len(tarjetas_ordenadas))
+        for idx, tarj in enumerate(tarjetas_ordenadas):
             with cols[idx]:
-                # Determinar tipo de activo
-                asset = senal['asset']
+                asset = tarj['asset']
                 if "-OTC" in asset:
                     tipo_mostrar = "📱 OTC"
                     asset_clean = asset.replace("-OTC", "")
@@ -149,39 +149,42 @@ if st.session_state.api is not None:
                     tipo_mostrar = "🌍 REAL"
                     asset_clean = asset
 
-                color = "#006400" if senal['direccion'] == "CALL" else "#8B0000"
-                # Calcular estado
-                estado = "🔵 EN ESPERA" if senal['entry_time'] > now else "🟢 LISTO PARA OPERAR"
-                # Calcular tiempo restante
-                tiempo_restante = (senal['entry_time'] - now).total_seconds()
-                if tiempo_restante > 0:
-                    mins, secs = divmod(int(tiempo_restante), 60)
-                    countdown = f"{mins}m {secs}s"
+                color = "#006400" if tarj['direccion'] == "CALL" else "#8B0000"
+                estado_texto = tarj['estado']
+                if estado_texto == "NEUTRO":
+                    estado_color = "#888"
+                    estado_emoji = "⚪"
+                elif estado_texto == "COMPRAR AHORA":
+                    estado_color = "#00FF00"
+                    estado_emoji = "🟢"
+                elif estado_texto == "VENDER AHORA":
+                    estado_color = "#FF0000"
+                    estado_emoji = "🔴"
                 else:
-                    countdown = "¡YA!"
+                    estado_color = "#888"
+                    estado_emoji = "⚪"
 
-                # Escapar para HTML
-                asset_display = html.escape(f"{asset_clean} {tipo_mostrar}")
-                direccion = html.escape(senal['direccion'])
-                estrategia = html.escape(senal['estrategia'])
-                entry = html.escape(senal['entry'])
-                expiry = html.escape(senal['expiry'])
-                fuerza = html.escape(str(senal['fuerza']))
+                # Mostrar hora de entrada si está activa
+                if estado_texto == "COMPRAR AHORA" or estado_texto == "VENDER AHORA":
+                    hora_entrada = tarj['entry_time'].strftime("%H:%M:%S")
+                    hora_expiry = tarj['expiry_time'].strftime("%H:%M:%S")
+                    info_tiempo = f"Entrada: {hora_entrada} | Expira: {hora_expiry}"
+                else:
+                    info_tiempo = "Esperando punto de entrada..."
 
                 html_code = f"""
                 <div style="background:#111; padding:20px; border-radius:15px; border:3px solid {color}; margin-bottom:10px;">
-                    <h3 style="margin:0;">{asset_display}</h3>
-                    <p style="color:{color}; font-size:1.5rem; margin:5px 0;">{direccion}</p>
-                    <p><strong>Estrategia:</strong> {estrategia}</p>
-                    <p><strong>Fuerza:</strong> {fuerza}%</p>
-                    <p><strong>Entrada:</strong> {entry}</p>
-                    <p><strong>Expira:</strong> {expiry}</p>
-                    <p><strong>Estado:</strong> {estado} ({countdown})</p>
+                    <h3 style="margin:0;">{asset_clean} {tipo_mostrar}</h3>
+                    <p style="color:{color}; font-size:1.5rem; margin:5px 0;">{tarj['direccion']}</p>
+                    <p><strong>Estrategia:</strong> {tarj['estrategia']}</p>
+                    <p><strong>Fuerza:</strong> {tarj['fuerza']}%</p>
+                    <p><strong>Estado:</strong> <span style="color:{estado_color};">{estado_emoji} {estado_texto}</span></p>
+                    <p><small>{info_tiempo}</small></p>
                 </div>
                 """
                 st.markdown(html_code, unsafe_allow_html=True)
     else:
-        st.info("No hay señales activas en este momento.")
+        st.info("No hay activos siendo monitoreados.")
 
     # Historial de análisis
     if st.session_state.historial:
@@ -189,7 +192,7 @@ if st.session_state.api is not None:
             for linea in st.session_state.historial[-20:]:
                 st.text(linea)
 
-    # Lógica de escaneo continuo (solo si está escaneando)
+    # Lógica de escaneo continuo
     if st.session_state.escaneando:
         # Si no hay activos cargados o se terminó la lista, cargar nueva ronda
         if not st.session_state.activos_a_escanear or st.session_state.indice_activo >= len(st.session_state.activos_a_escanear):
@@ -238,62 +241,83 @@ if st.session_state.api is not None:
 
                 # Calcular indicadores
                 indicators = calcular_indicadores(df)
-                señales_encontradas = evaluar_estrategias(indicators)
+                señales = evaluar_estrategias(indicators)
 
-                # Determinar la mejor señal para este activo (la de mayor fuerza)
+                # Si hay señales, tomar la de mayor fuerza
                 mejor_senal = None
-                if señales_encontradas:
-                    mejor_senal = max(señales_encontradas, key=lambda x: x['fuerza'])
+                if señales:
+                    mejor_senal = max(señales, key=lambda x: x['fuerza'])
 
-                # Obtener hora actual del servidor para calcular tiempos
-                try:
-                    server_time = st.session_state.api.get_server_time()
-                    now_utc = datetime.fromtimestamp(server_time, tz=pytz.UTC)
-                except:
-                    now_utc = datetime.now(pytz.UTC)
+                # Verificar si el activo ya está en las tarjetas
+                tarjeta_existente = next((t for t in st.session_state.tarjetas if t['asset'] == asset), None)
 
-                # Calcular tiempos de entrada y expiración (1 minuto después, vencimiento 5 min)
-                entry_dt = now_utc + timedelta(minutes=1)
-                entry_dt = entry_dt.replace(second=0, microsecond=0)
-                expiry_dt = entry_dt + timedelta(minutes=5)
-
-                entry_local = entry_dt.astimezone(ecuador)
-                expiry_local = expiry_dt.astimezone(ecuador)
-
-                # Verificar si el activo ya tiene una señal activa
-                señal_existente = next((s for s in st.session_state.señales_activas if s['asset'] == asset), None)
-
+                # Si hay una señal fuerte y el activo no está en tarjetas, y tenemos espacio, añadirlo
                 if mejor_senal and mejor_senal['fuerza'] >= umbral_fuerza:
-                    # Hay señal válida
-                    nueva_senal = {
-                        "asset": asset,
-                        "direccion": mejor_senal['direccion'],
-                        "fuerza": mejor_senal['fuerza'],
-                        "estrategia": mejor_senal['estrategia'],
-                        "entry": entry_local.strftime("%H:%M:%S"),
-                        "expiry": expiry_local.strftime("%H:%M:%S"),
-                        "entry_time": entry_local,
-                        "expiry_time": expiry_local
-                    }
-
-                    if señal_existente:
-                        # Actualizar la señal existente (si la fuerza es diferente o misma)
-                        st.session_state.señales_activas.remove(señal_existente)
-                        st.session_state.señales_activas.append(nueva_senal)
-                        st.session_state.historial.append(f"🔄 Actualizada señal en {asset} (fuerza {mejor_senal['fuerza']}%)")
+                    if not tarjeta_existente:
+                        if len(st.session_state.tarjetas) < max_tarjetas:
+                            # Añadir nueva tarjeta en estado NEUTRO
+                            nueva_tarjeta = {
+                                "asset": asset,
+                                "direccion": mejor_senal['direccion'],
+                                "fuerza": mejor_senal['fuerza'],
+                                "estrategia": mejor_senal['estrategia'],
+                                "estado": "NEUTRO",
+                                "entry_time": None,
+                                "expiry_time": None
+                            }
+                            st.session_state.tarjetas.append(nueva_tarjeta)
+                            st.session_state.historial.append(f"➕ Nuevo monitoreo: {asset} (fuerza {mejor_senal['fuerza']}%)")
+                        else:
+                            # Si no hay espacio, reemplazar la de menor fuerza si la nueva es más fuerte
+                            tarjeta_menor = min(st.session_state.tarjetas, key=lambda x: x['fuerza'])
+                            if mejor_senal['fuerza'] > tarjeta_menor['fuerza']:
+                                st.session_state.tarjetas.remove(tarjeta_menor)
+                                nueva_tarjeta = {
+                                    "asset": asset,
+                                    "direccion": mejor_senal['direccion'],
+                                    "fuerza": mejor_senal['fuerza'],
+                                    "estrategia": mejor_senal['estrategia'],
+                                    "estado": "NEUTRO",
+                                    "entry_time": None,
+                                    "expiry_time": None
+                                }
+                                st.session_state.tarjetas.append(nueva_tarjeta)
+                                st.session_state.historial.append(f"🔄 Reemplazado {tarjeta_menor['asset']} por {asset} (fuerza {mejor_senal['fuerza']}%)")
                     else:
-                        # Añadir nueva señal
-                        st.session_state.señales_activas.append(nueva_senal)
-                        st.session_state.historial.append(f"🎯 Nueva señal en {asset}: {mejor_senal['estrategia']} ({mejor_senal['fuerza']}%)")
+                        # El activo ya está en tarjetas, actualizar su fuerza y estrategia (si ha cambiado)
+                        if mejor_senal['fuerza'] != tarjeta_existente['fuerza'] or mejor_senal['estrategia'] != tarjeta_existente['estrategia']:
+                            tarjeta_existente['fuerza'] = mejor_senal['fuerza']
+                            tarjeta_existente['estrategia'] = mejor_senal['estrategia']
+                            st.session_state.historial.append(f"🔄 Actualizada fuerza de {asset}: {mejor_senal['fuerza']}%")
                 else:
-                    # No hay señal válida para este activo
-                    if señal_existente:
-                        # Eliminar la señal existente porque ya no cumple
-                        st.session_state.señales_activas.remove(señal_existente)
-                        st.session_state.historial.append(f"❌ Señal eliminada: {asset} (dejó de cumplir)")
+                    # No hay señal fuerte para este activo
+                    if tarjeta_existente:
+                        # Si el activo está en tarjetas pero ya no cumple, eliminarlo
+                        st.session_state.tarjetas.remove(tarjeta_existente)
+                        st.session_state.historial.append(f"❌ Eliminado {asset} (dejó de cumplir)")
 
-                # Después de modificar las señales, ordenar y limitar a las 4 más fuertes
-                st.session_state.señales_activas = sorted(st.session_state.señales_activas, key=lambda x: x['fuerza'], reverse=True)[:max_tarjetas]
+                # Ahora, para cada tarjeta activa, verificar si se ha alcanzado el punto de entrada
+                for tarj in st.session_state.tarjetas:
+                    if tarj['estado'] == "NEUTRO":
+                        # Necesitamos los indicadores actuales de ese activo (podríamos tener que obtenerlos de nuevo)
+                        # Para simplificar, asumimos que el activo actual es el que estamos analizando y si coincide, usamos indicators
+                        if tarj['asset'] == asset:
+                            punto_entrada, mensaje = detectar_punto_entrada(indicators, tarj['direccion'])
+                            if punto_entrada:
+                                # Cambiar estado a COMPRAR/VENDER AHORA y fijar tiempos
+                                now_utc = datetime.now(pytz.UTC)
+                                entry_dt = now_utc + timedelta(minutes=1)  # Entrada en 1 minuto (tiempo para prepararse)
+                                entry_dt = entry_dt.replace(second=0, microsecond=0)
+                                expiry_dt = entry_dt + timedelta(minutes=5)
+                                entry_local = entry_dt.astimezone(ecuador)
+                                expiry_local = expiry_dt.astimezone(ecuador)
+                                tarj['estado'] = "COMPRAR AHORA" if tarj['direccion'] == "CALL" else "VENDER AHORA"
+                                tarj['entry_time'] = entry_local
+                                tarj['expiry_time'] = expiry_local
+                                st.session_state.historial.append(f"🎯 Señal de entrada en {asset}: {tarj['estado']} a las {entry_local.strftime('%H:%M:%S')}")
+                        else:
+                            # No tenemos los indicadores ahora, se evaluará cuando ese activo sea escaneado
+                            pass
 
                 # Avanzar al siguiente activo
                 time.sleep(0.25)
