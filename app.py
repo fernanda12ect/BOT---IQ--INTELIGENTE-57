@@ -1,254 +1,134 @@
-import streamlit as st
-from bot import IQBot
+from iqoptionapi.stable_api import IQ_Option
+import pandas as pd
 from datetime import datetime, timedelta
+import pytz
 import time
 
-st.set_page_config(layout="wide")
+ecuador = pytz.timezone("America/Guayaquil")
 
-st.title("🤖 IQ OPTION AUTO SCANNER PRO")
+class IQBot:
 
-# -------------------
-# SESSION
-# -------------------
+    def __init__(self,email,password,log):
+        self.email=email
+        self.password=password
+        self.log=log
+        self.API=None
 
-if "logs" not in st.session_state:
-    st.session_state.logs=[]
+    def connect(self):
 
-if "signals" not in st.session_state:
-    st.session_state.signals={}
+        try:
+            self.API=IQ_Option(self.email,self.password)
+            self.API.connect()
 
-if "alerts" not in st.session_state:
-    st.session_state.alerts=[]
+            if self.API.check_connect():
+                self.log("Conectado a IQ Option")
+                return True
+            else:
+                self.log("Error conectando")
+                return False
+        except:
+            self.log("Error conexión")
+            return False
 
-if "index" not in st.session_state:
-    st.session_state.index=0
+    def get_balance(self):
+        try:
+            return self.API.get_balance()
+        except:
+            return 0
 
-if "assets" not in st.session_state:
-    st.session_state.assets=[]
+    def get_assets(self):
 
+        activos=set()
 
-# -------------------
-# LOG
-# -------------------
+        try:
+            all_assets=self.API.get_all_open_time()
 
-def log(msg):
+            for tipo in all_assets:
 
-    now=datetime.now().strftime("%H:%M:%S")
+                for asset,data in all_assets[tipo].items():
 
-    st.session_state.logs.insert(0,f"[{now}] {msg}")
+                    if data["open"]:
+                        activos.add(asset)
 
+        except:
+            pass
 
-# -------------------
-# LOGIN
-# -------------------
+        return list(activos)
 
-with st.sidebar:
+    def get_candles(self,asset):
 
-    st.header("Conexión")
+        try:
 
-    email=st.text_input("Email")
+            candles=self.API.get_candles(asset,60,100,time.time())
 
-    password=st.text_input("Password",type="password")
+            df=pd.DataFrame(candles)
 
-    if st.button("Conectar"):
+            return df
 
-        bot=IQBot(email,password,log)
+        except:
+            return None
 
-        if bot.connect():
 
-            st.session_state.bot=bot
+    def analyze(self,asset):
 
-            assets=bot.get_assets()
+        df=self.get_candles(asset)
 
-            st.session_state.assets=assets
+        if df is None:
+            return None
 
-            log("Bot conectado correctamente")
+        if len(df)<50:
+            return None
 
-            log(f"{len(assets)} activos encontrados")
+        close=df["close"]
 
-        else:
+        ema20=close.ewm(span=20).mean()
+        ema50=close.ewm(span=50).mean()
 
-            st.error("Error conexión")
+        delta=close.diff()
 
+        gain=(delta.where(delta>0,0)).rolling(14).mean()
+        loss=(-delta.where(delta<0,0)).rolling(14).mean()
 
-# -------------------
-# BOT
-# -------------------
+        rs=gain/loss
 
-if "bot" in st.session_state:
+        rsi=100-(100/(1+rs))
 
-    bot=st.session_state.bot
+        trend=None
 
-    st.success(f"Saldo: {bot.get_balance()}")
+        if ema20.iloc[-1]>ema50.iloc[-1]:
+            trend="CALL"
 
-    assets=st.session_state.assets
+        if ema20.iloc[-1]<ema50.iloc[-1]:
+            trend="PUT"
 
+        if trend is None:
+            self.log(f"{asset} sin tendencia clara")
+            return None
 
-    if not assets:
+        rsi_now=rsi.iloc[-1]
 
-        st.warning("⏳ Esperando activos disponibles...")
+        if trend=="CALL" and rsi_now>70:
+            self.log(f"{asset} sobrecomprado")
+            return None
 
-        log("Esperando activos...")
+        if trend=="PUT" and rsi_now<30:
+            self.log(f"{asset} sobrevendido")
+            return None
 
-        time.sleep(3)
+        now=datetime.now(ecuador)
 
-        st.rerun()
+        entry=now+timedelta(minutes=1)
 
+        entry=entry.replace(second=0,microsecond=0)
 
-    i=st.session_state.index
+        expiry=entry+timedelta(minutes=5)
 
-    asset=assets[i % len(assets)]
+        return {
 
+            "asset":asset,
+            "signal":trend,
+            "entry":entry,
+            "expiry":expiry,
+            "detected":now
 
-    try:
-
-        result=bot.analyze(asset)
-
-        if result:
-
-            name=result["asset"]
-
-            if name not in st.session_state.signals:
-
-                entry=result["entry"]
-
-                expiry=entry+timedelta(minutes=5)
-
-                st.session_state.signals[name]={
-
-                    "asset":name,
-                    "signal":result["signal"],
-                    "entry":entry,
-                    "expiry":expiry,
-                    "detected":result["detected"]
-
-                }
-
-                alert=f"ALERTA: OPERAR {name} {result['signal']} A LAS {entry.strftime('%H:%M:%S')}"
-
-                st.session_state.alerts.append(alert)
-
-                log(alert)
-
-    except:
-        pass
-
-
-    st.session_state.index+=1
-
-
-# -------------------
-# ALERTA GRANDE
-# -------------------
-
-if st.session_state.alerts:
-
-    last=st.session_state.alerts[-1]
-
-    st.markdown(f"""
-    <div style="
-    background:#300000;
-    color:#ff4444;
-    padding:25px;
-    font-size:32px;
-    text-align:center;
-    border-radius:10px;
-    ">
-    ⚠️ {last}
-    </div>
-    """,unsafe_allow_html=True)
-
-
-# -------------------
-# TARJETAS
-# -------------------
-
-cols=st.columns(4)
-
-remove_list=[]
-
-signals=list(st.session_state.signals.values())
-
-for i,signal in enumerate(signals[:4]):
-
-    entry=signal["entry"]
-
-    remaining=(entry-datetime.now()).total_seconds()
-
-    if remaining<=0:
-
-        remove_list.append(signal["asset"])
-
-        continue
-
-
-    minutes=int(remaining//60)
-
-    seconds=int(remaining%60)
-
-    countdown=f"{minutes:02}:{seconds:02}"
-
-
-    if signal["signal"]=="CALL":
-
-        color="#00ff00"
-        bg="#002200"
-
-    else:
-
-        color="#ff4444"
-        bg="#220000"
-
-
-    with cols[i]:
-
-        st.markdown(f"""
-
-        <div style="
-        background:{bg};
-        border:3px solid {color};
-        padding:30px;
-        border-radius:15px;
-        text-align:center;
-        ">
-
-        <h2>{signal["asset"]}</h2>
-
-        <h1 style="color:{color}">{signal["signal"]}</h1>
-
-        <h2>OPERAR A LAS</h2>
-
-        <h1 style="color:{color}">
-        {signal["entry"].strftime('%H:%M:%S')}
-        </h1>
-
-        <h3>⏳ {countdown}</h3>
-
-        <p>Detectado: {signal["detected"].strftime('%H:%M:%S')}</p>
-
-        <p>Cierre: {signal["expiry"].strftime('%H:%M:%S')}</p>
-
-        </div>
-
-        """,unsafe_allow_html=True)
-
-
-for r in remove_list:
-
-    del st.session_state.signals[r]
-
-
-# -------------------
-# HISTORIAL
-# -------------------
-
-st.subheader("Historial")
-
-for logmsg in st.session_state.logs[:50]:
-
-    st.text(logmsg)
-
-
-time.sleep(1)
-
-st.rerun()
+        }
