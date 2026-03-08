@@ -1,16 +1,17 @@
 from iqoptionapi.stable_api import IQ_Option
 import pandas as pd
-import numpy as np
-import time
 import ta
+import time
+from datetime import datetime, timedelta
 
 class IQBot:
 
-    def __init__(self,email,password):
+    def __init__(self,email,password,logger):
+
         self.email=email
         self.password=password
+        self.log=logger
         self.API=None
-        self.connected=False
 
     def connect(self):
 
@@ -19,9 +20,10 @@ class IQBot:
         check,reason=self.API.connect()
 
         if check:
-            self.connected=True
+            self.log("Conectado a IQ Option")
             return True
         else:
+            self.log("Error de conexión")
             return False
 
 
@@ -29,18 +31,17 @@ class IQBot:
         return self.API.get_balance()
 
 
-    def get_all_assets(self):
+    def get_assets(self):
 
-        assets=self.API.get_all_open_time()
+        data=self.API.get_all_open_time()
 
         activos=[]
 
-        for market in assets:
+        for market in data:
 
-            for asset in assets[market]:
+            for asset in data[market]:
 
-                if assets[market][asset]["open"]:
-
+                if data[market][asset]["open"]:
                     activos.append(asset)
 
         return activos
@@ -48,7 +49,7 @@ class IQBot:
 
     def get_candles(self,asset):
 
-        candles=self.API.get_candles(asset,60,100,time.time())
+        candles=self.API.get_candles(asset,60,80,time.time())
 
         df=pd.DataFrame(candles)
 
@@ -57,7 +58,9 @@ class IQBot:
         return df
 
 
-    def analyze_asset(self,asset):
+    def analyze(self,asset):
+
+        self.log(f"Analizando {asset}...")
 
         df=self.get_candles(asset)
 
@@ -67,48 +70,49 @@ class IQBot:
         df["rsi"]=ta.momentum.rsi(df["close"],14)
 
         macd=ta.trend.MACD(df["close"])
-
         df["macd"]=macd.macd()
 
         last=df.iloc[-1]
 
         score=0
+        reason=""
 
         if last["ema20"]>last["ema50"]:
             score+=1
+        else:
+            reason="EMA sin tendencia"
 
         if last["rsi"]>55:
             score+=1
+        else:
+            reason="RSI débil"
 
         if last["macd"]>0:
             score+=1
+        else:
+            reason="MACD negativo"
 
         if score>=3:
-            return "CALL"
 
-        if last["ema20"]<last["ema50"] and last["rsi"]<45 and last["macd"]<0:
-            return "PUT"
+            signal="CALL"
 
-        return None
+        elif score<=1:
+
+            signal="PUT"
+
+        else:
+
+            self.log(f"Descartado {asset} – {reason}")
+            return None
 
 
-    def scan_market(self):
+        now=datetime.now()
 
-        activos=self.get_all_assets()
+        entry=now+timedelta(minutes=2)
 
-        signals=[]
-
-        for asset in activos:
-
-            try:
-
-                signal=self.analyze_asset(asset)
-
-                if signal:
-
-                    signals.append((asset,signal))
-
-            except:
-                pass
-
-        return signals
+        return {
+            "asset":asset.upper(),
+            "signal":signal,
+            "entry":entry,
+            "detected":now
+        }
