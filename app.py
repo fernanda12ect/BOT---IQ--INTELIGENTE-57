@@ -13,6 +13,20 @@ from bot import (
 )
 from iqoptionapi.stable_api import IQ_Option
 
+# ==================== MONKEY PATCH ====================
+# Evita el KeyError 'underlying' en el hilo de opciones digitales
+original_get_digital_open = IQ_Option._IQ_Option__get_digital_open
+
+def safe_get_digital_open(self):
+    try:
+        return original_get_digital_open(self)
+    except KeyError as e:
+        # Ignorar silenciosamente el error de clave
+        pass
+
+IQ_Option._IQ_Option__get_digital_open = safe_get_digital_open
+# =======================================================
+
 st.set_page_config(layout="wide")
 st.title("🤖 IQ OPTION PRO SIGNAL BOT - ESCANEO AUTOMÁTICO AL CONECTAR")
 
