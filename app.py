@@ -7,7 +7,10 @@ st.set_page_config(layout="wide")
 
 st.title("🤖 IQ OPTION AUTO SCANNER PRO")
 
-# estados
+# -------------------
+# SESSION
+# -------------------
+
 if "logs" not in st.session_state:
     st.session_state.logs=[]
 
@@ -20,6 +23,13 @@ if "alerts" not in st.session_state:
 if "index" not in st.session_state:
     st.session_state.index=0
 
+if "assets" not in st.session_state:
+    st.session_state.assets=[]
+
+
+# -------------------
+# LOG
+# -------------------
 
 def log(msg):
 
@@ -28,7 +38,10 @@ def log(msg):
     st.session_state.logs.insert(0,f"[{now}] {msg}")
 
 
-# SIDEBAR
+# -------------------
+# LOGIN
+# -------------------
+
 with st.sidebar:
 
     st.header("Conexión")
@@ -45,29 +58,47 @@ with st.sidebar:
 
             st.session_state.bot=bot
 
-            st.session_state.assets=bot.get_assets()
+            assets=bot.get_assets()
+
+            st.session_state.assets=assets
 
             log("Bot conectado correctamente")
+
+            log(f"{len(assets)} activos encontrados")
 
         else:
 
             st.error("Error conexión")
 
 
-# BOT ACTIVO
+# -------------------
+# BOT
+# -------------------
+
 if "bot" in st.session_state:
 
     bot=st.session_state.bot
 
-    saldo=bot.get_balance()
-
-    st.success(f"Saldo: {saldo}")
+    st.success(f"Saldo: {bot.get_balance()}")
 
     assets=st.session_state.assets
+
+
+    if not assets:
+
+        st.warning("⏳ Esperando activos disponibles...")
+
+        log("Esperando activos...")
+
+        time.sleep(3)
+
+        st.rerun()
+
 
     i=st.session_state.index
 
     asset=assets[i % len(assets)]
+
 
     try:
 
@@ -102,34 +133,36 @@ if "bot" in st.session_state:
     except:
         pass
 
+
     st.session_state.index+=1
 
 
+# -------------------
 # ALERTA GRANDE
+# -------------------
+
 if st.session_state.alerts:
 
     last=st.session_state.alerts[-1]
 
     st.markdown(f"""
-
     <div style="
     background:#300000;
     color:#ff4444;
-    padding:30px;
-    font-size:35px;
+    padding:25px;
+    font-size:32px;
     text-align:center;
-    border-radius:12px;
-    margin-bottom:20px;
+    border-radius:10px;
     ">
-
     ⚠️ {last}
-
     </div>
-
     """,unsafe_allow_html=True)
 
 
+# -------------------
 # TARJETAS
+# -------------------
+
 cols=st.columns(4)
 
 remove_list=[]
@@ -148,10 +181,13 @@ for i,signal in enumerate(signals[:4]):
 
         continue
 
+
     minutes=int(remaining//60)
+
     seconds=int(remaining%60)
 
     countdown=f"{minutes:02}:{seconds:02}"
+
 
     if signal["signal"]=="CALL":
 
@@ -162,6 +198,7 @@ for i,signal in enumerate(signals[:4]):
 
         color="#ff4444"
         bg="#220000"
+
 
     with cols[i]:
 
@@ -201,8 +238,11 @@ for r in remove_list:
     del st.session_state.signals[r]
 
 
+# -------------------
 # HISTORIAL
-st.subheader("Historial del Bot")
+# -------------------
+
+st.subheader("Historial")
 
 for logmsg in st.session_state.logs[:50]:
 
