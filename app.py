@@ -20,8 +20,8 @@ if 'cooldown_until' not in st.session_state:
     st.session_state.cooldown_until = None
 if 'escaneo_activo' not in st.session_state:
     st.session_state.escaneo_activo = False
-if 'ultimo_escaneo' not in st.session_state:
-    st.session_state.ultimo_escaneo = None
+if 'stop_escaneo' not in st.session_state:
+    st.session_state.stop_escaneo = False
 
 # Zona horaria Ecuador
 ecuador = pytz.timezone("America/Guayaquil")
@@ -75,6 +75,7 @@ if desconectar:
     st.session_state.ultima_senal = None
     st.session_state.cooldown_until = None
     st.session_state.escaneo_activo = False
+    st.session_state.stop_escaneo = True
     st.success("Desconectado")
 
 # Área principal
@@ -85,28 +86,32 @@ if st.session_state.api is not None:
     if not st.session_state.escaneo_activo:
         if st.button("▶️ Iniciar escaneo continuo"):
             st.session_state.escaneo_activo = True
+            st.session_state.stop_escaneo = False
             st.rerun()
     else:
         if st.button("⏹️ Detener escaneo"):
             st.session_state.escaneo_activo = False
+            st.session_state.stop_escaneo = True
             st.rerun()
 
     # Mostrar estado del escaneo
     if st.session_state.escaneo_activo:
         st.markdown("**Estado:** 🟢 Escaneo continuo activo")
         if st.session_state.cooldown_until and datetime.now() < st.session_state.cooldown_until:
-            st.warning(f"⏳ Cooldown activo hasta las {st.session_state.cooldown_until.strftime('%H:%M:%S')} (hora Ecuador). Esperando...")
+            tiempo_restante = (st.session_state.cooldown_until - datetime.now()).total_seconds()
+            st.warning(f"⏳ Cooldown activo por {tiempo_restante:.0f} segundos (hasta las {st.session_state.cooldown_until.strftime('%H:%M:%S')})")
     else:
         st.markdown("**Estado:** ⚪ Escaneo detenido")
 
-    # Lógica de escaneo continuo
-    if st.session_state.escaneo_activo:
+    # Lógica de escaneo continuo (solo si está activo)
+    if st.session_state.escaneo_activo and not st.session_state.stop_escaneo:
+        
         # Verificar cooldown
         if st.session_state.cooldown_until and datetime.now() < st.session_state.cooldown_until:
-            # Esperar hasta que termine el cooldown
+            # Esperar hasta que termine el cooldown (sin congelar la app, usando time.sleep con rerun)
             tiempo_restante = (st.session_state.cooldown_until - datetime.now()).total_seconds()
-            st.info(f"Esperando {tiempo_restante:.0f} segundos por cooldown...")
-            time.sleep(min(tiempo_restante, 1))  # Esperar en pequeños intervalos para no congelar
+            st.info(f"Esperando {tiempo_restante:.0f} segundos a que termine el cooldown...")
+            time.sleep(min(tiempo_restante, 2))  # Esperar en bloques pequeños para permitir rerun
             st.rerun()
         else:
             # Realizar una ronda de escaneo
@@ -124,6 +129,11 @@ if st.session_state.api is not None:
                             st.session_state.todos_activos = obtener_todos_activos(st.session_state.api)
                     activos = st.session_state.todos_activos
 
+                if activos is None or len(activos) == 0:
+                    st.error("No se pudo obtener la lista de activos. Verifica la conexión.")
+                    st.session_state.escaneo_activo = False
+                    st.rerun()
+
                 total_activos = len(activos)
                 st.info(f"📊 Total de activos a escanear: {total_activos}")
 
@@ -131,26 +141,33 @@ if st.session_state.api is not None:
                 grupo_size = 20
                 señal_encontrada = None
 
-                # Usar un placeholder para mostrar progreso
+                # Placeholder para mostrar progreso
                 progreso = st.empty()
 
                 for i in range(0, total_activos, grupo_size):
+                    # Verificar si se detuvo el escaneo
+                    if st.session_state.stop_escaneo:
+                        progreso.warning("Escaneo detenido por el usuario.")
+                        break
+
                     grupo = activos[i:i+grupo_size]
-                    progreso.info(f"Escaneando grupo {i//grupo_size + 1} de {(total_activos-1)//grupo_size + 1} (activos {i+1} a {min(i+grupo_size, total_activos)})...")
+                    grupo_actual = i//grupo_size + 1
+                    total_grupos = (total_activos - 1)//grupo_size + 1
+                    progreso.info(f"Escaneando grupo {grupo_actual} de {total_grupos} (activos {i+1} a {min(i+grupo_size, total_activos)})...")
                     
-                    # Escanear el grupo
+                    # Llamar a la función de escaneo (solo para este grupo)
                     señal = escanear_activos_por_grupos(
                         st.session_state.api,
                         activos=grupo,
                         grupo_size=grupo_size,
-                        timeout_seconds=30  # Timeout por grupo, no por total
+                        timeout_seconds=30  # Timeout por grupo
                     )
                     
                     if señal:
                         señal_encontrada = señal
                         break
                     
-                    # Pequeña pausa entre grupos (opcional)
+                    # Pequeña pausa entre grupos (para no saturar)
                     time.sleep(0.5)
 
                 progreso.empty()
@@ -167,9 +184,16 @@ if st.session_state.api is not None:
                     st.info("No se encontraron señales en esta ronda.")
 
             # Esperar el intervalo antes de la siguiente ronda (si sigue activo)
-            if st.session_state.escaneo_activo:
+            if st.session_state.escaneo_activo and not st.session_state.stop_escaneo:
                 st.info(f"Esperando {intervalo_rondas} segundos para la próxima ronda...")
-                time.sleep(intervalo_rondas)
+                # Dividir la espera en pequeños intervalos para poder detectar stop
+                for _ in range(intervalo_rondas):
+                    if st.session_state.stop_escaneo:
+                        break
+                    time.sleep(1)
+                st.rerun()
+            else:
+                st.session_state.escaneo_activo = False
                 st.rerun()
 
     # Mostrar última señal si existe
