@@ -145,6 +145,15 @@ def calcular_indicadores(df):
     cerca_soporte = distancia_soporte < 0.001  # 0.1% de distancia
     cerca_resistencia = distancia_resistencia < 0.001
 
+    # Calcular el tamaño de las últimas velas para detectar agotamiento
+    # Tomamos las últimas 3 velas
+    ultimas_velas = df.tail(3)
+    cuerpos = abs(ultimas_velas['close'] - ultimas_velas['open'])
+    rangos = ultimas_velas['max'] - ultimas_velas['min']
+    # Velas pequeñas: cuerpo < 30% del rango
+    velas_pequenas = (cuerpos / (rangos + 1e-10)) < 0.3
+    agotamiento = velas_pequenas.all()  # True si las últimas 3 son pequeñas
+
     return {
         'close': last['close'],
         'open': last['open'],
@@ -169,7 +178,8 @@ def calcular_indicadores(df):
         'resistencia': resistencia,
         'cerca_soporte': cerca_soporte,
         'cerca_resistencia': cerca_resistencia,
-        'df': df  # Devolvemos el df por si alguna estrategia necesita más velas
+        'agotamiento': agotamiento,  # Indicador de posible retroceso agotado
+        'df': df
     }
 
 # =========================
@@ -261,31 +271,26 @@ def estrategia_reversion_bb_rsi(indicators):
 # =========================
 # ESTRATEGIA 4: IMBALANCE + NIVELES OCULTOS (versión simplificada)
 # =========================
-# Detectamos imbalance como una diferencia grande entre compra/venta simulada por volumen y spread.
-# Como no tenemos order book, usamos una heurística: si el volumen es extremadamente alto y la vela es muy grande en una dirección.
 
 def estrategia_imbalance(indicators):
     """
     Retorna (dirección, fuerza, nombre_estrategia) si hay posible imbalance.
     """
-    # Usamos la relación entre el rango de la vela y el ATR como indicador de "fuerza oculta"
     rango = indicators['high'] - indicators['low']
     if indicators['atr'] == 0:
         return None
 
-    fuerza_imbalance = (rango / indicators['atr']) * 100  # porcentaje del ATR que cubre la vela
-    if fuerza_imbalance < 80:  # La vela debe ser grande respecto al ATR
+    fuerza_imbalance = (rango / indicators['atr']) * 100
+    if fuerza_imbalance < 80:
         return None
 
     direccion = None
     nombre = "Imbalance + Nivel Oculto"
     fuerza = 0
 
-    # Si la vela es alcista y el volumen es muy alto
     if indicators['candle_bullish'] and indicators['very_strong_volume'] and indicators['close'] > indicators['open']:
         direccion = "CALL"
         fuerza = min(70 + fuerza_imbalance * 0.2, 100)
-    # Si la vela es bajista y el volumen es muy alto
     elif not indicators['candle_bullish'] and indicators['very_strong_volume'] and indicators['close'] < indicators['open']:
         direccion = "PUT"
         fuerza = min(70 + fuerza_imbalance * 0.2, 100)
@@ -301,31 +306,48 @@ def estrategia_imbalance(indicators):
 def evaluar_estrategias(indicators):
     """
     Evalúa las 4 estrategias y retorna una lista de señales encontradas.
-    Cada señal es un dict: {'direccion': , 'fuerza': , 'estrategia': , 'activo': (se añade después)}
+    Cada señal es un dict: {'direccion': , 'fuerza': , 'estrategia': }
     """
     señales = []
-    # Estrategia 1
     res1 = estrategia_soporte_resistencia(indicators)
     if res1:
         direccion, fuerza, nombre = res1
         señales.append({'direccion': direccion, 'fuerza': fuerza, 'estrategia': nombre})
-
-    # Estrategia 2
     res2 = estrategia_tendencia_adx(indicators)
     if res2:
         direccion, fuerza, nombre = res2
         señales.append({'direccion': direccion, 'fuerza': fuerza, 'estrategia': nombre})
-
-    # Estrategia 3
     res3 = estrategia_reversion_bb_rsi(indicators)
     if res3:
         direccion, fuerza, nombre = res3
         señales.append({'direccion': direccion, 'fuerza': fuerza, 'estrategia': nombre})
-
-    # Estrategia 4
     res4 = estrategia_imbalance(indicators)
     if res4:
         direccion, fuerza, nombre = res4
         señales.append({'direccion': direccion, 'fuerza': fuerza, 'estrategia': nombre})
-
     return señales
+
+# =========================
+# DETECCIÓN DE PUNTO DE ENTRADA (AGOTAMIENTO)
+# =========================
+
+def detectar_punto_entrada(indicators, direccion_tendencia):
+    """
+    Dada una dirección de tendencia (CALL o PUT) y los indicadores actuales,
+    determina si se ha alcanzado un punto de entrada ideal (agotamiento del retroceso).
+    Retorna True/False y un mensaje.
+    """
+    # Para tendencia alcista (CALL): esperamos un retroceso bajista que se agote
+    if direccion_tendencia == "CALL":
+        # Condiciones de agotamiento de vendedores:
+        # - Velas pequeñas (agotamiento = True)
+        # - Volumen bajo o decreciente (podríamos comparar con promedio, pero simplificamos)
+        # - El precio no rompe soporte importante (por ejemplo, no está cerca de soporte)
+        # - RSI no está sobrecomprado (opcional)
+        if indicators['agotamiento'] and not indicators['strong_volume'] and not indicators['cerca_soporte']:
+            return True, "Retroceso bajista agotado"
+    elif direccion_tendencia == "PUT":
+        # Para tendencia bajista: esperamos un retroceso alcista que se agote
+        if indicators['agotamiento'] and not indicators['strong_volume'] and not indicators['cerca_resistencia']:
+            return True, "Retroceso alcista agotado"
+    return False, ""
