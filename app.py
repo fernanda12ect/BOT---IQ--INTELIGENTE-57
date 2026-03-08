@@ -1,56 +1,176 @@
 import streamlit as st
-from bot import escanear_activos
+import html
+from datetime import datetime, timedelta
+from bot import escanear_activos, obtener_todos_activos, REAL_ASSETS, OTC_ASSETS
 from iqoptionapi.stable_api import IQ_Option
 
 st.set_page_config(layout="wide")
+st.title("🤖 IQ OPTION PRO SIGNAL BOT")
 
-st.title("BOT SEÑALES IQ OPTION")
+# Inicializar session_state
+if 'api' not in st.session_state:
+    st.session_state.api = None
+if 'ultima_senal' not in st.session_state:
+    st.session_state.ultima_senal = None
+if 'todos_activos' not in st.session_state:
+    st.session_state.todos_activos = None
+if 'cooldown_until' not in st.session_state:
+    st.session_state.cooldown_until = None
 
-email = st.text_input("Email")
-password = st.text_input("Password", type="password")
+# Sidebar de configuración
+with st.sidebar:
+    st.header("⚙️ Configuración")
+    email = st.text_input("📧 Email")
+    password = st.text_input("🔑 Password", type="password")
+    
+    conjunto_activos = st.selectbox("📊 Conjunto de activos", 
+                                    ["Predefinidos (REAL/OTC)", "Todos los disponibles"])
+    
+    # Solo mostramos tipo_activos si se eligió predefinidos
+    if conjunto_activos == "Predefinidos (REAL/OTC)":
+        tipo_activos = st.radio("Tipo", ["REAL", "OTC", "AMBOS"])
+    else:
+        tipo_activos = "AMBOS"  # Para todos, no aplica filtro
+    
+    max_activos = st.number_input("🔢 Máx. activos a escanear", 
+                                  min_value=1, max_value=200, value=20)
+    
+    col1, col2 = st.columns(2)
+    with col1:
+        conectar = st.button("🔌 Conectar")
+    with col2:
+        desconectar = st.button("⛔ Desconectar")
 
-if st.button("Conectar"):
+# Lógica de conexión
+if conectar:
+    if not email or not password:
+        st.error("❌ Por favor ingresa email y password")
+    else:
+        try:
+            API = IQ_Option(email, password)
+            check, reason = API.connect()  # Ajustar según documentación real
+            if check:
+                st.session_state.api = API
+                # Limpiar lista de activos al conectar (se obtendrá cuando se necesite)
+                st.session_state.todos_activos = None
+                st.session_state.ultima_senal = None
+                st.session_state.cooldown_until = None
+                st.success("✅ Conectado a IQ Option")
+            else:
+                st.error(f"❌ Error de conexión: {reason}")
+        except Exception as e:
+            st.error(f"Error inesperado: {e}")
 
-    API = IQ_Option(email,password)
-    API.connect()
+if desconectar:
+    st.session_state.api = None
+    st.session_state.todos_activos = None
+    st.session_state.ultima_senal = None
+    st.session_state.cooldown_until = None
+    st.success("Desconectado")
 
-    st.success("Conectado")
+# Área principal
+if st.session_state.api is not None:
+    st.info("🔌 Conectado. Listo para escanear.")
 
-    while True:
+    # Botón de escaneo con control de cooldown
+    escanear_btn = st.button("🔍 Escanear ahora", disabled=st.session_state.cooldown_until and datetime.now() < st.session_state.cooldown_until)
+    
+    if escanear_btn:
+        # Verificar cooldown (doble verificación)
+        if st.session_state.cooldown_until and datetime.now() < st.session_state.cooldown_until:
+            st.warning(f"⏳ Cooldown activo. Espera hasta las {st.session_state.cooldown_until.strftime('%H:%M:%S')} para escanear de nuevo.")
+        else:
+            # Construir lista de activos
+            if conjunto_activos == "Predefinidos (REAL/OTC)":
+                activos = []
+                if tipo_activos in ["REAL", "AMBOS"]:
+                    activos.extend(REAL_ASSETS)
+                if tipo_activos in ["OTC", "AMBOS"]:
+                    activos.extend(OTC_ASSETS)
+            else:  # Todos los disponibles
+                if st.session_state.todos_activos is None:
+                    with st.spinner("Obteniendo lista de activos..."):
+                        st.session_state.todos_activos = obtener_todos_activos(st.session_state.api)
+                activos = st.session_state.todos_activos
 
-        signal = escanear_activos(API)
+            # Escanear
+            with st.spinner(f"Escaneando {min(len(activos), max_activos)} activos..."):
+                try:
+                    senal = escanear_activos(
+                        st.session_state.api,
+                        activos=activos,
+                        max_activos=int(max_activos),
+                        timeout_seconds=30
+                    )
+                    if senal:
+                        st.session_state.ultima_senal = senal
+                        # Calcular cooldown (entrada + 1 minuto)
+                        entry_time = datetime.strptime(senal['entry'], "%H:%M:%S").time()
+                        now = datetime.now()
+                        entry_dt = datetime.combine(now.date(), entry_time)
+                        # Si la entrada ya pasó hoy, asumimos que es para hoy (puede ocurrir si la señal es de un minuto anterior)
+                        if entry_dt < now:
+                            entry_dt = entry_dt + timedelta(days=1)  # podría ser para mañana? mejor usar UTC
+                        # Para evitar problemas, usamos la hora UTC guardada
+                        entry_utc = datetime.strptime(senal['entry_utc'], "%Y-%m-%d %H:%M:%S")
+                        entry_utc = entry_utc.replace(tzinfo=pytz.UTC)
+                        cooldown = entry_utc + timedelta(minutes=1)
+                        st.session_state.cooldown_until = cooldown.astimezone(ecuador)
+                    else:
+                        st.warning("No se encontraron señales con probabilidad ≥80% en esta ronda.")
+                except Exception as e:
+                    st.error(f"Error durante el escaneo: {e}")
 
-        if signal:
+    # Mostrar última señal si existe
+    if st.session_state.ultima_senal:
+        signal = st.session_state.ultima_senal
+        # Determinar tipo de activo para el badge
+        asset = signal['asset']
+        if "-OTC" in asset:
+            tipo_mostrar = "OTC"
+            asset_clean = asset.replace("-OTC", "")
+        else:
+            tipo_mostrar = "REAL"
+            asset_clean = asset
 
-            st.markdown(f"""
-            <div style="
-            background:#111;
-            padding:30px;
-            border-radius:20px;
-            font-size:24px;
-            display:flex;
-            justify-content:space-between">
+        # Colores profesionales
+        color = "#006400" if signal["direction"] == "CALL" else "#8B0000"
 
+        # Escapar para seguridad
+        asset_display = html.escape(f"{asset_clean} {tipo_mostrar}")
+        direction = html.escape(signal['direction'])
+        entry = html.escape(signal['entry'])
+        expiry = html.escape(signal['expiry'])
+        prob = html.escape(str(signal['prob']))
+        strategy = html.escape(signal['strategy'])
+
+        html_code = f"""
+        <div style="display:flex; justify-content:space-between; background:#111; padding:40px; border-radius:20px; border:4px solid {color}; box-shadow: 0 0 15px rgba(0,0,0,0.5);">
             <div>
-
-            <h2>{signal['activo']}</h2>
-
-            <p>OPERAR</p>
-            <h1>{signal['operar']}</h1>
-
-            <p>EXPIRA</p>
-            <h2>{signal['expira']}</h2>
-
+                <h1 style="margin-bottom:5px;">{asset_display}</h1>
+                <h3 style="color:#ccc;">OPERAR</h3>
+                <h2 style="color:#fff;">{entry}</h2>
+                <h3 style="color:#ccc;">EXPIRA</h3>
+                <h2 style="color:#fff;">{expiry}</h2>
             </div>
-
-            <div>
-
-            <h1>{signal['direccion']}</h1>
-
-            <p>PROBABILIDAD</p>
-            <h1>{signal['prob']}%</h1>
-
+            <div style="text-align:right;">
+                <h1 style="color:{color}; font-size:4rem; margin:0;">{direction}</h1>
+                <h3 style="color:#ccc;">PROBABILIDAD</h3>
+                <h1 style="color:#fff;">{prob}%</h1>
+                <h4 style="color:#888;">{strategy}</h4>
             </div>
+        </div>
+        """
+        st.markdown(html_code, unsafe_allow_html=True)
 
-            </div>
-            """, unsafe_allow_html=True)
+        # Mostrar información UTC en expander
+        with st.expander("📅 Ver detalles UTC"):
+            st.write(f"**Entrada UTC:** {signal['entry_utc']}")
+            st.write(f"**Expiración UTC:** {signal['expiry_utc']}")
+            if st.session_state.cooldown_until:
+                st.write(f"**Próximo escaneo permitido:** {st.session_state.cooldown_until.strftime('%H:%M:%S')} (hora Ecuador)")
+    else:
+        if st.session_state.api is not None:
+            st.info("No hay señales aún. Presiona 'Escanear ahora'.")
+else:
+    st.warning("🔒 Por favor, conéctate primero desde el panel izquierdo.")
