@@ -14,7 +14,7 @@ from bot import (
 from iqoptionapi.stable_api import IQ_Option
 
 st.set_page_config(layout="wide")
-st.title("🤖 IQ OPTION PRO SIGNAL BOT - ESCANEO AUTOMÁTICO")
+st.title("🤖 IQ OPTION PRO SIGNAL BOT - ESCANEO 1X1 EN TIEMPO REAL")
 
 # Inicializar session_state
 if 'api' not in st.session_state:
@@ -35,8 +35,6 @@ if 'activos_a_escanear' not in st.session_state:
     st.session_state.activos_a_escanear = []
 if 'historial' not in st.session_state:
     st.session_state.historial = []
-if 'mercado_real_abierto' not in st.session_state:
-    st.session_state.mercado_real_abierto = True
 
 # Zona horaria Ecuador
 ecuador = pytz.timezone("America/Guayaquil")
@@ -47,11 +45,11 @@ with st.sidebar:
     email = st.text_input("📧 Email")
     password = st.text_input("🔑 Password", type="password")
 
-    # Umbral de probabilidad
-    umbral = st.slider("🎯 Umbral de probabilidad mínima (%)", 50, 95, 80, 5)
+    # Umbral de probabilidad (por defecto 75)
+    umbral = st.slider("🎯 Umbral de probabilidad mínima (%)", 50, 95, 75, 5)
 
     # Tiempo de espera entre rondas completas (segundos)
-    pausa_entre_rondas = st.number_input("⏱️ Pausa entre rondas (seg)", min_value=5, max_value=120, value=30)
+    pausa_entre_rondas = st.number_input("⏱️ Pausa entre rondas (seg)", min_value=5, max_value=120, value=20)
 
     col1, col2 = st.columns(2)
     with col1:
@@ -59,28 +57,25 @@ with st.sidebar:
     with col2:
         desconectar = st.button("⛔ Desconectar")
 
-    # Controles de escaneo (solo si está conectado)
+    # Botón para iniciar/detener escaneo continuo
     if st.session_state.api is not None:
-        st.markdown("---")
-        if st.session_state.escaneando:
-            if st.button("⏸️ Pausar escaneo"):
-                st.session_state.escaneando = False
+        if not st.session_state.escaneando:
+            iniciar = st.button("▶️ Iniciar escaneo 1x1")
+            if iniciar:
+                # Reiniciar estado
+                real, otc = obtener_activos_abiertos(st.session_state.api)
+                st.session_state.activos_reales = real
+                st.session_state.activos_otc = otc
+                st.session_state.activos_a_escanear = real + otc
+                st.session_state.indice_activo = 0
+                st.session_state.historial = []
+                st.session_state.escaneando = True
                 st.rerun()
         else:
-            if st.button("▶️ Reanudar escaneo"):
-                # Si no hay activos cargados, recargar
-                if not st.session_state.activos_a_escanear:
-                    real, otc = obtener_activos_abiertos(st.session_state.api)
-                    st.session_state.activos_reales = real
-                    st.session_state.activos_otc = otc
-                    if real:
-                        st.session_state.mercado_real_abierto = True
-                        st.session_state.activos_a_escanear = real + otc
-                    else:
-                        st.session_state.mercado_real_abierto = False
-                        st.session_state.activos_a_escanear = otc
-                    st.session_state.indice_activo = 0
-                st.session_state.escaneando = True
+            detener = st.button("⏹️ Detener escaneo")
+            if detener:
+                st.session_state.escaneando = False
+                st.session_state.indice_activo = 0
                 st.rerun()
 
 # Lógica de conexión
@@ -93,23 +88,10 @@ if conectar:
             check, reason = API.connect()
             if check:
                 st.session_state.api = API
-                # Cargar activos automáticamente
-                real, otc = obtener_activos_abiertos(API)
-                st.session_state.activos_reales = real
-                st.session_state.activos_otc = otc
-                if real:
-                    st.session_state.mercado_real_abierto = True
-                    st.session_state.activos_a_escanear = real + otc
-                else:
-                    st.session_state.mercado_real_abierto = False
-                    st.session_state.activos_a_escanear = otc
-                st.session_state.indice_activo = 0
-                st.session_state.historial = []
                 st.session_state.ultima_senal = None
                 st.session_state.cooldown_until = None
-                st.session_state.escaneando = True  # ¡Automático!
-                st.success("✅ Conectado a IQ Option. Escaneando...")
-                st.rerun()
+                st.session_state.escaneando = False
+                st.success("✅ Conectado a IQ Option")
             else:
                 st.error(f"❌ Error de conexión: {reason}")
         except Exception as e:
@@ -122,21 +104,19 @@ if desconectar:
     st.session_state.ultima_senal = None
     st.session_state.cooldown_until = None
     st.session_state.escaneando = False
-    st.session_state.indice_activo = 0
-    st.session_state.activos_a_escanear = []
-    st.session_state.historial = []
     st.success("Desconectado")
-    st.rerun()
 
 # Área principal
 if st.session_state.api is not None:
     st.info("🔌 Conectado.")
 
     # Mostrar estado del mercado
-    if st.session_state.activos_reales:
-        st.success(f"✅ Mercado REAL abierto: {len(st.session_state.activos_reales)} activos disponibles")
+    real_count = len(st.session_state.activos_reales)
+    otc_count = len(st.session_state.activos_otc)
+    if real_count > 0:
+        st.success(f"🌍 Mercado REAL abierto: {real_count} activos | 📱 Mercado OTC abierto: {otc_count} activos")
     else:
-        st.warning("⚠️ Mercado REAL cerrado - analizando solo activos OTC")
+        st.warning(f"⚠️ Mercado REAL cerrado - analizando solo activos OTC ({otc_count} disponibles)")
 
     # Mostrar historial en tiempo real
     if st.session_state.historial:
@@ -161,29 +141,27 @@ if st.session_state.api is not None:
                 real, otc = obtener_activos_abiertos(st.session_state.api)
                 st.session_state.activos_reales = real
                 st.session_state.activos_otc = otc
-                if real:
-                    st.session_state.mercado_real_abierto = True
-                    st.session_state.activos_a_escanear = real + otc
-                else:
-                    st.session_state.mercado_real_abierto = False
-                    st.session_state.activos_a_escanear = otc
+                st.session_state.activos_a_escanear = real + otc
                 st.session_state.indice_activo = 0
                 st.session_state.historial.append(f"🔄 Nueva ronda: {len(st.session_state.activos_a_escanear)} activos a escanear")
-                # Esperar pausa entre rondas antes de empezar a escanear
-                if st.session_state.indice_activo == 0 and st.session_state.activos_a_escanear:
+                # Esperar pausa entre rondas
+                if st.session_state.activos_a_escanear:
                     st.info(f"Esperando {pausa_entre_rondas} segundos para iniciar nueva ronda...")
                     time.sleep(pausa_entre_rondas)
                     st.rerun()
                 else:
+                    st.warning("No hay activos disponibles para escanear.")
+                    st.session_state.escaneando = False
                     st.rerun()
             else:
                 # Escanear el activo actual
                 asset = st.session_state.activos_a_escanear[st.session_state.indice_activo]
-                st.markdown(f"### 🔍 Analizando: {asset}")
+                tipo = "🌍 REAL" if "-OTC" not in asset else "📱 OTC"
+                st.markdown(f"### 🔍 Analizando: {tipo} {asset}")
 
                 try:
                     # Añadir al historial
-                    st.session_state.historial.append(f"🔎 Analizando {asset}...")
+                    st.session_state.historial.append(f"{tipo} Analizando {asset}...")
 
                     candles = st.session_state.api.get_candles(asset, 60, 100, time.time())
                     if not candles or len(candles) < 50:
@@ -205,45 +183,54 @@ if st.session_state.api is not None:
 
                     # Calcular indicadores
                     indicators = calcular_indicadores(df)
-                    result = calcular_probabilidad(indicators, umbral)
+                    result = calcular_probabilidad(indicators)
 
                     if result:
                         prob, direction, strategy = result
-                        # Obtener hora servidor
-                        try:
-                            server_time = st.session_state.api.get_server_time()
-                            now_utc = datetime.fromtimestamp(server_time, tz=pytz.UTC)
-                        except:
-                            now_utc = datetime.now(pytz.UTC)
+                        st.session_state.historial.append(f"📊 {asset}: probabilidad {prob}%")
 
-                        entry_dt = now_utc + timedelta(minutes=1)
-                        entry_dt = entry_dt.replace(second=0, microsecond=0)
-                        expiry_dt = entry_dt + timedelta(minutes=5)
+                        if prob >= umbral:
+                            # Señal encontrada
+                            # Obtener hora servidor
+                            try:
+                                server_time = st.session_state.api.get_server_time()
+                                now_utc = datetime.fromtimestamp(server_time, tz=pytz.UTC)
+                            except:
+                                now_utc = datetime.now(pytz.UTC)
 
-                        entry_local = entry_dt.astimezone(ecuador)
-                        expiry_local = expiry_dt.astimezone(ecuador)
+                            entry_dt = now_utc + timedelta(minutes=1)
+                            entry_dt = entry_dt.replace(second=0, microsecond=0)
+                            expiry_dt = entry_dt + timedelta(minutes=5)
 
-                        senal = {
-                            "asset": asset,
-                            "direction": direction,
-                            "prob": prob,
-                            "strategy": strategy,
-                            "entry": entry_local.strftime("%H:%M:%S"),
-                            "expiry": expiry_local.strftime("%H:%M:%S"),
-                            "entry_utc": entry_dt.strftime("%Y-%m-%d %H:%M:%S"),
-                            "expiry_utc": expiry_dt.strftime("%Y-%m-%d %H:%M:%S")
-                        }
-                        st.session_state.ultima_senal = senal
-                        # Calcular cooldown (entrada + 1 minuto)
-                        cooldown = entry_dt + timedelta(minutes=1)
-                        st.session_state.cooldown_until = cooldown.astimezone(ecuador)
-                        st.session_state.historial.append(f"🎯 ¡Señal encontrada en {asset}!")
-                        st.balloons()
-                        # Avanzamos índice para no repetir el activo (aunque ya se detendrá por cooldown)
-                        st.session_state.indice_activo += 1
-                        st.rerun()
+                            entry_local = entry_dt.astimezone(ecuador)
+                            expiry_local = expiry_dt.astimezone(ecuador)
+
+                            senal = {
+                                "asset": asset,
+                                "direction": direction,
+                                "prob": prob,
+                                "strategy": strategy,
+                                "entry": entry_local.strftime("%H:%M:%S"),
+                                "expiry": expiry_local.strftime("%H:%M:%S"),
+                                "entry_utc": entry_dt.strftime("%Y-%m-%d %H:%M:%S"),
+                                "expiry_utc": expiry_dt.strftime("%Y-%m-%d %H:%M:%S")
+                            }
+                            st.session_state.ultima_senal = senal
+                            # Calcular cooldown (entrada + 1 minuto)
+                            cooldown = entry_dt + timedelta(minutes=1)
+                            st.session_state.cooldown_until = cooldown.astimezone(ecuador)
+                            st.session_state.historial.append(f"🎯 ¡Señal encontrada en {asset}!")
+                            st.balloons()
+                            # Avanzamos índice
+                            st.session_state.indice_activo += 1
+                            st.rerun()
+                        else:
+                            st.session_state.historial.append(f"❌ {asset}: no alcanza umbral ({prob}% < {umbral}%)")
+                            time.sleep(0.25)
+                            st.session_state.indice_activo += 1
+                            st.rerun()
                     else:
-                        st.session_state.historial.append(f"❌ {asset}: no cumple umbral")
+                        st.session_state.historial.append(f"⚠️ {asset}: sin tendencia clara")
                         time.sleep(0.25)
                         st.session_state.indice_activo += 1
                         st.rerun()
@@ -260,10 +247,10 @@ if st.session_state.api is not None:
         # Determinar tipo de activo
         asset = signal['asset']
         if "-OTC" in asset:
-            tipo_mostrar = "OTC"
+            tipo_mostrar = "📱 OTC"
             asset_clean = asset.replace("-OTC", "")
         else:
-            tipo_mostrar = "REAL"
+            tipo_mostrar = "🌍 REAL"
             asset_clean = asset
 
         color = "#006400" if signal["direction"] == "CALL" else "#8B0000"
@@ -301,6 +288,6 @@ if st.session_state.api is not None:
                 st.write(f"**Próximo escaneo permitido:** {st.session_state.cooldown_until.strftime('%H:%M:%S')} (hora Ecuador)")
     else:
         if st.session_state.api is not None and not st.session_state.escaneando:
-            st.info("Presiona 'Reanudar escaneo' en la barra lateral para comenzar.")
+            st.info("Presiona 'Iniciar escaneo 1x1' para comenzar.")
 else:
     st.warning("🔒 Por favor, conéctate primero desde el panel izquierdo.")
