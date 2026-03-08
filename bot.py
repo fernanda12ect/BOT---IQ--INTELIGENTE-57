@@ -115,30 +115,25 @@ def calcular_indicadores(df):
 
 def calcular_nivel_retroceso(df, tendencia):
     """
-    Para tendencia alcista: buscamos el mínimo reciente y el máximo reciente,
-    luego calculamos el retroceso de Fibonacci del 38.2% o 50%.
-    Para tendencia bajista: similar.
-    Retorna el nivel de precio donde se debe entrar.
+    Para tendencia alcista: retroceso 38.2% del último movimiento alcista.
+    Para tendencia bajista: retroceso 38.2% del último movimiento bajista.
     """
-    # Tomamos las últimas 50 velas para identificar el último movimiento
     df = df.iloc[-50:].copy()
     if tendencia == "CALL":
-        # Buscar el mínimo más bajo (soporte) y el máximo más alto (resistencia) en el periodo
         minimo = df['low'].min()
         maximo = df['high'].max()
-        # El retroceso típico es 38.2% o 50% del movimiento alcista
         movimiento = maximo - minimo
-        nivel = maximo - movimiento * 0.382  # 38.2% de retroceso
+        nivel = maximo - movimiento * 0.382
         return nivel
     else:  # PUT
         minimo = df['low'].min()
         maximo = df['high'].max()
         movimiento = maximo - minimo
-        nivel = minimo + movimiento * 0.382  # retroceso alcista en tendencia bajista
+        nivel = minimo + movimiento * 0.382
         return nivel
 
 # =========================
-# EVALUAR TENDENCIA (versión simplificada)
+# EVALUAR TENDENCIA (exportada)
 # =========================
 
 def evaluar_tendencia(indicators):
