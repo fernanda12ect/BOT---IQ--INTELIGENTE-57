@@ -25,11 +25,11 @@ if 'activos_otc' not in st.session_state:
 if 'escaneando' not in st.session_state:
     st.session_state.escaneando = False
 if 'fase' not in st.session_state:
-    st.session_state.fase = "seleccion"  # "seleccion" o "seguimiento"
+    st.session_state.fase = "seleccion"
 if 'activos_seleccionados' not in st.session_state:
-    st.session_state.activos_seleccionados = []  # Lista de dicts con info del activo en seguimiento
+    st.session_state.activos_seleccionados = []
 if 'señales_activas' not in st.session_state:
-    st.session_state.señales_activas = []  # Solo cuando se confirma la entrada
+    st.session_state.señales_activas = []
 if 'historial' not in st.session_state:
     st.session_state.historial = []
 
@@ -42,10 +42,7 @@ with st.sidebar:
     email = st.text_input("📧 Email")
     password = st.text_input("🔑 Password", type="password")
 
-    # Umbral de fuerza mínima para considerar tendencia
     umbral_fuerza = st.slider("🎯 Fuerza mínima de tendencia", 0, 100, 40, 5)
-
-    # Tiempo de espera entre rondas de escaneo (segundos)
     pausa_entre_rondas = st.number_input("⏱️ Pausa entre rondas", 5, 120, 15)
 
     col1, col2 = st.columns(2)
@@ -64,11 +61,10 @@ if conectar:
             check, reason = API.connect()
             if check:
                 st.session_state.api = API
-                # Obtener activos inmediatamente
                 real, otc = obtener_activos_abiertos(API)
                 st.session_state.activos_reales = real
                 st.session_state.activos_otc = otc
-                st.session_state.escaneando = True  # Iniciar escaneo automáticamente
+                st.session_state.escaneando = True
                 st.session_state.fase = "seleccion"
                 st.session_state.activos_seleccionados = []
                 st.session_state.señales_activas = []
@@ -97,7 +93,7 @@ if st.session_state.api is not None:
     else:
         st.warning(f"⚠️ Solo OTC ({otc_count})")
 
-    # Mostrar señales activas (solo cuando están listas)
+    # Mostrar señales activas
     if st.session_state.señales_activas:
         st.subheader("📊 SEÑALES LISTAS PARA OPERAR")
         for senal in st.session_state.señales_activas:
@@ -128,19 +124,17 @@ if st.session_state.api is not None:
             for linea in st.session_state.historial[-20:]:
                 st.text(linea)
 
-    # Lógica de escaneo continuo
+    # Lógica de escaneo
     if st.session_state.escaneando:
         now = datetime.now(ecuador)
 
-        # FASE DE SELECCIÓN: buscar los 2 mejores activos con tendencia
+        # FASE DE SELECCIÓN
         if st.session_state.fase == "seleccion":
             st.info("🔍 Buscando los 2 mejores activos con tendencia...")
-            # Escanear todos los activos (reales + otc)
             todos_activos = st.session_state.activos_reales + st.session_state.activos_otc
             if not todos_activos:
-                st.warning("No hay activos disponibles. Reintentando en {} segundos...".format(pausa_entre_rondas))
+                st.warning(f"No hay activos disponibles. Reintentando en {pausa_entre_rondas} segundos...")
                 time.sleep(pausa_entre_rondas)
-                # Intentar obtener activos nuevamente
                 real, otc = obtener_activos_abiertos(st.session_state.api)
                 st.session_state.activos_reales = real
                 st.session_state.activos_otc = otc
@@ -153,8 +147,18 @@ if st.session_state.api is not None:
                     if not candles or len(candles) < 50:
                         continue
                     df = pd.DataFrame(candles)
-                    for col in ['open', 'max', 'min', 'close', 'volume']:
-                        df[col] = pd.to_numeric(df[col], errors='coerce')
+                    # Asegurar nombres de columnas correctos
+                    for col in ['open', 'high', 'low', 'close', 'volume']:
+                        if col not in df.columns:
+                            # Si la API devuelve con otros nombres, intentar mapear
+                            if col == 'high' and 'max' in df.columns:
+                                df.rename(columns={'max': 'high'}, inplace=True)
+                            elif col == 'low' and 'min' in df.columns:
+                                df.rename(columns={'min': 'low'}, inplace=True)
+                            else:
+                                df[col] = pd.to_numeric(df.get(col, 0), errors='coerce')
+                        else:
+                            df[col] = pd.to_numeric(df[col], errors='coerce')
                     df.dropna(inplace=True)
                     if len(df) < 50:
                         continue
@@ -163,7 +167,6 @@ if st.session_state.api is not None:
                     if res:
                         direccion, fuerza = res
                         if fuerza >= umbral_fuerza:
-                            # Calcular nivel de retroceso
                             nivel = calcular_nivel_retroceso(indicators['df'], direccion)
                             candidatos.append({
                                 'asset': asset,
@@ -174,17 +177,15 @@ if st.session_state.api is not None:
                                 'indicators': indicators
                             })
                 except Exception as e:
-                    st.session_state.historial.append(f"⚠️ Error con {asset}: {str(e)[:50]}")
+                    st.session_state.historial.append(f"⚠️ Error con {asset}: {str(e)}")
                     continue
-                time.sleep(0.1)  # pausa entre activos
+                time.sleep(0.1)
 
             if candidatos:
-                # Ordenar por fuerza y tomar los 2 mejores
                 candidatos.sort(key=lambda x: x['fuerza'], reverse=True)
                 st.session_state.activos_seleccionados = candidatos[:2]
                 st.session_state.fase = "seguimiento"
                 st.session_state.historial.append(f"✅ Seleccionados: {candidatos[0]['asset']} ({candidatos[0]['fuerza']:.1f}%) y {candidatos[1]['asset']} ({candidatos[1]['fuerza']:.1f}%)")
-                # Pequeña pausa antes de empezar seguimiento
                 time.sleep(2)
                 st.rerun()
             else:
@@ -192,28 +193,29 @@ if st.session_state.api is not None:
                 time.sleep(pausa_entre_rondas)
                 st.rerun()
 
-        # FASE DE SEGUIMIENTO: monitorear los 2 activos seleccionados
+        # FASE DE SEGUIMIENTO
         elif st.session_state.fase == "seguimiento":
             st.subheader("🔎 SIGUIENDO ACTIVOS SELECCIONADOS")
             for idx, activo in enumerate(st.session_state.activos_seleccionados):
                 asset = activo['asset']
-                st.write(f"**{idx+1}. {asset}** - Tendencia: {activo['direccion']} - Nivel retroceso: {activo['nivel_retroceso']:.5f} - Precio actual: {activo.get('precio_actual', 'N/A'):.5f}")
+                precio_actual_str = f"{activo.get('precio_actual', 0):.5f}"
+                st.write(f"**{idx+1}. {asset}** - Tendencia: {activo['direccion']} - Nivel retroceso: {activo['nivel_retroceso']:.5f} - Precio actual: {precio_actual_str}")
 
                 try:
-                    candles = st.session_state.api.get_candles(asset, 60, 5, time.time())  # últimas 5 velas
+                    candles = st.session_state.api.get_candles(asset, 60, 5, time.time())
                     if not candles:
                         continue
                     df = pd.DataFrame(candles)
-                    precio_actual = df['close'].iloc[-1]
+                    if 'close' in df.columns:
+                        precio_actual = df['close'].iloc[-1]
+                    else:
+                        continue
                     activo['precio_actual'] = precio_actual
 
-                    # Verificar si se alcanzó el nivel de retroceso (con tolerancia)
                     direccion = activo['direccion']
                     nivel = activo['nivel_retroceso']
                     if direccion == "CALL":
-                        # En tendencia alcista, esperamos que el precio baje hasta el nivel
-                        if precio_actual <= nivel * 1.001:  # tolerancia 0.1%
-                            # Generar señal
+                        if precio_actual <= nivel * 1.001:
                             try:
                                 server_time = st.session_state.api.get_server_time()
                                 now_utc = datetime.fromtimestamp(server_time, tz=pytz.UTC)
@@ -235,7 +237,6 @@ if st.session_state.api is not None:
                             }
                             st.session_state.señales_activas.append(señal)
                             st.session_state.historial.append(f"🎯 Señal CALL para {asset} a las {entry_local.strftime('%H:%M:%S')}")
-                            # Eliminar este activo de la lista de seguimiento
                             st.session_state.activos_seleccionados.pop(idx)
                             break
                     else:  # PUT
@@ -264,9 +265,8 @@ if st.session_state.api is not None:
                             st.session_state.activos_seleccionados.pop(idx)
                             break
                 except Exception as e:
-                    st.session_state.historial.append(f"⚠️ Error monitoreando {asset}: {str(e)[:50]}")
+                    st.session_state.historial.append(f"⚠️ Error monitoreando {asset}: {str(e)}")
 
-            # Si ya no hay activos en seguimiento, volver a fase de selección
             if len(st.session_state.activos_seleccionados) == 0:
                 st.session_state.fase = "seleccion"
                 st.rerun()
