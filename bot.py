@@ -11,7 +11,7 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 # Zona horaria de Ecuador
 ecuador = pytz.timezone("America/Guayaquil")
 
-# Activos predefinidos (fallback)
+# Activos predefinidos (fallback por si falla la API)
 REAL_ASSETS = [
     "EURUSD", "GBPUSD", "AUDUSD", "USDJPY",
     "EURJPY", "GBPJPY", "USDCHF", "USDCAD", "NZDUSD"
@@ -19,32 +19,32 @@ REAL_ASSETS = [
 OTC_ASSETS = ["EURUSD-OTC", "GBPUSD-OTC", "AUDUSD-OTC", "USDJPY-OTC"]
 
 # =========================
-# OBTENER TODOS LOS ACTIVOS DESDE LA API
+# OBTENER ACTIVOS ABIERTOS EN TIEMPO REAL
 # =========================
 
-def obtener_todos_activos(api):
+def obtener_activos_abiertos(api):
     """
-    Obtiene la lista de todos los activos disponibles en IQ Option.
-    En caso de error, retorna la lista predefinida (REAL+OTC).
+    Obtiene listas de activos REAL y OTC que están actualmente abiertos para trading binario.
+    Retorna (real_abiertos, otc_abiertos)
     """
     try:
-        # Intentar obtener todos los activos (método común en iqoptionapi)
-        all_actives = api.get_all_actives()
-        # all_actives suele ser un dict {id: {'name': 'EURUSD', 'enabled': True, ...}}
-        activos = []
-        for id, info in all_actives.items():
-            if info.get('enabled', True):  # Solo activos habilitados
-                nombre = info.get('name')
-                if nombre:
-                    activos.append(nombre)
-        if activos:
-            logging.info(f"Se obtuvieron {len(activos)} activos desde la API")
-            return activos
-        else:
-            raise ValueError("Lista de activos vacía")
+        open_time = api.get_all_open_time()
+        real = []
+        otc = []
+        # La estructura puede variar; asumimos que 'binary' contiene los activos binarios
+        if 'binary' in open_time:
+            for asset, data in open_time['binary'].items():
+                if data.get('open', False):
+                    if '-OTC' in asset:
+                        otc.append(asset)
+                    else:
+                        real.append(asset)
+        logging.info(f"Activos abiertos: {len(real)} REAL, {len(otc)} OTC")
+        return real, otc
     except Exception as e:
-        logging.error(f"Error al obtener activos: {e}. Usando lista predefinida.")
-        return REAL_ASSETS + OTC_ASSETS
+        logging.error(f"Error obteniendo activos abiertos: {e}")
+        # Fallback a listas predefinidas (sin filtrar por apertura)
+        return REAL_ASSETS, OTC_ASSETS
 
 # =========================
 # INDICADORES (optimizados)
@@ -116,12 +116,12 @@ def calcular_indicadores(df):
     }
 
 # =========================
-# PROBABILIDAD
+# PROBABILIDAD (con umbral)
 # =========================
 
-def calcular_probabilidad(indicators):
+def calcular_probabilidad(indicators, umbral=80):
     """
-    Retorna (probabilidad, dirección, estrategia) o None.
+    Retorna (probabilidad, dirección, estrategia) si la probabilidad >= umbral, sino None.
     """
     score = 0
     direction = None
@@ -167,121 +167,8 @@ def calcular_probabilidad(indicators):
         score += 20
 
     score = min(score, 100)
-    return score, direction, strategy
 
-# =========================
-# ESCÁNER POR GRUPOS (CON DEPURACIÓN)
-# =========================
-
-def escanear_activos_por_grupos(api, activos, grupo_size=20, timeout_seconds=30):
-    """
-    Escanea una lista de activos en grupos de tamaño grupo_size, uno por uno dentro del grupo.
-    Retorna la primera señal con probabilidad >= 70 o None.
-    Incluye mensajes de depuración (prints) para seguir el proceso.
-    """
-    print("\n=== INICIANDO ESCANEO ===")
-    print(f"DEBUG: Recibidos {len(activos)} activos para escanear.")
-    
-    # Verificar tipo de activos
-    if not isinstance(activos, list):
-        print(f"ERROR: activos no es una lista, es {type(activos)}")
+    if score >= umbral:
+        return score, direction, strategy
+    else:
         return None
-    
-    if len(activos) == 0:
-        print("ERROR: lista de activos vacía")
-        return None
-    
-    # Verificar que api tenga el método get_candles
-    if not hasattr(api, 'get_candles'):
-        print("ERROR: api no tiene método get_candles")
-        return None
-
-    from itertools import islice
-
-    def chunks(lst, n):
-        for i in range(0, len(lst), n):
-            yield lst[i:i + n]
-
-    start_time = time.time()
-    grupo_num = 0
-
-    for grupo in chunks(activos, grupo_size):
-        grupo_num += 1
-        print(f"\n--- Grupo {grupo_num} de {grupo_size} activos ---")
-        
-        if time.time() - start_time > timeout_seconds:
-            print(f"DEBUG: Timeout de {timeout_seconds}s alcanzado. Deteniendo escaneo.")
-            break
-
-        for asset in grupo:
-            print(f"  Analizando: {asset}...")
-            try:
-                # Obtener velas
-                candles = api.get_candles(asset, 60, 100, time.time())
-                if not candles:
-                    print(f"    No se obtuvieron velas para {asset}")
-                    continue
-                if len(candles) < 50:
-                    print(f"    Velas insuficientes: {len(candles)}")
-                    continue
-
-                # Crear DataFrame
-                df = pd.DataFrame(candles)
-                for col in ['open', 'max', 'min', 'close', 'volume']:
-                    df[col] = pd.to_numeric(df[col], errors='coerce')
-                df.dropna(inplace=True)
-
-                if len(df) < 50:
-                    print(f"    DataFrame muy pequeño después de limpiar: {len(df)} filas")
-                    continue
-
-                # Calcular indicadores
-                indicators = calcular_indicadores(df)
-                result = calcular_probabilidad(indicators)
-
-                if result:
-                    prob, direction, strategy = result
-                    print(f"    Probabilidad calculada: {prob}% - {direction} - {strategy}")
-                    
-                    if prob >= 70:
-                        print(f"    ✅ ¡Señal encontrada en {asset} con probabilidad {prob}%!")
-                        
-                        # Obtener hora del servidor
-                        try:
-                            server_time = api.get_server_time()
-                            now = datetime.fromtimestamp(server_time, tz=pytz.UTC)
-                        except Exception as e:
-                            print(f"    Error obteniendo server_time: {e}. Usando hora local UTC.")
-                            now = datetime.now(pytz.UTC)
-
-                        entry_dt = now + timedelta(minutes=1)
-                        entry_dt = entry_dt.replace(second=0, microsecond=0)
-                        expiry_dt = entry_dt + timedelta(minutes=5)
-
-                        entry_local = entry_dt.astimezone(ecuador)
-                        expiry_local = expiry_dt.astimezone(ecuador)
-
-                        return {
-                            "asset": asset,
-                            "direction": direction,
-                            "prob": prob,
-                            "strategy": strategy,
-                            "entry": entry_local.strftime("%H:%M:%S"),
-                            "expiry": expiry_local.strftime("%H:%M:%S"),
-                            "entry_utc": entry_dt.strftime("%Y-%m-%d %H:%M:%S"),
-                            "expiry_utc": expiry_dt.strftime("%Y-%m-%d %H:%M:%S")
-                        }
-                    else:
-                        print(f"    Probabilidad {prob}% por debajo del umbral (70%).")
-                else:
-                    print(f"    No se cumplieron condiciones de tendencia para {asset}.")
-
-                # Pausa entre activos
-                time.sleep(0.25)
-
-            except Exception as e:
-                print(f"    ❌ Error procesando {asset}: {type(e).__name__} - {e}")
-                continue
-
-    print("\n=== ESCANEO FINALIZADO SIN SEÑAL ===")
-    return None
