@@ -12,7 +12,7 @@ from bot import (
 from iqoptionapi.stable_api import IQ_Option
 
 st.set_page_config(layout="wide")
-st.title("🤖 BOT OTC - ESTRATEGIA EFECTIVA (SIN LÍMITE)")
+st.title("🤖 BOT OTC - SEÑALES CONFIRMADAS (1 MIN ANTES)")
 
 # Inicializar session_state
 if 'api' not in st.session_state:
@@ -62,7 +62,7 @@ def generar_señal(activo, tipo_nivel, direccion, confirmacion=""):
     st.session_state.señales_activas.append(nueva_señal)
     st.session_state.señales_activas.sort(key=lambda x: x['timestamp'], reverse=True)
     st.session_state.señales_activas = st.session_state.señales_activas[:20]
-    st.session_state.historial.append(f"🎯 SEÑAL: {activo['asset']} - {direccion} a las {entry_local.strftime('%H:%M:%S')} ({tipo_nivel})")
+    st.session_state.historial.append(f"🎯 SEÑAL: {activo['asset']} - {direccion} a las {entry_local.strftime('%H:%M:%S')} ({tipo_nivel}) - {confirmacion}")
 
 # Sidebar
 with st.sidebar:
@@ -72,7 +72,7 @@ with st.sidebar:
 
     umbral_estabilidad = st.slider("📊 Estabilidad máxima (%)", 1.0, 5.0, 2.5, 0.1) / 100
     umbral_cerca = st.slider("🔍 Alerta anticipada (%)", 0.1, 2.0, 0.5, 0.1) / 100
-    fuerza_minima = st.slider("💪 Fuerza mínima", 0, 100, 30, 5)
+    fuerza_minima = st.slider("💪 Fuerza mínima para seguimiento", 0, 100, 30, 5)
     pausa_entre_rondas = st.number_input("⏱️ Pausa (seg)", 5, 60, 10)
 
     col1, col2 = st.columns(2)
@@ -208,7 +208,7 @@ if st.session_state.api is not None:
                             'indicators': indicators
                         })
                 except Exception as e:
-                    continue  # No llenar historial de errores
+                    continue
                 time.sleep(0.2)
 
             if candidatos:
@@ -231,6 +231,7 @@ if st.session_state.api is not None:
             for activo in st.session_state.activos_seguimiento:
                 asset = activo['asset']
                 try:
+                    # Obtener velas recientes
                     candles = st.session_state.api.get_candles(asset, 60, 5, time.time())
                     if not candles:
                         continue
@@ -247,6 +248,7 @@ if st.session_state.api is not None:
                             st.session_state.alertas_anticipadas.append(alerta)
                             st.session_state.historial.append(alerta)
 
+                    # Obtener datos completos para indicadores
                     candles_full = st.session_state.api.get_candles(asset, 60, 100, time.time())
                     if not candles_full or len(candles_full) < 50:
                         continue
@@ -258,13 +260,38 @@ if st.session_state.api is not None:
                         continue
                     indicators = calcular_indicadores(df_full)
 
+                    # Condición de toque
                     toca = abs(precio_actual - nivel) / nivel < 0.001
 
+                    # Confirmación adicional para la señal:
+                    # 1. Cruce de EMA en la dirección correcta
+                    # 2. La vela actual (última) debe cerrar en la dirección esperada (para evitar mechas)
+                    # 3. Volumen relativo > 1.2 (interés)
+                    # 4. RSI no extremo (opcional, se puede ajustar)
                     if toca and indicators['cruce_ema'] and indicators['direccion_cruce'] == activo['direccion']:
-                        generar_señal(activo, activo['tipo'], activo['direccion'], "EMA cruzada")
-                        remover.append(activo)
-                        continue
+                        # Obtener la última vela del df_recent (la misma que estamos monitoreando)
+                        ultima_vela = df_recent.iloc[-1]
+                        cierre = ultima_vela['close']
+                        apertura = ultima_vela['open']
+                        vela_alcista = cierre > apertura
+                        vela_bajista = cierre < apertura
+                        volumen = ultima_vela['volume']
+                        vol_promedio = df_full['vol_avg'].iloc[-1]  # del df_full
+                        vol_rel = volumen / vol_promedio if vol_promedio else 1
 
+                        # Condiciones de confirmación
+                        confirmacion_ok = False
+                        if activo['direccion'] == "CALL" and vela_alcista and vol_rel > 1.2 and indicators['rsi'] < 70:
+                            confirmacion_ok = True
+                        elif activo['direccion'] == "PUT" and vela_bajista and vol_rel > 1.2 and indicators['rsi'] > 30:
+                            confirmacion_ok = True
+
+                        if confirmacion_ok:
+                            generar_señal(activo, activo['tipo'], activo['direccion'], f"EMA+vol+RSI")
+                            remover.append(activo)
+                            continue
+
+                    # Reevaluar si el activo sigue siendo válido
                     res = evaluar_activo(indicators, umbral_estabilidad)
                     if res and res['fuerza'] >= fuerza_minima:
                         activo['nivel'] = res['nivel']
