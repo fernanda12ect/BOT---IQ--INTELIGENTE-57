@@ -42,7 +42,8 @@ def obtener_activos_abiertos(api):
         if es_fin_semana and not otc:
             otc = OTC_ASSETS.copy()
         return real, otc
-    except:
+    except Exception as e:
+        logging.error(f"Error obteniendo activos: {e}")
         return REAL_ASSETS, OTC_ASSETS
 
 # =========================
@@ -51,7 +52,6 @@ def obtener_activos_abiertos(api):
 
 def calcular_indicadores(df):
     df = df.copy()
-    # Renombrar columnas
     df.rename(columns={'max': 'high', 'min': 'low'}, inplace=True)
 
     # EMA
@@ -81,15 +81,12 @@ def calcular_indicadores(df):
     df['dx'] = 100 * (abs(df['plus_di'] - df['minus_di']) / (df['plus_di'] + df['minus_di']))
     df['adx'] = df['dx'].rolling(14).mean()
 
-    # Última vela
     last = df.iloc[-1]
-    # Volumen
     vol_avg = df['volume'].rolling(20).mean().iloc[-1]
     vol_now = last['volume']
     strong_volume = vol_now > vol_avg * 1.2 if not pd.isna(vol_avg) else False
-    very_strong_volume = vol_now > vol_avg * 1.5 if not pd.isna(vol_avg) else False
 
-    # Determinar tendencia principal (ahora con ADX mínimo 20)
+    # Determinar tendencia principal (ADX mínimo 20)
     if last['ema20'] > last['ema50'] and last['plus_di'] > last['minus_di'] and last['adx'] >= 20:
         tendencia = "CALL"
         fuerza_tendencia = last['adx'] + (10 if strong_volume else 0)
@@ -100,17 +97,26 @@ def calcular_indicadores(df):
         tendencia = None
         fuerza_tendencia = 0
 
-    # Calcular niveles de Fibonacci del último movimiento (50 velas)
+    # Niveles de Fibonacci
     df_50 = df.iloc[-50:]
     minimo_50 = df_50['low'].min()
     maximo_50 = df_50['high'].max()
     movimiento = maximo_50 - minimo_50
-    niveles_fib = {
-        '236': maximo_50 - movimiento * 0.236 if tendencia == "CALL" else minimo_50 + movimiento * 0.236,
-        '382': maximo_50 - movimiento * 0.382 if tendencia == "CALL" else minimo_50 + movimiento * 0.382,
-        '500': maximo_50 - movimiento * 0.5 if tendencia == "CALL" else minimo_50 + movimiento * 0.5,
-        '618': maximo_50 - movimiento * 0.618 if tendencia == "CALL" else minimo_50 + movimiento * 0.618
-    }
+    niveles_fib = {}
+    if tendencia == "CALL":
+        niveles_fib = {
+            '236': maximo_50 - movimiento * 0.236,
+            '382': maximo_50 - movimiento * 0.382,
+            '500': maximo_50 - movimiento * 0.5,
+            '618': maximo_50 - movimiento * 0.618
+        }
+    elif tendencia == "PUT":
+        niveles_fib = {
+            '236': minimo_50 + movimiento * 0.236,
+            '382': minimo_50 + movimiento * 0.382,
+            '500': minimo_50 + movimiento * 0.5,
+            '618': minimo_50 + movimiento * 0.618
+        }
 
     return {
         'close': last['close'],
@@ -126,7 +132,6 @@ def calcular_indicadores(df):
         'atr': last['atr'],
         'volumen_rel': vol_now / vol_avg if vol_avg else 1,
         'strong_volume': strong_volume,
-        'very_strong_volume': very_strong_volume,
         'tendencia': tendencia,
         'fuerza_tendencia': min(fuerza_tendencia, 100),
         'niveles_fib': niveles_fib,
@@ -134,14 +139,10 @@ def calcular_indicadores(df):
     }
 
 # =========================
-# EVALUAR ACTIVO (para selección)
+# EVALUAR ACTIVO
 # =========================
 
 def evaluar_activo(indicators, umbral_fuerza=40):
-    """
-    Retorna (direccion, fuerza, niveles_fib) si el activo es apto para seguimiento.
-    Requisitos: tendencia clara, fuerza >= umbral.
-    """
     if indicators['tendencia'] is None:
         return None
     if indicators['fuerza_tendencia'] < umbral_fuerza:
@@ -149,15 +150,11 @@ def evaluar_activo(indicators, umbral_fuerza=40):
     return indicators['tendencia'], indicators['fuerza_tendencia'], indicators['niveles_fib']
 
 # =========================
-# VERIFICAR PUNTO DE ENTRADA (retroceso)
+# VERIFICAR PUNTO DE ENTRADA
 # =========================
 
 def verificar_punto_entrada(activo, precio_actual, tolerancia=0.001):
-    """
-    Verifica si el precio actual ha alcanzado algún nivel de Fibonacci (con tolerancia).
-    Retorna (True, nivel_alcanzado) o (False, None).
-    """
-    niveles = activo['niveles_fib']
+    niveles = activo.get('niveles_fib', {})
     direccion = activo['direccion']
     for key, nivel in niveles.items():
         if direccion == "CALL" and precio_actual <= nivel * (1 + tolerancia):
