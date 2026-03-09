@@ -11,173 +11,234 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 # Zona horaria de Ecuador
 ecuador = pytz.timezone("America/Guayaquil")
 
-# Activos predefinidos (fallback)
-REAL_ASSETS = [
-    "EURUSD", "GBPUSD", "AUDUSD", "USDJPY",
-    "EURJPY", "GBPJPY", "USDCHF", "USDCAD", "NZDUSD"
+# Solo activos OTC (para este bot)
+OTC_ASSETS = [
+    "EURUSD-OTC", "GBPUSD-OTC", "AUDUSD-OTC", "USDJPY-OTC",
+    "USDCHF-OTC", "NZDUSD-OTC", "USDCAD-OTC", "GBPJPY-OTC",
+    "EURJPY-OTC", "AUDCAD-OTC", "AUDJPY-OTC", "EURGBP-OTC"
 ]
-OTC_ASSETS = ["EURUSD-OTC", "GBPUSD-OTC", "AUDUSD-OTC", "USDJPY-OTC"]
 
 # =========================
-# OBTENER ACTIVOS ABIERTOS
+# OBTENER ACTIVOS ABIERTOS (solo OTC)
 # =========================
-
 def obtener_activos_abiertos(api):
+    """Obtiene solo activos OTC que estén abiertos en el momento."""
     try:
         open_time = api.get_all_open_time()
-        real = []
         otc = []
-        now_utc = datetime.now(pytz.UTC)
-        dia_semana = now_utc.weekday()
-        es_fin_semana = dia_semana >= 5
-
         if 'binary' in open_time:
             for asset, data in open_time['binary'].items():
-                if data.get('open', False):
-                    if '-OTC' in asset:
-                        otc.append(asset)
-                    else:
-                        if not es_fin_semana:
-                            real.append(asset)
-        if es_fin_semana and not otc:
-            otc = OTC_ASSETS.copy()
-        return real, otc
+                if data.get('open', False) and '-OTC' in asset:
+                    otc.append(asset)
+        if not otc:
+            # Fallback a lista predefinida
+            otc = OTC_ASSETS
+        return [], otc  # real vacío, otc con los encontrados
     except:
-        return REAL_ASSETS, OTC_ASSETS
+        return [], OTC_ASSETS
 
 # =========================
-# INDICADORES BASE
+# CALCULAR INDICADORES BÁSICOS (EMA10, EMA20, etc.)
 # =========================
-
 def calcular_indicadores(df):
+    """
+    df debe tener columnas: open, max, min, close, volume (renombraremos internamente)
+    Retorna un dict con valores útiles.
+    """
     df = df.copy()
-    # Renombrar columnas
     df.rename(columns={'max': 'high', 'min': 'low'}, inplace=True)
 
-    # EMA
-    df['ema20'] = df['close'].ewm(span=20).mean()
-    df['ema50'] = df['close'].ewm(span=50).mean()
-    # RSI
-    delta = df['close'].diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.rolling(14).mean()
-    avg_loss = loss.rolling(14).mean()
-    rs = avg_gain / avg_loss
-    df['rsi'] = 100 - (100 / (1 + rs))
-    # ATR
-    high = df['high']
-    low = df['low']
-    close = df['close']
-    tr = pd.concat([high - low, abs(high - close.shift()), abs(low - close.shift())], axis=1).max(axis=1)
-    df['atr'] = tr.rolling(14).mean()
-    # ADX
-    df['tr'] = tr
-    df['plus_dm'] = np.where((high - high.shift()) > (low.shift() - low), np.maximum(high - high.shift(), 0), 0)
-    df['minus_dm'] = np.where((low.shift() - low) > (high - high.shift()), np.maximum(low.shift() - low, 0), 0)
-    df['atr_period'] = df['tr'].rolling(14).mean()
-    df['plus_di'] = 100 * (df['plus_dm'].rolling(14).mean() / df['atr_period'])
-    df['minus_di'] = 100 * (df['minus_dm'].rolling(14).mean() / df['atr_period'])
-    df['dx'] = 100 * (abs(df['plus_di'] - df['minus_di']) / (df['plus_di'] + df['minus_di']))
-    df['adx'] = df['dx'].rolling(14).mean()
+    # EMAs
+    df['ema10'] = df['close'].ewm(span=10, adjust=False).mean()
+    df['ema20'] = df['close'].ewm(span=20, adjust=False).mean()
+
+    # Volumen promedio (20 períodos)
+    df['vol_avg'] = df['volume'].rolling(20).mean()
 
     # Última vela
     last = df.iloc[-1]
-    # Penúltima vela
     prev = df.iloc[-2] if len(df) > 1 else last
 
-    # Volumen promedio
-    vol_avg = df['volume'].rolling(20).mean().iloc[-1]
-    vol_now = last['volume']
-    strong_volume = vol_now > vol_avg * 1.2 if not pd.isna(vol_avg) else False
+    # Indicar si hay cruce de EMAs en la última vela
+    cruce_ema10_20 = (prev['ema10'] <= prev['ema20'] and last['ema10'] > last['ema20']) or \
+                     (prev['ema10'] >= prev['ema20'] and last['ema10'] < last['ema20'])
+    direccion_cruce = "CALL" if last['ema10'] > last['ema20'] else "PUT" if last['ema10'] < last['ema20'] else None
 
-    # Determinar tendencia (más permisiva: solo ADX y EMAs)
-    if last['adx'] >= 25 and last['ema20'] > last['ema50'] and last['plus_di'] > last['minus_di']:
-        tendencia = "CALL"
-        fuerza_tendencia = last['adx']
-    elif last['adx'] >= 25 and last['ema20'] < last['ema50'] and last['minus_di'] > last['plus_di']:
-        tendencia = "PUT"
-        fuerza_tendencia = last['adx']
-    else:
-        tendencia = None
-        fuerza_tendencia = 0
+    # Volumen relativo
+    vol_rel = last['volume'] / last['vol_avg'] if last['vol_avg'] else 1
 
-    # Calcular niveles de Fibonacci del último movimiento (50 velas)
-    df_50 = df.iloc[-50:]
-    minimo_50 = df_50['low'].min()
-    maximo_50 = df_50['high'].max()
-    movimiento = maximo_50 - minimo_50
-    if tendencia == "CALL":
-        niveles_fib = {
-            '382': maximo_50 - movimiento * 0.382,
-            '500': maximo_50 - movimiento * 0.5,
-            '618': maximo_50 - movimiento * 0.618
-        }
-    elif tendencia == "PUT":
-        niveles_fib = {
-            '382': minimo_50 + movimiento * 0.382,
-            '500': minimo_50 + movimiento * 0.5,
-            '618': minimo_50 + movimiento * 0.618
-        }
+    # Rango de la vela
+    rango = last['high'] - last['low']
+
+    # Estabilidad: variación en últimos 10 minutos (10 velas de 1 min)
+    if len(df) >= 10:
+        ultimas_10 = df.iloc[-10:]
+        precio_min = ultimas_10['low'].min()
+        precio_max = ultimas_10['high'].max()
+        variacion = (precio_max - precio_min) / precio_min if precio_min > 0 else 0
+        estable = variacion < 0.008  # menos de 0.8%
     else:
-        niveles_fib = {}
+        estable = False
 
     return {
         'close': last['close'],
         'high': last['high'],
         'low': last['low'],
         'open': last['open'],
-        'prev_close': prev['close'],
+        'ema10': last['ema10'],
         'ema20': last['ema20'],
-        'ema50': last['ema50'],
-        'rsi': last['rsi'],
-        'adx': last['adx'],
-        'plus_di': last['plus_di'],
-        'minus_di': last['minus_di'],
-        'atr': last['atr'],
-        'volumen_rel': vol_now / vol_avg if vol_avg else 1,
-        'strong_volume': strong_volume,
-        'tendencia': tendencia,
-        'fuerza_tendencia': fuerza_tendencia,
-        'niveles_fib': niveles_fib,
+        'cruce_ema': cruce_ema10_20,
+        'direccion_cruce': direccion_cruce,
+        'vol_rel': vol_rel,
+        'rango': rango,
+        'estable': estable,
         'df': df
     }
 
 # =========================
-# EVALUAR ACTIVO PARA SELECCIÓN
+# DETECTAR NIVELES HORIZONTALES (SOPORTE/RESISTENCIA) CON MÍNIMO 2 TOQUES
 # =========================
+def detectar_niveles_horizontales(df, num_toques=2):
+    """
+    Busca máximos y mínimos que hayan sido tocados al menos `num_toques` veces.
+    Retorna una lista de niveles con su tipo ('soporte' o 'resistencia') y conteo.
+    """
+    # Tomamos las últimas 100 velas para buscar niveles
+    df = df.iloc[-100:].copy()
+    # Identificamos picos (máximos locales) y valles (mínimos locales)
+    highs = df['high']
+    lows = df['low']
 
-def evaluar_activo(indicators, umbral_fuerza=30):
+    # Método simple: agrupar por valor redondeado a ciertos decimales (depende del activo)
+    # Pero como los precios son flotantes, necesitamos una tolerancia.
+    # Usaremos una función más robusta: buscar niveles donde el precio se acercó varias veces.
+    niveles = []
+    tolerancia = 0.0005  # 0.05% ajustable
+
+    # Para resistencias: máximos
+    for i in range(len(highs)-5, len(highs)):
+        # no considerar los muy recientes? mejor todo el rango
+        pass
+    # Es más fácil: buscar precios que se repiten dentro de una banda
+    from collections import defaultdict
+    conteo = defaultdict(int)
+    for idx, val in enumerate(highs):
+        for j in range(max(0, idx-5), min(len(highs), idx+5)):
+            if abs(highs.iloc[j] - val) / val < tolerancia:
+                conteo[round(val, 5)] += 1  # redondeamos para agrupar
+    for idx, val in enumerate(lows):
+        for j in range(max(0, idx-5), min(len(lows), idx+5)):
+            if abs(lows.iloc[j] - val) / val < tolerancia:
+                conteo[round(val, 5)] += 1
+
+    # Filtramos los que tengan al menos num_toques
+    niveles_h = []
+    for precio, cnt in conteo.items():
+        if cnt >= num_toques:
+            # determinar si es soporte o resistencia según posición relativa al precio actual
+            tipo = 'resistencia' if precio > df['close'].iloc[-1] else 'soporte'
+            niveles_h.append({'precio': precio, 'tipo': tipo, 'toques': cnt})
+    # Ordenar por cercanía al precio actual
+    precio_actual = df['close'].iloc[-1]
+    niveles_h.sort(key=lambda x: abs(x['precio'] - precio_actual))
+    return niveles_h
+
+# =========================
+# DETECTAR LÍNEAS DE TENDENCIA (2 TOQUES)
+# =========================
+def detectar_lineas_tendencia(df):
     """
-    Retorna (direccion, fuerza, niveles_fib) si el activo tiene tendencia clara.
-    Requisitos: tendencia definida y fuerza >= umbral.
+    Encuentra posibles líneas de tendencia con 2 toques.
+    Retorna una lista de dict con 'tipo' ('alcista'/'bajista'), 'pendiente', 'intercepto' y 'toques'.
     """
-    if indicators['tendencia'] is None:
+    # Usamos mínimos para tendencia alcista (conecta 2 mínimos crecientes)
+    # y máximos para tendencia bajista (2 máximos decrecientes)
+    # Esto es una simplificación; en un bot real se necesitaría más sofisticación.
+    # Por simplicidad, buscaremos pares de puntos que formen una línea con pendiente significativa.
+    # Limitamos a las últimas 50 velas.
+    df = df.iloc[-50:].copy()
+    minimos = df['low'].values
+    maximos = df['high'].values
+    indices = np.arange(len(df))
+
+    lineas = []
+    # Tendencia alcista: buscar 2 mínimos que sean crecientes
+    for i in range(len(minimos)-10):
+        for j in range(i+5, len(minimos)):
+            if minimos[j] > minimos[i] and (j - i) > 5:
+                pendiente = (minimos[j] - minimos[i]) / (j - i)
+                # Verificar si otros mínimos respetan la línea (opcional)
+                lineas.append({
+                    'tipo': 'alcista',
+                    'pendiente': pendiente,
+                    'intercepto': minimos[i] - pendiente * i,
+                    'toques': 2,
+                    'puntos': (i, j)
+                })
+    # Tendencia bajista: buscar 2 máximos decrecientes
+    for i in range(len(maximos)-10):
+        for j in range(i+5, len(maximos)):
+            if maximos[j] < maximos[i] and (j - i) > 5:
+                pendiente = (maximos[j] - maximos[i]) / (j - i)
+                lineas.append({
+                    'tipo': 'bajista',
+                    'pendiente': pendiente,
+                    'intercepto': maximos[i] - pendiente * i,
+                    'toques': 2,
+                    'puntos': (i, j)
+                })
+    # Podríamos agregar más lógica para seleccionar las mejores
+    # Por ahora, devolvemos las primeras (o las más recientes)
+    return lineas[:5]  # limitamos
+
+# =========================
+# EVALUAR ACTIVO (selección)
+# =========================
+def evaluar_activo(indicators, umbral_estabilidad=True):
+    """
+    Retorna un dict con la información del activo si es seleccionable:
+    - tipo: 'soporte/resistencia' o 'tendencia'
+    - direccion: 'CALL' o 'PUT' según el nivel
+    - nivel: precio del nivel (para horizontal) o línea (para tendencia)
+    - fuerza: basada en toques y estabilidad
+    - descripcion: texto para mostrar
+    """
+    if umbral_estabilidad and not indicators['estable']:
         return None
-    if indicators['fuerza_tendencia'] < umbral_fuerza:
-        return None
-    return indicators['tendencia'], indicators['fuerza_tendencia'], indicators['niveles_fib']
 
-# =========================
-# VERIFICAR RUPTURA DE FIBONACCI (señal de continuación)
-# =========================
+    # Buscar niveles horizontales primero
+    niveles_h = detectar_niveles_horizontales(indicators['df'], num_toques=2)
+    if niveles_h:
+        # Tomamos el nivel más cercano
+        nivel = niveles_h[0]
+        direccion = 'CALL' if nivel['tipo'] == 'soporte' else 'PUT'
+        fuerza = min(nivel['toques'] * 20, 100)  # a más toques más fuerza
+        return {
+            'tipo': 'soporte/resistencia',
+            'direccion': direccion,
+            'nivel': nivel['precio'],
+            'fuerza': fuerza,
+            'descripcion': f"{nivel['tipo']} con {nivel['toques']} toques",
+            'nivel_info': nivel
+        }
 
-def verificar_ruptura(activo, precio_actual, vela_actual, tolerancia=0.001):
-    """
-    Retorna (True, nivel) si el precio rompe un nivel de Fibonacci en la dirección de la tendencia,
-    con volumen fuerte.
-    Para CALL: precio supera el nivel (por encima) y vela alcista.
-    Para PUT: precio perfora el nivel (por debajo) y vela bajista.
-    """
-    niveles = activo['niveles_fib']
-    direccion = activo['direccion']
-    for key, nivel in niveles.items():
-        if direccion == "CALL" and precio_actual > nivel * (1 + tolerancia):
-            # Ruptura alcista: precio supera el nivel
-            if vela_actual['close'] > vela_actual['open'] and vela_actual['volumen_rel'] > 1.2:
-                return True, key
-        elif direccion == "PUT" and precio_actual < nivel * (1 - tolerancia):
-            # Ruptura bajista: precio perfora el nivel
-            if vela_actual['close'] < vela_actual['open'] and vela_actual['volumen_rel'] > 1.2:
-                return True, key
-    return False, None
+    # Si no hay horizontales, buscar líneas de tendencia
+    lineas = detectar_lineas_tendencia(indicators['df'])
+    if lineas:
+        # Elegimos la línea más reciente (con toques más cercanos)
+        linea = lineas[0]
+        # Calcular precio en la línea en el índice actual
+        idx_actual = len(indicators['df']) - 1
+        precio_linea = linea['intercepto'] + linea['pendiente'] * idx_actual
+        direccion = 'CALL' if linea['tipo'] == 'alcista' else 'PUT'
+        fuerza = 60  # valor base
+        return {
+            'tipo': 'tendencia',
+            'direccion': direccion,
+            'nivel': precio_linea,
+            'fuerza': fuerza,
+            'descripcion': f"Línea {linea['tipo']} (2 toques)",
+            'linea_info': linea
+        }
+
+    return None
