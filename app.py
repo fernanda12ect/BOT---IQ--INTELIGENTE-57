@@ -12,7 +12,7 @@ from bot import (
 from iqoptionapi.stable_api import IQ_Option
 
 st.set_page_config(layout="wide")
-st.title("🤖 BOT OTC - SEÑALES CONFIRMADAS (1 MIN ANTES)")
+st.title("🤖 BOT OTC - SEÑALES SIMPLIFICADAS (1 MIN ANTES)")
 
 # Inicializar session_state
 if 'api' not in st.session_state:
@@ -62,7 +62,7 @@ def generar_señal(activo, tipo_nivel, direccion, confirmacion=""):
     st.session_state.señales_activas.append(nueva_señal)
     st.session_state.señales_activas.sort(key=lambda x: x['timestamp'], reverse=True)
     st.session_state.señales_activas = st.session_state.señales_activas[:20]
-    st.session_state.historial.append(f"🎯 SEÑAL: {activo['asset']} - {direccion} a las {entry_local.strftime('%H:%M:%S')} ({tipo_nivel}) - {confirmacion}")
+    st.session_state.historial.append(f"🎯 SEÑAL: {activo['asset']} - {direccion} a las {entry_local.strftime('%H:%M:%S')} ({tipo_nivel})")
 
 # Sidebar
 with st.sidebar:
@@ -263,33 +263,11 @@ if st.session_state.api is not None:
                     # Condición de toque
                     toca = abs(precio_actual - nivel) / nivel < 0.001
 
-                    # Confirmación adicional para la señal:
-                    # 1. Cruce de EMA en la dirección correcta
-                    # 2. La vela actual (última) debe cerrar en la dirección esperada (para evitar mechas)
-                    # 3. Volumen relativo > 1.2 (interés)
-                    # 4. RSI no extremo (opcional, se puede ajustar)
+                    # Señal simplificada: solo toque + cruce de EMA
                     if toca and indicators['cruce_ema'] and indicators['direccion_cruce'] == activo['direccion']:
-                        # Obtener la última vela del df_recent (la misma que estamos monitoreando)
-                        ultima_vela = df_recent.iloc[-1]
-                        cierre = ultima_vela['close']
-                        apertura = ultima_vela['open']
-                        vela_alcista = cierre > apertura
-                        vela_bajista = cierre < apertura
-                        volumen = ultima_vela['volume']
-                        vol_promedio = df_full['vol_avg'].iloc[-1]  # del df_full
-                        vol_rel = volumen / vol_promedio if vol_promedio else 1
-
-                        # Condiciones de confirmación
-                        confirmacion_ok = False
-                        if activo['direccion'] == "CALL" and vela_alcista and vol_rel > 1.2 and indicators['rsi'] < 70:
-                            confirmacion_ok = True
-                        elif activo['direccion'] == "PUT" and vela_bajista and vol_rel > 1.2 and indicators['rsi'] > 30:
-                            confirmacion_ok = True
-
-                        if confirmacion_ok:
-                            generar_señal(activo, activo['tipo'], activo['direccion'], f"EMA+vol+RSI")
-                            remover.append(activo)
-                            continue
+                        generar_señal(activo, activo['tipo'], activo['direccion'], "EMA cruzada")
+                        remover.append(activo)
+                        continue
 
                     # Reevaluar si el activo sigue siendo válido
                     res = evaluar_activo(indicators, umbral_estabilidad)
