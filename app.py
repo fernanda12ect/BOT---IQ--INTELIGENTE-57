@@ -7,19 +7,39 @@ import pytz
 from bot import (
     obtener_activos_abiertos,
     calcular_indicadores,
-    evaluar_activo
+    evaluar_activo,
+    verificar_punto_entrada
 )
 from iqoptionapi.stable_api import IQ_Option
 
-# ====================
-# FUNCIÓN AUXILIAR (debe estar definida antes de usarse)
-# ====================
-def generar_senal(activo, session, ecuador):
-    """
-    Genera una señal de operación para un activo que ha alcanzado su nivel objetivo.
-    """
+st.set_page_config(layout="wide")
+st.title("🤖 IQ OPTION PRO - 3 ACTIVOS DE ALTA PRECISIÓN")
+
+# Inicializar session_state
+if 'api' not in st.session_state:
+    st.session_state.api = None
+if 'activos_reales' not in st.session_state:
+    st.session_state.activos_reales = []
+if 'activos_otc' not in st.session_state:
+    st.session_state.activos_otc = []
+if 'escaneando' not in st.session_state:
+    st.session_state.escaneando = False
+if 'fase' not in st.session_state:
+    st.session_state.fase = "seleccion"
+if 'activos_seguimiento' not in st.session_state:
+    st.session_state.activos_seguimiento = []  # Máx 3 activos
+if 'señales_activas' not in st.session_state:
+    st.session_state.señales_activas = []  # Señales confirmadas
+if 'historial' not in st.session_state:
+    st.session_state.historial = []
+
+# Zona horaria Ecuador
+ecuador = pytz.timezone("America/Guayaquil")
+
+# Definir función generar_senal dentro del ámbito
+def generar_senal(activo, nivel_alcanzado):
     try:
-        server_time = session.api.get_server_time()
+        server_time = st.session_state.api.get_server_time()
         now_utc = datetime.fromtimestamp(server_time, tz=pytz.UTC)
     except:
         now_utc = datetime.now(pytz.UTC)
@@ -34,38 +54,11 @@ def generar_senal(activo, session, ecuador):
         'direccion': activo['direccion'],
         'entry': entry_local.strftime("%H:%M:%S"),
         'expiry': expiry_local.strftime("%H:%M:%S"),
-        'estrategia': activo['estrategia'],
+        'estrategia': f"Retroceso {nivel_alcanzado}",
         'fuerza': activo['fuerza']
     }
-    session.señales_activas.append(señal)
-    session.historial.append(f"🎯 Señal {activo['direccion']} para {activo['asset']} a las {entry_local.strftime('%H:%M:%S')} ({activo['estrategia']})")
-
-# ====================
-# CONFIGURACIÓN DE LA PÁGINA
-# ====================
-st.set_page_config(layout="wide")
-st.title("🤖 IQ OPTION PRO - 5 ESTRATEGIAS INTELIGENTES")
-
-# Inicializar session_state
-if 'api' not in st.session_state:
-    st.session_state.api = None
-if 'activos_reales' not in st.session_state:
-    st.session_state.activos_reales = []
-if 'activos_otc' not in st.session_state:
-    st.session_state.activos_otc = []
-if 'escaneando' not in st.session_state:
-    st.session_state.escaneando = False
-if 'fase' not in st.session_state:
-    st.session_state.fase = "seleccion"
-if 'activos_seguimiento' not in st.session_state:
-    st.session_state.activos_seguimiento = []  # Lista de activos en seguimiento (máx 6)
-if 'señales_activas' not in st.session_state:
-    st.session_state.señales_activas = []  # Lista de señales confirmadas
-if 'historial' not in st.session_state:
-    st.session_state.historial = []
-
-# Zona horaria Ecuador
-ecuador = pytz.timezone("America/Guayaquil")
+    st.session_state.señales_activas.append(señal)
+    st.session_state.historial.append(f"🎯 Señal {activo['direccion']} para {activo['asset']} a las {entry_local.strftime('%H:%M:%S')} (nivel {nivel_alcanzado})")
 
 # Sidebar
 with st.sidebar:
@@ -73,11 +66,11 @@ with st.sidebar:
     email = st.text_input("📧 Email")
     password = st.text_input("🔑 Password", type="password")
 
-    # Umbral de fuerza mínima
-    umbral_fuerza = st.slider("🎯 Fuerza mínima de señal", 0, 100, 40, 5)
+    # Umbral de fuerza mínimo (más alto para precisión)
+    umbral_fuerza = st.slider("🎯 Fuerza mínima de tendencia", 0, 100, 50, 5)
 
-    # Número de activos a seguir
-    NUM_ACTIVOS = 6
+    # Número de activos a seguir (fijo en 3)
+    NUM_ACTIVOS = 3
 
     # Tiempo de espera entre rondas
     pausa_entre_rondas = st.number_input("⏱️ Pausa entre rondas (seg)", 5, 120, 10)
@@ -106,7 +99,7 @@ if conectar:
                 st.session_state.activos_seguimiento = []
                 st.session_state.señales_activas = []
                 st.session_state.historial = []
-                st.success("✅ Conectado - Iniciando búsqueda...")
+                st.success("✅ Conectado - Iniciando búsqueda de activos de alta calidad...")
                 st.rerun()
             else:
                 st.error(f"❌ Error de conexión: {reason}")
@@ -130,29 +123,32 @@ if st.session_state.api is not None:
     else:
         st.warning(f"⚠️ Solo OTC ({otc_count})")
 
-    # --- SECCIÓN 1: ACTIVOS EN SEGUIMIENTO (plegable) ---
-    with st.expander("📌 ACTIVOS EN SEGUIMIENTO", expanded=False):
+    # --- SECCIÓN 1: ACTIVOS EN SEGUIMIENTO ---
+    with st.expander("📌 ACTIVOS EN SEGUIMIENTO (MÁX 3)", expanded=True):
         if st.session_state.activos_seguimiento:
-            # Mostrar en una tabla o tarjetas pequeñas
+            # Mostrar en una tabla clara
             data = []
             for activo in st.session_state.activos_seguimiento:
+                niveles = activo.get('niveles_fib', {})
                 data.append({
                     "Activo": activo['asset'],
-                    "Estrategia": activo['estrategia'],
                     "Dirección": activo['direccion'],
                     "Fuerza": f"{activo['fuerza']:.1f}%",
                     "Precio actual": f"{activo.get('precio_actual', 0):.5f}",
-                    "Nivel objetivo": f"{activo.get('nivel_objetivo', 0):.5f}" if activo.get('nivel_objetivo') else "N/A"
+                    "Nivel 23.6%": f"{niveles.get('236', 0):.5f}",
+                    "Nivel 38.2%": f"{niveles.get('382', 0):.5f}",
+                    "Nivel 50%": f"{niveles.get('500', 0):.5f}",
+                    "Nivel 61.8%": f"{niveles.get('618', 0):.5f}"
                 })
             df = pd.DataFrame(data)
             st.dataframe(df, use_container_width=True)
         else:
             st.info("No hay activos en seguimiento en este momento.")
 
-    # --- SECCIÓN 2: SEÑALES LISTAS PARA OPERAR (plegable) ---
-    with st.expander("🚀 SEÑALES LISTAS PARA OPERAR", expanded=False):
+    # --- SECCIÓN 2: SEÑALES LISTAS PARA OPERAR ---
+    with st.expander("🚀 SEÑALES LISTAS PARA OPERAR", expanded=True):
         if st.session_state.señales_activas:
-            # Mostrar en tarjetas de 2 columnas
+            # Mostrar en tarjetas de 2 columnas (aunque sean pocas)
             cols = st.columns(2)
             for idx, senal in enumerate(st.session_state.señales_activas):
                 with cols[idx % 2]:
@@ -179,7 +175,7 @@ if st.session_state.api is not None:
         else:
             st.info("No hay señales listas en este momento.")
 
-    # --- SECCIÓN 3: HISTORIAL DE EVENTOS (plegable) ---
+    # --- SECCIÓN 3: HISTORIAL DE EVENTOS ---
     with st.expander("📋 HISTORIAL DE EVENTOS", expanded=False):
         if st.session_state.historial:
             for linea in st.session_state.historial[-30:]:
@@ -189,11 +185,9 @@ if st.session_state.api is not None:
 
     # Lógica de escaneo continuo
     if st.session_state.escaneando:
-        now = datetime.now(ecuador)
-
-        # FASE DE SELECCIÓN: buscar los mejores activos
+        # FASE DE SELECCIÓN: buscar los 3 mejores activos
         if st.session_state.fase == "seleccion":
-            st.info("🔍 Buscando activos con señales potenciales...")
+            st.info("🔍 Buscando los 3 activos más confiables...")
             todos_activos = st.session_state.activos_reales + st.session_state.activos_otc
             if not todos_activos:
                 st.warning(f"No hay activos disponibles. Reintentando en {pausa_entre_rondas} seg...")
@@ -218,13 +212,12 @@ if st.session_state.api is not None:
                     indicators = calcular_indicadores(df)
                     res = evaluar_activo(indicators, umbral_fuerza)
                     if res:
-                        direccion, fuerza, estrategia, nivel = res
+                        direccion, fuerza, niveles = res
                         candidatos.append({
                             'asset': asset,
                             'direccion': direccion,
                             'fuerza': fuerza,
-                            'estrategia': estrategia,
-                            'nivel_objetivo': nivel,
+                            'niveles_fib': niveles,
                             'precio_actual': indicators['close'],
                             'indicators': indicators
                         })
@@ -234,30 +227,30 @@ if st.session_state.api is not None:
                 time.sleep(0.1)
 
             if candidatos:
-                # Ordenar por fuerza y tomar los 6 mejores
+                # Ordenar por fuerza y tomar los 3 mejores
                 candidatos.sort(key=lambda x: x['fuerza'], reverse=True)
                 st.session_state.activos_seguimiento = candidatos[:NUM_ACTIVOS]
                 st.session_state.fase = "seguimiento"
-                st.session_state.historial.append(f"✅ Seleccionados {len(st.session_state.activos_seguimiento)} activos:")
+                st.session_state.historial.append(f"✅ Seleccionados {len(st.session_state.activos_seguimiento)} activos de alta calidad:")
                 for a in st.session_state.activos_seguimiento:
-                    st.session_state.historial.append(f"   - {a['asset']} ({a['direccion']}, {a['fuerza']:.1f}%) - {a['estrategia']}")
+                    st.session_state.historial.append(f"   - {a['asset']} ({a['direccion']}, {a['fuerza']:.1f}%)")
                 time.sleep(2)
                 st.rerun()
             else:
-                st.session_state.historial.append("⚠️ No se encontraron activos con señales. Reintentando...")
+                st.session_state.historial.append("⚠️ No se encontraron activos con suficiente calidad. Reintentando...")
                 time.sleep(pausa_entre_rondas)
                 st.rerun()
 
-        # FASE DE SEGUIMIENTO: monitorear activos y generar señales
+        # FASE DE SEGUIMIENTO: monitorear activos y generar señales solo cuando se alcance el nivel
         elif st.session_state.fase == "seguimiento":
-            st.info("🔄 Monitoreando activos en busca de punto de entrada...")
+            st.info("🔄 Monitoreando activos seleccionados para detectar punto de entrada...")
             nuevos_seguimiento = []
             activos_a_remover = []
 
             for activo in st.session_state.activos_seguimiento:
                 asset = activo['asset']
                 try:
-                    # Obtener velas recientes (últimas 5 para precio y última vela)
+                    # Obtener velas recientes (últimas 5 para precio actual)
                     candles = st.session_state.api.get_candles(asset, 60, 5, time.time())
                     if not candles:
                         continue
@@ -265,20 +258,16 @@ if st.session_state.api is not None:
                     precio_actual = df['close'].iloc[-1]
                     activo['precio_actual'] = precio_actual
 
-                    # Verificar si se alcanzó el nivel objetivo (con tolerancia 0.1%)
-                    nivel = activo.get('nivel_objetivo')
-                    if nivel is not None:
-                        if activo['direccion'] == "CALL" and precio_actual <= nivel * 1.001:
-                            # Señal CALL
-                            generar_senal(activo, st.session_state, ecuador)
-                            activos_a_remover.append(activo)
-                            continue
-                        elif activo['direccion'] == "PUT" and precio_actual >= nivel * 0.999:
-                            generar_senal(activo, st.session_state, ecuador)
-                            activos_a_remover.append(activo)
-                            continue
+                    # Verificar si se alcanzó algún nivel de Fibonacci
+                    alcanzado, nivel = verificar_punto_entrada(activo, precio_actual)
+                    if alcanzado:
+                        # Confirmación adicional: volumen fuerte y vela del color correcto
+                        # Podríamos añadir más filtros aquí
+                        generar_senal(activo, nivel)
+                        activos_a_remover.append(activo)  # Se remueve tras dar señal
+                        continue
 
-                    # Si no se alcanzó, reevaluar el activo con datos completos para ver si sigue siendo válido
+                    # Si no se alcanzó, reevaluar el activo para ver si sigue siendo válido
                     candles_full = st.session_state.api.get_candles(asset, 60, 100, time.time())
                     if not candles_full or len(candles_full) < 50:
                         activos_a_remover.append(activo)
@@ -293,18 +282,17 @@ if st.session_state.api is not None:
                     indicators = calcular_indicadores(df_full)
                     res = evaluar_activo(indicators, umbral_fuerza)
                     if res:
-                        direccion, fuerza, estrategia, nivel = res
-                        # Actualizar datos del activo (puede haber cambiado de estrategia)
+                        direccion, fuerza, niveles = res
+                        # Actualizar datos del activo
                         activo['direccion'] = direccion
                         activo['fuerza'] = fuerza
-                        activo['estrategia'] = estrategia
-                        activo['nivel_objetivo'] = nivel
+                        activo['niveles_fib'] = niveles
                         activo['precio_actual'] = indicators['close']
                         nuevos_seguimiento.append(activo)
                     else:
                         # Ya no es válido
                         activos_a_remover.append(activo)
-                        st.session_state.historial.append(f"❌ Activo {asset} perdió validez")
+                        st.session_state.historial.append(f"❌ Activo {asset} perdió calidad")
                 except Exception as e:
                     st.session_state.historial.append(f"⚠️ Error monitoreando {asset}: {str(e)[:50]}")
                     activos_a_remover.append(activo)
