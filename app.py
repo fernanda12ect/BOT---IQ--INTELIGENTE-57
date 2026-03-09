@@ -11,6 +11,38 @@ from bot import (
 )
 from iqoptionapi.stable_api import IQ_Option
 
+# ====================
+# FUNCIÓN AUXILIAR (debe estar definida antes de usarse)
+# ====================
+def generar_senal(activo, session, ecuador):
+    """
+    Genera una señal de operación para un activo que ha alcanzado su nivel objetivo.
+    """
+    try:
+        server_time = session.api.get_server_time()
+        now_utc = datetime.fromtimestamp(server_time, tz=pytz.UTC)
+    except:
+        now_utc = datetime.now(pytz.UTC)
+    entry_dt = now_utc + timedelta(minutes=1)
+    entry_dt = entry_dt.replace(second=0, microsecond=0)
+    expiry_dt = entry_dt + timedelta(minutes=5)
+    entry_local = entry_dt.astimezone(ecuador)
+    expiry_local = expiry_dt.astimezone(ecuador)
+
+    señal = {
+        'asset': activo['asset'],
+        'direccion': activo['direccion'],
+        'entry': entry_local.strftime("%H:%M:%S"),
+        'expiry': expiry_local.strftime("%H:%M:%S"),
+        'estrategia': activo['estrategia'],
+        'fuerza': activo['fuerza']
+    }
+    session.señales_activas.append(señal)
+    session.historial.append(f"🎯 Señal {activo['direccion']} para {activo['asset']} a las {entry_local.strftime('%H:%M:%S')} ({activo['estrategia']})")
+
+# ====================
+# CONFIGURACIÓN DE LA PÁGINA
+# ====================
 st.set_page_config(layout="wide")
 st.title("🤖 IQ OPTION PRO - 5 ESTRATEGIAS INTELIGENTES")
 
@@ -292,27 +324,3 @@ if st.session_state.api is not None:
 
 else:
     st.warning("🔒 Conéctate primero desde el panel izquierdo.")
-
-# Función auxiliar para generar señal
-def generar_senal(activo, session, ecuador):
-    try:
-        server_time = session.api.get_server_time()
-        now_utc = datetime.fromtimestamp(server_time, tz=pytz.UTC)
-    except:
-        now_utc = datetime.now(pytz.UTC)
-    entry_dt = now_utc + timedelta(minutes=1)
-    entry_dt = entry_dt.replace(second=0, microsecond=0)
-    expiry_dt = entry_dt + timedelta(minutes=5)
-    entry_local = entry_dt.astimezone(ecuador)
-    expiry_local = expiry_dt.astimezone(ecuador)
-
-    señal = {
-        'asset': activo['asset'],
-        'direccion': activo['direccion'],
-        'entry': entry_local.strftime("%H:%M:%S"),
-        'expiry': expiry_local.strftime("%H:%M:%S"),
-        'estrategia': activo['estrategia'],
-        'fuerza': activo['fuerza']
-    }
-    session.señales_activas.append(señal)
-    session.historial.append(f"🎯 Señal {activo['direccion']} para {activo['asset']} a las {entry_local.strftime('%H:%M:%S')} ({activo['estrategia']})")
