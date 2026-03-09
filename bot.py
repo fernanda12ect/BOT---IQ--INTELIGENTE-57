@@ -37,7 +37,7 @@ def obtener_activos_abiertos(api):
         return [], OTC_ASSETS
 
 # =========================
-# CALCULAR INDICADORES BÁSICOS
+# CALCULAR INDICADORES BÁSICOS (incluye RSI)
 # =========================
 def calcular_indicadores(df):
     df = df.copy()
@@ -46,6 +46,15 @@ def calcular_indicadores(df):
     # EMAs
     df['ema10'] = df['close'].ewm(span=10, adjust=False).mean()
     df['ema20'] = df['close'].ewm(span=20, adjust=False).mean()
+
+    # RSI (14 períodos)
+    delta = df['close'].diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.rolling(14).mean()
+    avg_loss = loss.rolling(14).mean()
+    rs = avg_gain / avg_loss
+    df['rsi'] = 100 - (100 / (1 + rs))
 
     # Volumen promedio
     df['vol_avg'] = df['volume'].rolling(20).mean()
@@ -78,6 +87,7 @@ def calcular_indicadores(df):
         'open': last['open'],
         'ema10': last['ema10'],
         'ema20': last['ema20'],
+        'rsi': last['rsi'],
         'cruce_ema': cruce_ema10_20,
         'direccion_cruce': direccion_cruce,
         'vol_rel': vol_rel,
@@ -93,42 +103,29 @@ def detectar_niveles_horizontales(df, num_toques=2):
     highs = df['high']
     lows = df['low']
     closes = df['close']
-    opens = df['open']
-    volumes = df['volume']
-    vol_avg = df['volume'].rolling(20).mean()
-
     tolerancia = 0.0005
-    niveles = defaultdict(lambda: {'toques': 0, 'calidad': 0})
+    conteo = defaultdict(int)
 
     for idx in range(len(df)):
-        # Máximos
+        # Máximos locales
         if idx > 0 and idx < len(df)-1:
             if highs.iloc[idx] > highs.iloc[idx-1] and highs.iloc[idx] > highs.iloc[idx+1]:
                 precio = round(highs.iloc[idx], 5)
-                niveles[precio]['toques'] += 1
-                # Calidad (para fuerza, no para selección)
-                mecha_sup = highs.iloc[idx] - max(closes.iloc[idx], opens.iloc[idx])
-                if mecha_sup > (highs.iloc[idx] - lows.iloc[idx]) * 0.3 and volumes.iloc[idx] > vol_avg.iloc[idx] * 1.2:
-                    niveles[precio]['calidad'] += 1
-
-        # Mínimos
+                conteo[precio] += 1
+        # Mínimos locales
         if idx > 0 and idx < len(df)-1:
             if lows.iloc[idx] < lows.iloc[idx-1] and lows.iloc[idx] < lows.iloc[idx+1]:
                 precio = round(lows.iloc[idx], 5)
-                niveles[precio]['toques'] += 1
-                mecha_inf = min(closes.iloc[idx], opens.iloc[idx]) - lows.iloc[idx]
-                if mecha_inf > (highs.iloc[idx] - lows.iloc[idx]) * 0.3 and volumes.iloc[idx] > vol_avg.iloc[idx] * 1.2:
-                    niveles[precio]['calidad'] += 1
+                conteo[precio] += 1
 
     niveles_h = []
-    for precio, data in niveles.items():
-        if data['toques'] >= num_toques:
+    for precio, cnt in conteo.items():
+        if cnt >= num_toques:
             tipo = 'resistencia' if precio > df['close'].iloc[-1] else 'soporte'
             niveles_h.append({
                 'precio': precio,
                 'tipo': tipo,
-                'toques': data['toques'],
-                'calidad': data['calidad']
+                'toques': cnt
             })
 
     precio_actual = df['close'].iloc[-1]
@@ -136,40 +133,36 @@ def detectar_niveles_horizontales(df, num_toques=2):
     return niveles_h
 
 # =========================
-# DETECTAR LÍNEAS DE TENDENCIA (2 TOQUES)
+# DETECTAR LÍNEAS DE TENDENCIA (2 TOQUES, SIMPLE)
 # =========================
 def detectar_lineas_tendencia(df):
     df = df.iloc[-50:].copy()
     minimos = df['low'].values
     maximos = df['high'].values
-    vols = df['volume'].values
-    vol_avg = df['volume'].rolling(20).mean().values
+    indices = np.arange(len(df))
 
     lineas = []
+    # Tendencia alcista: 2 mínimos crecientes
     for i in range(len(minimos)-10):
         for j in range(i+5, len(minimos)):
             if minimos[j] > minimos[i]:
                 pendiente = (minimos[j] - minimos[i]) / (j - i)
-                # Calidad (para fuerza)
-                calidad = 1 if vols[i] > vol_avg[i]*1.2 and vols[j] > vol_avg[j]*1.2 else 0
                 lineas.append({
                     'tipo': 'alcista',
                     'pendiente': pendiente,
                     'intercepto': minimos[i] - pendiente * i,
-                    'toques': 2,
-                    'calidad': calidad
+                    'toques': 2
                 })
+    # Tendencia bajista: 2 máximos decrecientes
     for i in range(len(maximos)-10):
         for j in range(i+5, len(maximos)):
             if maximos[j] < maximos[i]:
                 pendiente = (maximos[j] - maximos[i]) / (j - i)
-                calidad = 1 if vols[i] > vol_avg[i]*1.2 and vols[j] > vol_avg[j]*1.2 else 0
                 lineas.append({
                     'tipo': 'bajista',
                     'pendiente': pendiente,
                     'intercepto': maximos[i] - pendiente * i,
-                    'toques': 2,
-                    'calidad': calidad
+                    'toques': 2
                 })
     return lineas[:5]
 
@@ -184,7 +177,7 @@ def evaluar_activo(indicators, umbral_estabilidad=0.025):
     if niveles_h:
         nivel = niveles_h[0]
         direccion = 'CALL' if nivel['tipo'] == 'soporte' else 'PUT'
-        fuerza = min(30 + nivel['calidad'] * 20 + nivel['toques'] * 5, 100)
+        fuerza = min(30 + nivel['toques'] * 10, 100)
         return {
             'tipo': 'soporte/resistencia',
             'direccion': direccion,
@@ -199,7 +192,7 @@ def evaluar_activo(indicators, umbral_estabilidad=0.025):
         idx_actual = len(indicators['df']) - 1
         precio_linea = linea['intercepto'] + linea['pendiente'] * idx_actual
         direccion = 'CALL' if linea['tipo'] == 'alcista' else 'PUT'
-        fuerza = 50 + linea['calidad'] * 20
+        fuerza = 50
         return {
             'tipo': 'tendencia',
             'direccion': direccion,
