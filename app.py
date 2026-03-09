@@ -28,7 +28,7 @@ if 'activos_seguimiento' not in st.session_state:
 if 'alertas_anticipadas' not in st.session_state:
     st.session_state.alertas_anticipadas = []  # Alertas cuando el precio se acerca
 if 'señales_activas' not in st.session_state:
-    st.session_state.señales_activas = {}  # DICCIONARIO: clave = activo, valor = señal
+    st.session_state.señales_activas = []  # Lista de señales definitivas (las más recientes primero)
 if 'historial' not in st.session_state:
     st.session_state.historial = []
 
@@ -56,10 +56,16 @@ def generar_señal(activo, tipo_nivel, direccion, confirmacion=""):
         'tipo_nivel': tipo_nivel,
         'confirmacion': confirmacion,
         'fuerza': activo.get('fuerza', 50),
-        'timestamp': entry_dt  # para ordenar
+        'timestamp': datetime.now(ecuador)  # para ordenar
     }
-    # Guardar en diccionario (clave = activo, así se sobreescribe la anterior)
-    st.session_state.señales_activas[activo['asset']] = señal
+
+    # Eliminar señal duplicada del mismo activo (si existe)
+    st.session_state.señales_activas = [s for s in st.session_state.señales_activas if s['asset'] != activo['asset']]
+    # Insertar la nueva señal al principio (más reciente)
+    st.session_state.señales_activas.insert(0, señal)
+    # Mantener solo las últimas 20 señales (opcional)
+    st.session_state.señales_activas = st.session_state.señales_activas[:20]
+
     st.session_state.historial.append(f"🎯 SEÑAL DEFINITIVA: {activo['asset']} - {direccion} a las {entry_local.strftime('%H:%M:%S')} ({tipo_nivel})")
 
 # Sidebar
@@ -95,7 +101,7 @@ if conectar:
                 st.session_state.fase = "seleccion"
                 st.session_state.activos_seguimiento = []
                 st.session_state.alertas_anticipadas = []
-                st.session_state.señales_activas = {}
+                st.session_state.señales_activas = []
                 st.session_state.historial = []
                 st.success("✅ Conectado - Buscando activos OTC estables...")
                 st.rerun()
@@ -109,7 +115,7 @@ if desconectar:
     st.session_state.escaneando = False
     st.session_state.activos_seguimiento = []
     st.session_state.alertas_anticipadas = []
-    st.session_state.señales_activas = {}
+    st.session_state.señales_activas = []
     st.success("Desconectado")
     st.rerun()
 
@@ -147,34 +153,20 @@ if st.session_state.api is not None:
     # --- SECCIÓN 3: SEÑALES DEFINITIVAS LISTAS PARA OPERAR ---
     with st.expander("🚀 SEÑALES DEFINITIVAS", expanded=True):
         if st.session_state.señales_activas:
-            # Convertir el diccionario a lista y ordenar por timestamp descendente (más reciente primero)
-            lista_señales = list(st.session_state.señales_activas.values())
-            lista_señales.sort(key=lambda x: x['timestamp'], reverse=True)
-            # Tomar las últimas 6 (o las que quieras)
-            lista_señales = lista_señales[:6]
-
+            # Mostrar en orden de más reciente a más antigua (ya lo están porque insertamos al principio)
             cols = st.columns(2)
-            for idx, senal in enumerate(lista_señales):
+            for idx, senal in enumerate(st.session_state.señales_activas[:6]):  # mostramos las últimas 6 (más recientes)
                 with cols[idx % 2]:
                     asset = senal['asset']
                     tipo = "📱 OTC"
                     asset_clean = asset.replace("-OTC", "")
                     color = "#006400" if senal['direccion'] == "CALL" else "#8B0000"
-                    # Calcular tiempo restante (opcional)
-                    now = datetime.now(ecuador)
-                    entrada = datetime.strptime(senal['entry'], "%H:%M:%S").time()
-                    entrada_dt = datetime.combine(now.date(), entrada).replace(tzinfo=ecuador)
-                    if entrada_dt < now:
-                        entrada_dt += timedelta(days=1)  # si ya pasó hoy, asumimos mañana (pero no debería)
-                    tiempo_restante = (entrada_dt - now).total_seconds()
-                    mins, secs = divmod(max(0, int(tiempo_restante)), 60)
-
                     html_code = f"""
                     <div style="background:#111; padding:15px; border-radius:10px; border:3px solid {color}; margin-bottom:10px;">
                         <h4>{asset_clean} {tipo}</h4>
                         <p style="color:{color}; font-size:1.8rem;">{senal['direccion']}</p>
                         <p><strong>Tipo:</strong> {senal['tipo_nivel']}</p>
-                        <p><strong>Entrada:</strong> {senal['entry']} (en {mins}m {secs}s)</p>
+                        <p><strong>Entrada:</strong> {senal['entry']}</p>
                         <p><strong>Expira:</strong> {senal['expiry']}</p>
                         <p><strong>Conf:</strong> {senal.get('confirmacion', '')}</p>
                         <p style="color:#0f0;">✅ LISTO PARA OPERAR</p>
@@ -288,19 +280,16 @@ if st.session_state.api is not None:
                         continue
                     indicators = calcular_indicadores(df_full)
 
-                    # Condición de toque: precio actual dentro de 0.1% del nivel
                     toca = abs(precio_actual - nivel) / nivel < 0.001
 
                     if toca and indicators['cruce_ema'] and indicators['direccion_cruce'] == activo['direccion']:
-                        # Señal definitiva
                         generar_señal(activo, activo['tipo'], activo['direccion'], confirmacion="EMA cruzada")
                         activos_a_remover.append(activo)
                         continue
 
-                    # Si no hay señal, reevaluar si el activo sigue siendo válido
+                    # Reevaluar activo
                     res = evaluar_activo(indicators, umbral_estabilidad=True)
                     if res:
-                        # Actualizar datos (puede cambiar nivel)
                         activo['nivel'] = res['nivel']
                         activo['fuerza'] = res['fuerza']
                         activo['descripcion'] = res['descripcion']
@@ -312,12 +301,10 @@ if st.session_state.api is not None:
                     st.session_state.historial.append(f"⚠️ Error monitoreando {asset}: {str(e)[:50]}")
                     activos_a_remover.append(activo)
 
-            # Limpiar
             for a in activos_a_remover:
                 if a in st.session_state.activos_seguimiento:
                     st.session_state.activos_seguimiento.remove(a)
 
-            # Si hay espacios, volver a selección
             if len(st.session_state.activos_seguimiento) < max_activos:
                 st.session_state.fase = "seleccion"
                 st.rerun()
