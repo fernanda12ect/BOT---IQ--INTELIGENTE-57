@@ -12,7 +12,7 @@ from bot import (
 from iqoptionapi.stable_api import IQ_Option
 
 st.set_page_config(layout="wide")
-st.title("🤖 BOT OTC - NIVELES CON 2 TOQUES + EMA (1 MIN) - FILTRO DE FUERZA")
+st.title("🤖 BOT OTC - NIVELES CON 2 TOQUES + EMA (1 MIN) - HASTA 15 ACTIVOS")
 
 # Inicializar session_state
 if 'api' not in st.session_state:
@@ -24,7 +24,7 @@ if 'escaneando' not in st.session_state:
 if 'fase' not in st.session_state:
     st.session_state.fase = "seleccion"
 if 'activos_seguimiento' not in st.session_state:
-    st.session_state.activos_seguimiento = []  # Todos los activos que cumplen criterios
+    st.session_state.activos_seguimiento = []  # Máx 15 activos
 if 'alertas_anticipadas' not in st.session_state:
     st.session_state.alertas_anticipadas = []  # Alertas cuando el precio se acerca
 if 'señales_activas' not in st.session_state:
@@ -73,9 +73,9 @@ with st.sidebar:
     email = st.text_input("📧 Email")
     password = st.text_input("🔑 Password", type="password")
 
-    # Parámetros de calidad
-    umbral_fuerza = st.slider("💪 Fuerza mínima para selección (%)", 0, 100, 50, 5)
+    # Parámetros (igual que el original)
     umbral_cerca = st.slider("🔍 Distancia para alerta anticipada (%)", 0.1, 2.0, 0.5, 0.1) / 100
+    max_activos = 15  # Límite fijo a 15 (cambiable en el código si se desea)
     pausa_entre_rondas = st.number_input("⏱️ Pausa entre rondas (seg)", 5, 60, 10)
 
     col1, col2 = st.columns(2)
@@ -123,8 +123,8 @@ if st.session_state.api is not None:
     otc_count = len(st.session_state.activos_otc)
     st.success(f"📱 OTC disponibles: {otc_count}")
 
-    # --- SECCIÓN 1: ACTIVOS EN SEGUIMIENTO ---
-    with st.expander("📌 ACTIVOS EN SEGUIMIENTO (TODOS LOS QUE CUMPLEN)", expanded=True):
+    # --- SECCIÓN 1: ACTIVOS EN SEGUIMIENTO (hasta 15) ---
+    with st.expander(f"📌 ACTIVOS EN SEGUIMIENTO (MÁX {max_activos})", expanded=True):
         if st.session_state.activos_seguimiento:
             data = []
             for a in st.session_state.activos_seguimiento:
@@ -209,31 +209,33 @@ if st.session_state.api is not None:
                     indicators = calcular_indicadores(df)
                     res = evaluar_activo(indicators, umbral_estabilidad=True)
                     if res:
-                        # Filtrar por fuerza mínima
-                        if res['fuerza'] >= umbral_fuerza:
-                            candidatos.append({
-                                'asset': asset,
-                                'tipo': res['tipo'],
-                                'direccion': res['direccion'],
-                                'nivel': res['nivel'],
-                                'fuerza': res['fuerza'],
-                                'descripcion': res['descripcion'],
-                                'precio_actual': indicators['close'],
-                                'indicators': indicators
-                            })
+                        candidatos.append({
+                            'asset': asset,
+                            'tipo': res['tipo'],
+                            'direccion': res['direccion'],
+                            'nivel': res['nivel'],
+                            'fuerza': res['fuerza'],
+                            'descripcion': res['descripcion'],
+                            'precio_actual': indicators['close'],
+                            'indicators': indicators
+                        })
                 except Exception as e:
                     st.session_state.historial.append(f"⚠️ Error con {asset}: {str(e)[:50]}")
                     continue
                 time.sleep(0.2)
 
             if candidatos:
-                # Ordenar por fuerza y tomar todos (sin límite)
+                # Ordenar por fuerza y tomar hasta 15
                 candidatos.sort(key=lambda x: x['fuerza'], reverse=True)
-                st.session_state.activos_seguimiento = candidatos
+                seleccionados = candidatos[:max_activos]
+                st.session_state.activos_seguimiento = seleccionados
                 st.session_state.fase = "seguimiento"
-                st.session_state.historial.append(f"✅ Seleccionados {len(st.session_state.activos_seguimiento)} activos:")
-                for a in st.session_state.activos_seguimiento:
+                st.session_state.historial.append(f"✅ Seleccionados {len(seleccionados)} activos (máx {max_activos}):")
+                for a in seleccionados:
                     st.session_state.historial.append(f"   - {a['asset']} ({a['direccion']}, {a['tipo']}, fuerza {a['fuerza']}%)")
+                # Registrar los que no entraron (opcional)
+                if len(candidatos) > max_activos:
+                    st.session_state.historial.append(f"   ... y {len(candidatos)-max_activos} activos más no entraron por límite.")
                 time.sleep(2)
                 st.rerun()
             else:
@@ -269,7 +271,7 @@ if st.session_state.api is not None:
                             st.session_state.alertas_anticipadas.append(alerta_msg)
                             st.session_state.historial.append(alerta_msg)
 
-                    # Verificar señal definitiva: toque + cruce de EMAs + volumen fuerte
+                    # Verificar señal definitiva: toque + cruce de EMAs
                     candles_full = st.session_state.api.get_candles(asset, 60, 100, time.time())
                     if not candles_full or len(candles_full) < 50:
                         continue
@@ -284,33 +286,41 @@ if st.session_state.api is not None:
                     # Condición de toque: dentro del 0.1% del nivel
                     toca = abs(precio_actual - nivel) / nivel < 0.001
 
-                    if toca and indicators['cruce_ema'] and indicators['direccion_cruce'] == activo['direccion'] and indicators['vol_rel'] > 1.2:
-                        generar_señal(activo, activo['tipo'], activo['direccion'], confirmacion="EMA + Volumen")
+                    if toca and indicators['cruce_ema'] and indicators['direccion_cruce'] == activo['direccion']:
+                        generar_señal(activo, activo['tipo'], activo['direccion'], confirmacion="EMA cruzada")
                         activos_a_remover.append(activo)
                         continue
 
-                    # Reevaluar si el activo sigue siendo válido (con el mismo umbral de fuerza)
+                    # Reevaluar si el activo sigue siendo válido
                     res = evaluar_activo(indicators, umbral_estabilidad=True)
-                    if res and res['fuerza'] >= umbral_fuerza:
-                        # Actualizar datos
+                    if res:
+                        # Actualizar datos (puede cambiar nivel)
                         activo['nivel'] = res['nivel']
                         activo['fuerza'] = res['fuerza']
                         activo['descripcion'] = res['descripcion']
                         nuevos_seguimiento.append(activo)
                     else:
+                        # Determinar por qué falló (para mensaje más específico)
+                        razon = ""
+                        if not indicators['estable']:
+                            razon = "inestable"
+                        elif not (indicators['cruce_ema'] and indicators['direccion_cruce'] == activo['direccion']): # No es exacto, pero es un indicio
+                            razon = "sin cruce de EMAs"
+                        else:
+                            razon = "sin nivel válido"
+                        st.session_state.historial.append(f"❌ {asset} descartado: {razon}")
                         activos_a_remover.append(activo)
-                        st.session_state.historial.append(f"❌ {asset} dejó de cumplir criterios")
                 except Exception as e:
                     st.session_state.historial.append(f"⚠️ Error monitoreando {asset}: {str(e)[:50]}")
                     activos_a_remover.append(activo)
 
-            # Limpiar los que ya no sirven
+            # Limpiar
             for a in activos_a_remover:
                 if a in st.session_state.activos_seguimiento:
                     st.session_state.activos_seguimiento.remove(a)
 
-            # Si no queda ningún activo, volver a selección
-            if len(st.session_state.activos_seguimiento) == 0:
+            # Si hay espacios, volver a selección (para buscar nuevos activos)
+            if len(st.session_state.activos_seguimiento) < max_activos:
                 st.session_state.fase = "seleccion"
                 st.rerun()
             else:
