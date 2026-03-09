@@ -12,7 +12,7 @@ from bot import (
 from iqoptionapi.stable_api import IQ_Option
 
 st.set_page_config(layout="wide")
-st.title("🤖 BOT OTC - NIVELES CON 2 TOQUES + EMA (1 MIN) - HASTA 15 ACTIVOS")
+st.title("🤖 BOT OTC - NIVELES CON 2 TOQUES + EMA (1 MIN)")
 
 # Inicializar session_state
 if 'api' not in st.session_state:
@@ -35,19 +35,20 @@ if 'historial' not in st.session_state:
 # Zona horaria Ecuador
 ecuador = pytz.timezone("America/Guayaquil")
 
-# Definir función generar_señal (incluye timestamp)
+# Definir función generar_señal (ahora incluye timestamp)
 def generar_señal(activo, tipo_nivel, direccion, confirmacion=""):
     try:
         server_time = st.session_state.api.get_server_time()
         now_utc = datetime.fromtimestamp(server_time, tz=pytz.UTC)
     except:
         now_utc = datetime.now(pytz.UTC)
-    entry_dt = now_utc + timedelta(minutes=1)  # entrada en la próxima vela
+    entry_dt = now_utc + timedelta(minutes=1)  # 1 minuto para prepararse (entrada en la próxima vela)
     entry_dt = entry_dt.replace(second=0, microsecond=0)
-    expiry_dt = entry_dt + timedelta(minutes=1)  # vencimiento 1 minuto
+    expiry_dt = entry_dt + timedelta(minutes=1)  # vencimiento 1 minuto después
     entry_local = entry_dt.astimezone(ecuador)
     expiry_local = expiry_dt.astimezone(ecuador)
 
+    # Crear nueva señal
     nueva_señal = {
         'asset': activo['asset'],
         'direccion': direccion,
@@ -56,16 +57,19 @@ def generar_señal(activo, tipo_nivel, direccion, confirmacion=""):
         'tipo_nivel': tipo_nivel,
         'confirmacion': confirmacion,
         'fuerza': activo.get('fuerza', 50),
-        'timestamp': datetime.now(ecuador)
+        'timestamp': datetime.now(ecuador)  # para ordenar
     }
 
-    # Eliminar señales previas del mismo activo (evitar duplicados)
+    # Eliminar señales previas del mismo activo (para evitar duplicados)
     st.session_state.señales_activas = [s for s in st.session_state.señales_activas if s['asset'] != activo['asset']]
+    # Añadir la nueva
     st.session_state.señales_activas.append(nueva_señal)
+    # Ordenar por timestamp descendente (más reciente primero)
     st.session_state.señales_activas.sort(key=lambda x: x['timestamp'], reverse=True)
-    st.session_state.señales_activas = st.session_state.señales_activas[:20]  # Mantener últimas 20
+    # Mantener solo las últimas 10 (para no saturar)
+    st.session_state.señales_activas = st.session_state.señales_activas[:10]
 
-    st.session_state.historial.append(f"🎯 SEÑAL DEFINITIVA: {activo['asset']} - {direccion} a las {entry_local.strftime('%H:%M:%S')} ({tipo_nivel}) - {confirmacion}")
+    st.session_state.historial.append(f"🎯 SEÑAL DEFINITIVA: {activo['asset']} - {direccion} a las {entry_local.strftime('%H:%M:%S')} ({tipo_nivel})")
 
 # Sidebar
 with st.sidebar:
@@ -73,9 +77,9 @@ with st.sidebar:
     email = st.text_input("📧 Email")
     password = st.text_input("🔑 Password", type="password")
 
-    # Parámetros (igual que el original)
+    # Parámetros
     umbral_cerca = st.slider("🔍 Distancia para alerta anticipada (%)", 0.1, 2.0, 0.5, 0.1) / 100
-    max_activos = 15  # Límite fijo a 15 (cambiable en el código si se desea)
+    max_activos = st.slider("📊 Máx activos en seguimiento", 1, 15, 6, 1)  # Cambiado a 15
     pausa_entre_rondas = st.number_input("⏱️ Pausa entre rondas (seg)", 5, 60, 10)
 
     col1, col2 = st.columns(2)
@@ -141,7 +145,7 @@ if st.session_state.api is not None:
         else:
             st.info("No hay activos en seguimiento.")
 
-    # --- SECCIÓN 2: ALERTAS ANTICIPADAS ---
+    # --- SECCIÓN 2: ALERTAS ANTICIPADAS (precio cerca del nivel) ---
     with st.expander("🔔 ALERTAS ANTICIPADAS", expanded=True):
         if st.session_state.alertas_anticipadas:
             for alerta in st.session_state.alertas_anticipadas[-10:]:
@@ -149,10 +153,11 @@ if st.session_state.api is not None:
         else:
             st.info("No hay alertas por ahora.")
 
-    # --- SECCIÓN 3: SEÑALES DEFINITIVAS ---
+    # --- SECCIÓN 3: SEÑALES DEFINITIVAS LISTAS PARA OPERAR ---
     with st.expander("🚀 SEÑALES DEFINITIVAS", expanded=True):
         if st.session_state.señales_activas:
             cols = st.columns(2)
+            # Mostrar las señales en orden (ya están ordenadas por timestamp descendente)
             for idx, senal in enumerate(st.session_state.señales_activas):
                 with cols[idx % 2]:
                     asset = senal['asset']
@@ -225,17 +230,12 @@ if st.session_state.api is not None:
                 time.sleep(0.2)
 
             if candidatos:
-                # Ordenar por fuerza y tomar hasta 15
                 candidatos.sort(key=lambda x: x['fuerza'], reverse=True)
-                seleccionados = candidatos[:max_activos]
-                st.session_state.activos_seguimiento = seleccionados
+                st.session_state.activos_seguimiento = candidatos[:max_activos]
                 st.session_state.fase = "seguimiento"
-                st.session_state.historial.append(f"✅ Seleccionados {len(seleccionados)} activos (máx {max_activos}):")
-                for a in seleccionados:
+                st.session_state.historial.append(f"✅ Seleccionados {len(st.session_state.activos_seguimiento)} activos:")
+                for a in st.session_state.activos_seguimiento:
                     st.session_state.historial.append(f"   - {a['asset']} ({a['direccion']}, {a['tipo']}, fuerza {a['fuerza']}%)")
-                # Registrar los que no entraron (opcional)
-                if len(candidatos) > max_activos:
-                    st.session_state.historial.append(f"   ... y {len(candidatos)-max_activos} activos más no entraron por límite.")
                 time.sleep(2)
                 st.rerun()
             else:
@@ -271,7 +271,7 @@ if st.session_state.api is not None:
                             st.session_state.alertas_anticipadas.append(alerta_msg)
                             st.session_state.historial.append(alerta_msg)
 
-                    # Verificar señal definitiva: toque + cruce de EMAs
+                    # Verificar señal definitiva: cuando el precio toca el nivel (con tolerancia) y hay cruce de EMAs
                     candles_full = st.session_state.api.get_candles(asset, 60, 100, time.time())
                     if not candles_full or len(candles_full) < 50:
                         continue
@@ -283,15 +283,16 @@ if st.session_state.api is not None:
                         continue
                     indicators = calcular_indicadores(df_full)
 
-                    # Condición de toque: dentro del 0.1% del nivel
+                    # Condición de toque: precio actual dentro de 0.1% del nivel
                     toca = abs(precio_actual - nivel) / nivel < 0.001
 
                     if toca and indicators['cruce_ema'] and indicators['direccion_cruce'] == activo['direccion']:
+                        # Señal definitiva
                         generar_señal(activo, activo['tipo'], activo['direccion'], confirmacion="EMA cruzada")
                         activos_a_remover.append(activo)
                         continue
 
-                    # Reevaluar si el activo sigue siendo válido
+                    # Si no hay señal, reevaluar si el activo sigue siendo válido
                     res = evaluar_activo(indicators, umbral_estabilidad=True)
                     if res:
                         # Actualizar datos (puede cambiar nivel)
@@ -300,16 +301,8 @@ if st.session_state.api is not None:
                         activo['descripcion'] = res['descripcion']
                         nuevos_seguimiento.append(activo)
                     else:
-                        # Determinar por qué falló (para mensaje más específico)
-                        razon = ""
-                        if not indicators['estable']:
-                            razon = "inestable"
-                        elif not (indicators['cruce_ema'] and indicators['direccion_cruce'] == activo['direccion']): # No es exacto, pero es un indicio
-                            razon = "sin cruce de EMAs"
-                        else:
-                            razon = "sin nivel válido"
-                        st.session_state.historial.append(f"❌ {asset} descartado: {razon}")
                         activos_a_remover.append(activo)
+                        st.session_state.historial.append(f"❌ {asset} dejó de cumplir criterios")
                 except Exception as e:
                     st.session_state.historial.append(f"⚠️ Error monitoreando {asset}: {str(e)[:50]}")
                     activos_a_remover.append(activo)
@@ -319,7 +312,7 @@ if st.session_state.api is not None:
                 if a in st.session_state.activos_seguimiento:
                     st.session_state.activos_seguimiento.remove(a)
 
-            # Si hay espacios, volver a selección (para buscar nuevos activos)
+            # Si hay espacios, volver a selección
             if len(st.session_state.activos_seguimiento) < max_activos:
                 st.session_state.fase = "seleccion"
                 st.rerun()
