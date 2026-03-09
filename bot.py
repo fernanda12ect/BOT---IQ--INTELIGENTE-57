@@ -80,52 +80,32 @@ def calcular_indicadores(df):
     df['dx'] = 100 * (abs(df['plus_di'] - df['minus_di']) / (df['plus_di'] + df['minus_di']))
     df['adx'] = df['dx'].rolling(14).mean()
 
-    # Última vela
+    # Últimas velas
     last = df.iloc[-1]
+    prev = df.iloc[-2] if len(df) > 1 else last
+    prev2 = df.iloc[-3] if len(df) > 2 else prev
+
     # Volumen
     vol_avg = df['volume'].rolling(20).mean().iloc[-1]
     vol_now = last['volume']
     strong_volume = vol_now > vol_avg * 1.2 if not pd.isna(vol_avg) else False
-    very_strong_volume = vol_now > vol_avg * 1.5 if not pd.isna(vol_avg) else False
 
-    # Determinar tendencia principal (filtro estricto)
-    if (last['ema20'] > last['ema50'] and last['plus_di'] > last['minus_di'] and last['adx'] >= 25):
+    # Determinar tendencia principal
+    if last['adx'] >= 25 and last['ema20'] > last['ema50'] and last['plus_di'] > last['minus_di']:
         tendencia = "CALL"
-        fuerza_tendencia = last['adx'] + (10 if strong_volume else 0)
-    elif (last['ema20'] < last['ema50'] and last['minus_di'] > last['plus_di'] and last['adx'] >= 25):
+        fuerza_tendencia = last['adx']
+    elif last['adx'] >= 25 and last['ema20'] < last['ema50'] and last['minus_di'] > last['plus_di']:
         tendencia = "PUT"
-        fuerza_tendencia = last['adx'] + (10 if strong_volume else 0)
+        fuerza_tendencia = last['adx']
     else:
         tendencia = None
         fuerza_tendencia = 0
 
-    # Verificar estructura de máximos/mínimos (tendencia "bonita")
-    ultimos_20 = df.iloc[-20:]
-    if tendencia == "CALL":
-        maximos = ultimos_20['high'].values
-        minimos = ultimos_20['low'].values
-        # Tendencia bonita: máximos crecientes y mínimos crecientes, con pocas correcciones bruscas
-        estructura_valida = all(maximos[i] <= maximos[i+1] for i in range(len(maximos)-1)) and all(minimos[i] <= minimos[i+1] for i in range(len(minimos)-1))
-        # Además, la pendiente de las EMAs debe ser positiva y sostenida
-        pendiente_ema20 = (last['ema20'] - df['ema20'].iloc[-10]) / 10
-        pendiente_ema50 = (last['ema50'] - df['ema50'].iloc[-10]) / 10
-        tendencia_bonita = estructura_valida and pendiente_ema20 > 0 and pendiente_ema50 > 0
-    elif tendencia == "PUT":
-        maximos = ultimos_20['high'].values
-        minimos = ultimos_20['low'].values
-        estructura_valida = all(maximos[i] >= maximos[i+1] for i in range(len(maximos)-1)) and all(minimos[i] >= minimos[i+1] for i in range(len(minimos)-1))
-        pendiente_ema20 = (last['ema20'] - df['ema20'].iloc[-10]) / 10
-        pendiente_ema50 = (last['ema50'] - df['ema50'].iloc[-10]) / 10
-        tendencia_bonita = estructura_valida and pendiente_ema20 < 0 and pendiente_ema50 < 0
-    else:
-        tendencia_bonita = False
-
-    # Calcular niveles de Fibonacci del último movimiento (50 velas)
+    # Niveles de Fibonacci del último movimiento (50 velas)
     df_50 = df.iloc[-50:]
     minimo_50 = df_50['low'].min()
     maximo_50 = df_50['high'].max()
     movimiento = maximo_50 - minimo_50
-    niveles_fib = {}
     if tendencia == "CALL":
         niveles_fib = {
             '236': maximo_50 - movimiento * 0.236,
@@ -140,34 +120,46 @@ def calcular_indicadores(df):
             '500': minimo_50 + movimiento * 0.5,
             '618': minimo_50 + movimiento * 0.618
         }
+    else:
+        niveles_fib = {}
 
-    # Detectar niveles de soporte/resistencia relevantes (máximos y mínimos de las últimas 50 velas, no extremos)
-    # Buscamos puntos donde el precio ha rebotado varias veces
-    # Para simplificar, tomamos los máximos y mínimos de las últimas 50 velas, pero excluimos el máximo y mínimo absolutos
-    highs = df_50['high'].values
-    lows = df_50['low'].values
-    # Identificamos picos locales (máximos que son mayores que sus vecinos)
-    picos = []
-    valles = []
-    for i in range(2, len(highs)-2):
-        if highs[i] > highs[i-1] and highs[i] > highs[i-2] and highs[i] > highs[i+1] and highs[i] > highs[i+2]:
-            picos.append(highs[i])
-        if lows[i] < lows[i-1] and lows[i] < lows[i-2] and lows[i] < lows[i+1] and lows[i] < lows[i+2]:
-            valles.append(lows[i])
-    # Niveles relevantes: la media de esos picos/valles (simplificado)
-    nivel_resistencia_relevante = np.mean(picos) if picos else None
-    nivel_soporte_relevante = np.mean(valles) if valles else None
+    # Detectar patrones de reversión
+    # Pin bar: cuerpo pequeño, mecha larga en dirección opuesta
+    body = abs(last['close'] - last['open'])
+    upper_wick = last['high'] - max(last['close'], last['open'])
+    lower_wick = min(last['close'], last['open']) - last['low']
+    total_range = last['high'] - last['low']
+    pin_bar = False
+    if total_range > 0:
+        if tendencia == "CALL":  # Esperamos una vela bajista en el retroceso, luego reversión alcista? Realmente el patrón es para detectar reversión en el nivel
+            # Para CALL, buscamos una vela alcista con mecha inferior larga (rechazo de bajada)
+            if lower_wick > body * 2 and lower_wick > upper_wick and body < total_range * 0.3:
+                pin_bar = True
+        elif tendencia == "PUT":
+            # Para PUT, buscamos una vela bajista con mecha superior larga
+            if upper_wick > body * 2 and upper_wick > lower_wick and body < total_range * 0.3:
+                pin_bar = True
 
-    # Detectar imbalances (velas de gran cuerpo con volumen)
-    # Consideramos imbalance si la vela actual tiene cuerpo > 1.5 * ATR y volumen > 1.5 * promedio
-    cuerpo = abs(last['close'] - last['open'])
-    imbalance_actual = (cuerpo > 1.5 * last['atr']) and (vol_now > 1.5 * vol_avg)
+    # Envolvente (engulfing)
+    engulfing = False
+    if tendencia == "CALL":
+        # Vela actual alcista que envuelve a la anterior bajista
+        if last['close'] > last['open'] and prev['close'] < prev['open'] and last['close'] > prev['high'] and last['open'] < prev['low']:
+            engulfing = True
+    elif tendencia == "PUT":
+        # Vela actual bajista que envuelve a la anterior alcista
+        if last['close'] < last['open'] and prev['close'] > prev['open'] and last['close'] < prev['low'] and last['open'] > prev['high']:
+            engulfing = True
 
     return {
         'close': last['close'],
         'high': last['high'],
         'low': last['low'],
         'open': last['open'],
+        'prev_close': prev['close'],
+        'prev_high': prev['high'],
+        'prev_low': prev['low'],
+        'prev_open': prev['open'],
         'ema20': last['ema20'],
         'ema50': last['ema50'],
         'rsi': last['rsi'],
@@ -177,65 +169,42 @@ def calcular_indicadores(df):
         'atr': last['atr'],
         'volumen_rel': vol_now / vol_avg if vol_avg else 1,
         'strong_volume': strong_volume,
-        'very_strong_volume': very_strong_volume,
         'tendencia': tendencia,
-        'fuerza_tendencia': min(fuerza_tendencia, 100),
-        'tendencia_bonita': tendencia_bonita,
+        'fuerza_tendencia': fuerza_tendencia,
         'niveles_fib': niveles_fib,
-        'nivel_soporte_relevante': nivel_soporte_relevante,
-        'nivel_resistencia_relevante': nivel_resistencia_relevante,
-        'imbalance_actual': imbalance_actual,
+        'pin_bar': pin_bar,
+        'engulfing': engulfing,
         'df': df
     }
 
 # =========================
-# EVALUAR ACTIVO (para selección ultra rigurosa)
+# EVALUAR ACTIVO PARA SELECCIÓN
 # =========================
 
-def evaluar_activo(indicators, umbral_fuerza=60):
-    """
-    Retorna (direccion, fuerza, niveles_fib, niveles_sr) si el activo es de alta calidad.
-    Requisitos: tendencia bonita, estructura válida, fuerza >= umbral (más alto).
-    """
-    if not indicators['tendencia_bonita']:
+def evaluar_activo(indicators, umbral_fuerza=30):
+    if indicators['tendencia'] is None:
         return None
     if indicators['fuerza_tendencia'] < umbral_fuerza:
         return None
-    return (indicators['tendencia'],
-            indicators['fuerza_tendencia'],
-            indicators['niveles_fib'],
-            indicators['nivel_soporte_relevante'],
-            indicators['nivel_resistencia_relevante'])
+    return indicators['tendencia'], indicators['fuerza_tendencia'], indicators['niveles_fib']
 
 # =========================
-# VERIFICAR PUNTO DE ENTRADA CON FILTROS AVANZADOS
+# VERIFICAR PUNTO DE ENTRADA (con patrones de reversión)
 # =========================
 
-def verificar_punto_entrada(activo, precio_actual, indicators_actuales, tolerancia=0.001):
+def verificar_punto_entrada(activo, precio_actual, indicators, tolerancia=0.001):
     """
-    Verifica si el precio actual ha alcanzado algún nivel de Fibonacci, y además:
-    - Que el nivel coincida con un soporte/resistencia relevante (si existe)
-    - Que haya un imbalance reciente que confirme la reacción
-    Retorna (True, nivel_alcanzado) si se cumplen los filtros.
+    Verifica si el precio actual está cerca de algún nivel de Fibonacci y si hay un patrón de reversión (pin bar o engulfing) con volumen.
+    Retorna (True, nivel_alcanzado) o (False, None).
     """
     niveles = activo['niveles_fib']
     direccion = activo['direccion']
-    nivel_soporte = activo.get('nivel_soporte_relevante')
-    nivel_resistencia = activo.get('nivel_resistencia_relevante')
-
     for key, nivel in niveles.items():
-        # Verificar que el precio esté cerca del nivel
         if direccion == "CALL" and precio_actual <= nivel * (1 + tolerancia):
-            # Comprobar que el nivel esté cerca de un soporte relevante (si existe)
-            if nivel_soporte and abs(precio_actual - nivel_soporte) > 0.001 * precio_actual:
-                continue  # No está cerca del soporte relevante
-            # Comprobar si hay imbalance reciente (últimas 2 velas)
-            if not indicators_actuales.get('imbalance_actual', False):
-                # Podríamos buscar imbalance en velas anteriores, pero simplificamos
-                pass
-            return True, key
+            # Confirmación: vela alcista con patrón de reversión o engulfing, y volumen
+            if (indicators['pin_bar'] or indicators['engulfing']) and indicators['strong_volume']:
+                return True, key
         elif direccion == "PUT" and precio_actual >= nivel * (1 - tolerancia):
-            if nivel_resistencia and abs(precio_actual - nivel_resistencia) > 0.001 * precio_actual:
-                continue
-            return True, key
+            if (indicators['pin_bar'] or indicators['engulfing']) and indicators['strong_volume']:
+                return True, key
     return False, None
