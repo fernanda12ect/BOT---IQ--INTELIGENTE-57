@@ -130,14 +130,14 @@ if st.session_state.api is not None:
         st.subheader(f"🔎 ACTIVOS EN SEGUIMIENTO ({len(st.session_state.activos_seguimiento)})")
         data = []
         for activo in st.session_state.activos_seguimiento:
-            # Mostrar información relevante de cada activo
+            nivel_clave = activo.get('nivel_clave')
             data.append({
                 "Activo": activo['asset'],
                 "Estrategia": activo.get('estrategia', 'N/A'),
                 "Dirección": activo['direccion'],
                 "Fuerza": f"{activo['fuerza']:.1f}%",
                 "Precio": f"{activo.get('precio_actual', 0):.5f}",
-                "Nivel clave": f"{activo.get('nivel_clave', 0):.5f}"
+                "Nivel clave": f"{nivel_clave:.5f}" if nivel_clave is not None else "N/A"
             })
         df = pd.DataFrame(data)
         st.dataframe(df, use_container_width=True)
@@ -177,16 +177,7 @@ if st.session_state.api is not None:
                     indicators = calcular_indicadores(df)
                     res = evaluar_activo(indicators, umbral_fuerza)
                     if res:
-                        direccion, fuerza, estrategia = res
-                        # Determinar nivel clave según estrategia
-                        nivel_clave = None
-                        if "Soporte" in estrategia:
-                            nivel_clave = indicators['soporte']
-                        elif "Resistencia" in estrategia:
-                            nivel_clave = indicators['resistencia']
-                        elif "Breakout" in estrategia:
-                            # Podríamos guardar el rango
-                            pass
+                        direccion, fuerza, estrategia, nivel_clave = res
                         candidatos.append({
                             'asset': asset,
                             'direccion': direccion,
@@ -234,29 +225,21 @@ if st.session_state.api is not None:
                     activo['precio_actual'] = precio_actual
 
                     # Verificar si se alcanzó el punto de entrada
-                    # Para estrategias de soporte/resistencia: precio toca nivel
-                    # Para breakout: precio supera/perfora
-                    # Para tendencia: podría ser un retroceso, pero simplificamos: si la fuerza sigue alta, enviamos señal
-                    # En esta versión, cuando un activo está en seguimiento, asumimos que la señal es inminente
-                    # y la enviamos cuando el precio se acerca al nivel (o inmediatamente si es breakout)
-                    if "Soporte" in activo['estrategia'] and precio_actual <= activo['nivel_clave'] * 1.001:
-                        # Señal CALL confirmada
+                    if "Soporte" in activo['estrategia'] and activo['nivel_clave'] is not None and precio_actual <= activo['nivel_clave'] * 1.001:
                         generar_senal(activo, st.session_state, ecuador)
                         activos_a_remover.append(activo)
                         continue
-                    elif "Resistencia" in activo['estrategia'] and precio_actual >= activo['nivel_clave'] * 0.999:
+                    elif "Resistencia" in activo['estrategia'] and activo['nivel_clave'] is not None and precio_actual >= activo['nivel_clave'] * 0.999:
                         generar_senal(activo, st.session_state, ecuador)
                         activos_a_remover.append(activo)
                         continue
                     elif "Breakout" in activo['estrategia']:
-                        # Ya debería haberse dado en la selección, pero si no, lo enviamos ahora
+                        # Para breakout, la señal es inmediata (ya debería haberse dado en selección)
                         generar_senal(activo, st.session_state, ecuador)
                         activos_a_remover.append(activo)
                         continue
-                    elif "Tendencia" in activo['estrategia'] or "Reversión" in activo['estrategia']:
-                        # Para estas, podemos esperar a que el precio confirme con una vela adicional
-                        # Pero para simplificar, enviamos señal después de un tiempo fijo (ej. 1 minuto)
-                        # O mejor, reevaluamos con velas nuevas
+                    else:
+                        # Para tendencia y reversión, reevaluamos con nuevas velas
                         candles_full = st.session_state.api.get_candles(asset, 60, 100, time.time())
                         if not candles_full:
                             continue
@@ -269,9 +252,11 @@ if st.session_state.api is not None:
                         indicators = calcular_indicadores(df_full)
                         res = evaluar_activo(indicators, umbral_fuerza)
                         if res and res[1] >= umbral_fuerza:
-                            # Sigue siendo buena, la mantenemos
-                            activo['fuerza'] = res[1]
-                            activo['estrategia'] = res[2]
+                            # Sigue siendo buena, actualizamos datos
+                            direccion, fuerza, estrategia, nivel_clave = res
+                            activo['fuerza'] = fuerza
+                            activo['estrategia'] = estrategia
+                            activo['nivel_clave'] = nivel_clave
                             nuevos_seguimiento.append(activo)
                         else:
                             activos_a_remover.append(activo)
@@ -285,7 +270,7 @@ if st.session_state.api is not None:
                 if a in st.session_state.activos_seguimiento:
                     st.session_state.activos_seguimiento.remove(a)
 
-            # Si hay espacios, buscar reemplazos
+            # Si hay espacios, volver a selección
             if len(st.session_state.activos_seguimiento) < NUM_ACTIVOS:
                 st.session_state.fase = "seleccion"
                 st.rerun()
