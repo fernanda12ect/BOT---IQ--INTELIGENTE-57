@@ -12,7 +12,7 @@ from bot import (
 from iqoptionapi.stable_api import IQ_Option
 
 st.set_page_config(layout="wide")
-st.title("🤖 BOT OTC - NIVELES CON CALIDAD + EMA (PREDICCIÓN 1 MIN)")
+st.title("🤖 BOT OTC - ESTRATEGIA EFECTIVA (SIN LÍMITE)")
 
 # Inicializar session_state
 if 'api' not in st.session_state:
@@ -70,8 +70,9 @@ with st.sidebar:
     email = st.text_input("📧 Email")
     password = st.text_input("🔑 Password", type="password")
 
+    umbral_estabilidad = st.slider("📊 Estabilidad máxima (%)", 1.0, 5.0, 2.5, 0.1) / 100
     umbral_cerca = st.slider("🔍 Alerta anticipada (%)", 0.1, 2.0, 0.5, 0.1) / 100
-    fuerza_minima = st.slider("💪 Fuerza mínima", 0, 100, 50, 5)
+    fuerza_minima = st.slider("💪 Fuerza mínima", 0, 100, 30, 5)
     pausa_entre_rondas = st.number_input("⏱️ Pausa (seg)", 5, 60, 10)
 
     col1, col2 = st.columns(2)
@@ -80,7 +81,7 @@ with st.sidebar:
     with col2:
         desconectar = st.button("⛔ Desconectar")
 
-# Lógica de conexión (igual que antes)
+# Lógica de conexión
 if conectar:
     if not email or not password:
         st.error("❌ Ingresa email y password")
@@ -98,12 +99,12 @@ if conectar:
                 st.session_state.alertas_anticipadas = []
                 st.session_state.señales_activas = []
                 st.session_state.historial = []
-                st.success("✅ Conectado - Buscando activos...")
+                st.success("✅ Conectado")
                 st.rerun()
             else:
                 st.error(f"❌ Error de conexión: {reason}")
         except Exception as e:
-            st.error(f"Error inesperado: {e}")
+            st.error(f"Error: {e}")
 
 if desconectar:
     st.session_state.api = None
@@ -116,10 +117,9 @@ if desconectar:
 
 # Área principal
 if st.session_state.api is not None:
-    otc_count = len(st.session_state.activos_otc)
-    st.success(f"📱 OTC disponibles: {otc_count}")
+    st.success(f"📱 OTC disponibles: {len(st.session_state.activos_otc)}")
 
-    with st.expander("📌 ACTIVOS EN SEGUIMIENTO (CALIDAD)", expanded=True):
+    with st.expander("📌 ACTIVOS EN SEGUIMIENTO", expanded=True):
         if st.session_state.activos_seguimiento:
             data = []
             for a in st.session_state.activos_seguimiento:
@@ -174,7 +174,7 @@ if st.session_state.api is not None:
     # Lógica de escaneo continuo
     if st.session_state.escaneando:
         if st.session_state.fase == "seleccion":
-            st.info("🔍 Escaneando...")
+            st.info("🔍 Escaneando activos...")
             todos = st.session_state.activos_otc
             if not todos:
                 time.sleep(pausa_entre_rondas)
@@ -195,7 +195,7 @@ if st.session_state.api is not None:
                     if len(df) < 50:
                         continue
                     indicators = calcular_indicadores(df)
-                    res = evaluar_activo(indicators)
+                    res = evaluar_activo(indicators, umbral_estabilidad)
                     if res and res['fuerza'] >= fuerza_minima:
                         candidatos.append({
                             'asset': asset,
@@ -208,8 +208,7 @@ if st.session_state.api is not None:
                             'indicators': indicators
                         })
                 except Exception as e:
-                    st.session_state.historial.append(f"⚠️ Error {asset}: {str(e)[:50]}")
-                    continue
+                    continue  # No llenar historial de errores
                 time.sleep(0.2)
 
             if candidatos:
@@ -217,8 +216,6 @@ if st.session_state.api is not None:
                 st.session_state.activos_seguimiento = candidatos
                 st.session_state.fase = "seguimiento"
                 st.session_state.historial.append(f"✅ Seleccionados {len(candidatos)} activos")
-                for a in candidatos[:5]:
-                    st.session_state.historial.append(f"   - {a['asset']} ({a['direccion']}, {a['fuerza']}%)")
                 time.sleep(2)
                 st.rerun()
             else:
@@ -268,17 +265,15 @@ if st.session_state.api is not None:
                         remover.append(activo)
                         continue
 
-                    res = evaluar_activo(indicators)
+                    res = evaluar_activo(indicators, umbral_estabilidad)
                     if res and res['fuerza'] >= fuerza_minima:
                         activo['nivel'] = res['nivel']
                         activo['fuerza'] = res['fuerza']
-                        activo['descripcion'] = res['descripcion']
                         nuevos.append(activo)
                     else:
                         remover.append(activo)
                         st.session_state.historial.append(f"❌ {asset} dejó de cumplir")
                 except Exception as e:
-                    st.session_state.historial.append(f"⚠️ Error {asset}: {str(e)[:50]}")
                     remover.append(activo)
 
             for a in remover:
