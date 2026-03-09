@@ -89,29 +89,16 @@ def calcular_indicadores(df):
     strong_volume = vol_now > vol_avg * 1.2 if not pd.isna(vol_avg) else False
     very_strong_volume = vol_now > vol_avg * 1.5 if not pd.isna(vol_avg) else False
 
-    # Determinar tendencia principal
-    if last['ema20'] > last['ema50'] and last['plus_di'] > last['minus_di'] and last['adx'] >= 25:
+    # Determinar tendencia principal (ahora con ADX mínimo 20)
+    if last['ema20'] > last['ema50'] and last['plus_di'] > last['minus_di'] and last['adx'] >= 20:
         tendencia = "CALL"
         fuerza_tendencia = last['adx'] + (10 if strong_volume else 0)
-    elif last['ema20'] < last['ema50'] and last['minus_di'] > last['plus_di'] and last['adx'] >= 25:
+    elif last['ema20'] < last['ema50'] and last['minus_di'] > last['plus_di'] and last['adx'] >= 20:
         tendencia = "PUT"
         fuerza_tendencia = last['adx'] + (10 if strong_volume else 0)
     else:
         tendencia = None
         fuerza_tendencia = 0
-
-    # Verificar estructura de máximos/mínimos (últimas 20 velas)
-    ultimos_20 = df.iloc[-20:]
-    if tendencia == "CALL":
-        maximos = ultimos_20['high'].values
-        minimos = ultimos_20['low'].values
-        estructura_valida = all(maximos[i] <= maximos[i+1] for i in range(len(maximos)-1)) and all(minimos[i] <= minimos[i+1] for i in range(len(minimos)-1))
-    elif tendencia == "PUT":
-        maximos = ultimos_20['high'].values
-        minimos = ultimos_20['low'].values
-        estructura_valida = all(maximos[i] >= maximos[i+1] for i in range(len(maximos)-1)) and all(minimos[i] >= minimos[i+1] for i in range(len(minimos)-1))
-    else:
-        estructura_valida = False
 
     # Calcular niveles de Fibonacci del último movimiento (50 velas)
     df_50 = df.iloc[-50:]
@@ -142,7 +129,6 @@ def calcular_indicadores(df):
         'very_strong_volume': very_strong_volume,
         'tendencia': tendencia,
         'fuerza_tendencia': min(fuerza_tendencia, 100),
-        'estructura_valida': estructura_valida,
         'niveles_fib': niveles_fib,
         'df': df
     }
@@ -151,14 +137,12 @@ def calcular_indicadores(df):
 # EVALUAR ACTIVO (para selección)
 # =========================
 
-def evaluar_activo(indicators, umbral_fuerza=50):
+def evaluar_activo(indicators, umbral_fuerza=40):
     """
     Retorna (direccion, fuerza, niveles_fib) si el activo es apto para seguimiento.
-    Requisitos: tendencia clara, estructura válida, fuerza >= umbral.
+    Requisitos: tendencia clara, fuerza >= umbral.
     """
     if indicators['tendencia'] is None:
-        return None
-    if not indicators['estructura_valida']:
         return None
     if indicators['fuerza_tendencia'] < umbral_fuerza:
         return None
