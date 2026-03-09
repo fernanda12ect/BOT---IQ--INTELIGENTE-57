@@ -13,7 +13,7 @@ from bot import (
 from iqoptionapi.stable_api import IQ_Option
 
 st.set_page_config(layout="wide")
-st.title("🤖 IQ OPTION PRO - 3 ACTIVOS DE ALTA PRECISIÓN (SEÑALES INSTANTÁNEAS)")
+st.title("🤖 IQ OPTION PRO - 3 ACTIVOS CON VENCIMIENTO 1 MINUTO")
 
 # Inicializar session_state
 if 'api' not in st.session_state:
@@ -36,15 +36,15 @@ if 'historial' not in st.session_state:
 # Zona horaria Ecuador
 ecuador = pytz.timezone("America/Guayaquil")
 
-# Definir función generar_senal dentro del ámbito
+# Función para generar señal
 def generar_senal(activo, nivel_alcanzado):
     try:
         server_time = st.session_state.api.get_server_time()
         now_utc = datetime.fromtimestamp(server_time, tz=pytz.UTC)
     except:
         now_utc = datetime.now(pytz.UTC)
-    entry_dt = now_utc  # Entrada inmediata
-    expiry_dt = entry_dt + timedelta(minutes=5)
+    entry_dt = now_utc  # Inmediato
+    expiry_dt = entry_dt + timedelta(minutes=1)  # Vencimiento 1 minuto
     entry_local = entry_dt.astimezone(ecuador)
     expiry_local = expiry_dt.astimezone(ecuador)
 
@@ -65,13 +65,8 @@ with st.sidebar:
     email = st.text_input("📧 Email")
     password = st.text_input("🔑 Password", type="password")
 
-    # Umbral de fuerza mínimo
     umbral_fuerza = st.slider("🎯 Fuerza mínima de tendencia", 0, 100, 30, 5)
-
-    # Número de activos a seguir
     NUM_ACTIVOS = 3
-
-    # Tiempo de espera entre rondas
     pausa_entre_rondas = st.number_input("⏱️ Pausa entre rondas (seg)", 5, 120, 10)
 
     col1, col2 = st.columns(2)
@@ -98,7 +93,7 @@ if conectar:
                 st.session_state.activos_seguimiento = []
                 st.session_state.señales_activas = []
                 st.session_state.historial = []
-                st.success("✅ Conectado - Iniciando búsqueda de activos con tendencia...")
+                st.success("✅ Conectado - Iniciando búsqueda...")
                 st.rerun()
             else:
                 st.error(f"❌ Error de conexión: {reason}")
@@ -132,16 +127,15 @@ if st.session_state.api is not None:
                     "Activo": activo['asset'],
                     "Dirección": activo['direccion'],
                     "Fuerza": f"{activo['fuerza']:.1f}%",
-                    "Precio actual": f"{activo.get('precio_actual', 0):.5f}",
-                    "Nivel 23.6%": f"{niveles.get('236', 0):.5f}",
-                    "Nivel 38.2%": f"{niveles.get('382', 0):.5f}",
-                    "Nivel 50%": f"{niveles.get('500', 0):.5f}",
-                    "Nivel 61.8%": f"{niveles.get('618', 0):.5f}"
+                    "Precio": f"{activo.get('precio_actual', 0):.5f}",
+                    "38.2%": f"{niveles.get('382', 0):.5f}",
+                    "50%": f"{niveles.get('500', 0):.5f}",
+                    "61.8%": f"{niveles.get('618', 0):.5f}"
                 })
             df = pd.DataFrame(data)
             st.dataframe(df, use_container_width=True)
         else:
-            st.info("No hay activos en seguimiento en este momento.")
+            st.info("No hay activos en seguimiento.")
 
     # --- SECCIÓN 2: SEÑALES LISTAS PARA OPERAR ---
     with st.expander("🚀 SEÑALES LISTAS PARA OPERAR", expanded=True):
@@ -170,15 +164,15 @@ if st.session_state.api is not None:
                     """
                     st.markdown(html_code, unsafe_allow_html=True)
         else:
-            st.info("No hay señales listas en este momento.")
+            st.info("No hay señales listas.")
 
-    # --- SECCIÓN 3: HISTORIAL DE EVENTOS ---
-    with st.expander("📋 HISTORIAL DE EVENTOS", expanded=False):
+    # --- SECCIÓN 3: HISTORIAL ---
+    with st.expander("📋 HISTORIAL", expanded=False):
         if st.session_state.historial:
             for linea in st.session_state.historial[-30:]:
                 st.text(linea)
         else:
-            st.info("No hay eventos registrados aún.")
+            st.info("No hay eventos.")
 
     # Lógica de escaneo continuo
     if st.session_state.escaneando:
@@ -186,7 +180,7 @@ if st.session_state.api is not None:
             st.info("🔍 Buscando activos con tendencia...")
             todos_activos = st.session_state.activos_reales + st.session_state.activos_otc
             if not todos_activos:
-                st.warning(f"No hay activos disponibles. Reintentando en {pausa_entre_rondas} seg...")
+                st.warning(f"No hay activos. Reintentando en {pausa_entre_rondas} seg...")
                 time.sleep(pausa_entre_rondas)
                 real, otc = obtener_activos_abiertos(st.session_state.api)
                 st.session_state.activos_reales = real
@@ -232,36 +226,25 @@ if st.session_state.api is not None:
                 time.sleep(2)
                 st.rerun()
             else:
-                st.session_state.historial.append("⚠️ No se encontraron activos con tendencia. Reintentando...")
+                st.session_state.historial.append("⚠️ No se encontraron activos. Reintentando...")
                 time.sleep(pausa_entre_rondas)
                 st.rerun()
 
         elif st.session_state.fase == "seguimiento":
-            st.info("🔄 Monitoreando activos para detectar retrocesos...")
+            st.info("🔄 Monitoreando retrocesos...")
             nuevos_seguimiento = []
             activos_a_remover = []
 
             for activo in st.session_state.activos_seguimiento:
                 asset = activo['asset']
                 try:
-                    # Obtener velas recientes (últimas 5 para precio y vela actual)
+                    # Últimas velas para vela actual y volumen
                     candles = st.session_state.api.get_candles(asset, 60, 5, time.time())
                     if not candles or len(candles) < 1:
                         continue
                     df_recent = pd.DataFrame(candles)
-                    # La última vela
                     last_candle = df_recent.iloc[-1]
-                    precio_actual = last_candle['close']
-                    vela_actual = {
-                        'open': last_candle['open'],
-                        'close': last_candle['close'],
-                        'high': last_candle['max'],
-                        'low': last_candle['min'],
-                        'volume': last_candle['volume']
-                    }
-                    activo['precio_actual'] = precio_actual
-
-                    # Para volumen relativo, necesitamos el promedio de las últimas 20 velas
+                    # Calcular volumen promedio con datos completos
                     candles_full = st.session_state.api.get_candles(asset, 60, 100, time.time())
                     if not candles_full or len(candles_full) < 50:
                         continue
@@ -272,17 +255,25 @@ if st.session_state.api is not None:
                     if len(df_full) < 50:
                         continue
                     vol_avg = df_full['volume'].rolling(20).mean().iloc[-1]
-                    vela_actual['volumen_rel'] = vela_actual['volume'] / vol_avg if vol_avg else 1
+                    vela_actual = {
+                        'open': last_candle['open'],
+                        'close': last_candle['close'],
+                        'high': last_candle['max'],
+                        'low': last_candle['min'],
+                        'volume': last_candle['volume'],
+                        'volumen_rel': last_candle['volume'] / vol_avg if vol_avg else 1
+                    }
+                    precio_actual = last_candle['close']
+                    activo['precio_actual'] = precio_actual
 
                     # Verificar punto de entrada
-                    alcanzado, nivel = verificar_punto_entrada(activo, precio_actual, vela_actual, tolerancia=0.002)
+                    alcanzado, nivel = verificar_punto_entrada(activo, vela_actual)
                     if alcanzado:
                         generar_senal(activo, nivel)
                         activos_a_remover.append(activo)
-                        st.session_state.historial.append(f"🔔 Señal generada para {asset} en nivel {nivel} (vela {'alcista' if vela_actual['close'] > vela_actual['open'] else 'bajista'}, vol_rel={vela_actual['volumen_rel']:.2f})")
                         continue
 
-                    # Si no se alcanzó, reevaluar tendencia con datos completos
+                    # Reevaluar tendencia
                     indicators = calcular_indicadores(df_full)
                     res = evaluar_activo(indicators, umbral_fuerza)
                     if res:
