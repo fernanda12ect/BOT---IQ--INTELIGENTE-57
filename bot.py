@@ -42,8 +42,7 @@ def obtener_activos_abiertos(api):
         if es_fin_semana and not otc:
             otc = OTC_ASSETS.copy()
         return real, otc
-    except Exception as e:
-        logging.error(f"Error obteniendo activos: {e}")
+    except:
         return REAL_ASSETS, OTC_ASSETS
 
 # =========================
@@ -52,11 +51,6 @@ def obtener_activos_abiertos(api):
 
 def calcular_indicadores(df):
     df = df.copy()
-    # Asegurar nombres de columnas correctos
-    # La API devuelve: 'open', 'close', 'max', 'min', 'volume'
-    # Renombramos internamente para mayor claridad
-    df.rename(columns={'max': 'high', 'min': 'low'}, inplace=True)
-
     # EMA
     df['ema20'] = df['close'].ewm(span=20).mean()
     df['ema50'] = df['close'].ewm(span=50).mean()
@@ -69,8 +63,8 @@ def calcular_indicadores(df):
     rs = avg_gain / avg_loss
     df['rsi'] = 100 - (100 / (1 + rs))
     # ATR
-    high = df['high']
-    low = df['low']
+    high = df['max']
+    low = df['min']
     close = df['close']
     tr = pd.concat([high - low, abs(high - close.shift()), abs(low - close.shift())], axis=1).max(axis=1)
     df['atr'] = tr.rolling(14).mean()
@@ -100,10 +94,25 @@ def calcular_indicadores(df):
     if strong_volume:
         fuerza = min(fuerza + 10, 100)
 
+    # Verificar estructura de máximos y mínimos (últimas 20 velas)
+    ultimos_20 = df.iloc[-20:]
+    if tendencia == "CALL":
+        # Máximos crecientes y mínimos crecientes
+        maximos = ultimos_20['high'].values
+        minimos = ultimos_20['low'].values
+        estructura_valida = all(maximos[i] <= maximos[i+1] for i in range(len(maximos)-1)) and all(minimos[i] <= minimos[i+1] for i in range(len(minimos)-1))
+    elif tendencia == "PUT":
+        # Máximos decrecientes y mínimos decrecientes
+        maximos = ultimos_20['high'].values
+        minimos = ultimos_20['low'].values
+        estructura_valida = all(maximos[i] >= maximos[i+1] for i in range(len(maximos)-1)) and all(minimos[i] >= minimos[i+1] for i in range(len(minimos)-1))
+    else:
+        estructura_valida = False
+
     return {
         'close': last['close'],
-        'high': last['high'],
-        'low': last['low'],
+        'high': last['max'],
+        'low': last['min'],
         'ema20': last['ema20'],
         'ema50': last['ema50'],
         'adx': last['adx'],
@@ -112,43 +121,50 @@ def calcular_indicadores(df):
         'tendencia': tendencia,
         'fuerza': fuerza,
         'volumen_rel': vol_now / vol_avg if vol_avg else 1,
-        'df': df  # df ya con columnas renombradas
+        'estructura_valida': estructura_valida,
+        'df': df
     }
 
 # =========================
-# CALCULAR NIVEL DE RETROCESO
+# CALCULAR NIVELES DE RETROCESO (23.6%, 38.2%, 50%)
 # =========================
 
-def calcular_nivel_retroceso(df, tendencia):
+def calcular_niveles_retroceso(df, tendencia):
     """
-    Para tendencia alcista: retroceso 38.2% del último movimiento alcista.
-    Para tendencia bajista: retroceso 38.2% del último movimiento bajista.
-    df debe tener columnas 'high' y 'low'.
+    Calcula niveles de retroceso de Fibonacci: 23.6%, 38.2%, 50%.
+    Retorna un dict con los niveles.
     """
     df = df.iloc[-50:].copy()
+    minimo = df['low'].min()
+    maximo = df['high'].max()
+    movimiento = maximo - minimo
     if tendencia == "CALL":
-        minimo = df['low'].min()
-        maximo = df['high'].max()
-        movimiento = maximo - minimo
-        nivel = maximo - movimiento * 0.382
-        return nivel
+        # Retroceso desde el máximo
+        nivel_382 = maximo - movimiento * 0.382
+        nivel_236 = maximo - movimiento * 0.236
+        nivel_50 = maximo - movimiento * 0.5
     else:  # PUT
-        minimo = df['low'].min()
-        maximo = df['high'].max()
-        movimiento = maximo - minimo
-        nivel = minimo + movimiento * 0.382
-        return nivel
+        nivel_382 = minimo + movimiento * 0.382
+        nivel_236 = minimo + movimiento * 0.236
+        nivel_50 = minimo + movimiento * 0.5
+    return {'236': nivel_236, '382': nivel_382, '50': nivel_50}
 
 # =========================
-# EVALUAR TENDENCIA (exportada)
+# EVALUAR TENDENCIA (para selección inicial y reemplazo)
 # =========================
 
-def evaluar_tendencia(indicators):
+def evaluar_activo(indicators, umbral_fuerza):
     """
-    Retorna (direccion, fuerza) si hay tendencia clara (ADX >= 25 y EMAs alineadas).
+    Retorna (direccion, fuerza, niveles) si el activo es confiable.
+    Confiable: ADX >= 25, tendencia definida, estructura válida, fuerza >= umbral.
     """
     if indicators['adx'] is None or pd.isna(indicators['adx']) or indicators['adx'] < 25:
         return None
     if indicators['tendencia'] is None:
         return None
-    return indicators['tendencia'], indicators['fuerza']
+    if not indicators['estructura_valida']:
+        return None
+    if indicators['fuerza'] < umbral_fuerza:
+        return None
+    niveles = calcular_niveles_retroceso(indicators['df'], indicators['tendencia'])
+    return indicators['tendencia'], indicators['fuerza'], niveles
