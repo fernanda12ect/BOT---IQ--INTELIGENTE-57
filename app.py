@@ -28,14 +28,14 @@ if 'activos_seguimiento' not in st.session_state:
 if 'alertas_anticipadas' not in st.session_state:
     st.session_state.alertas_anticipadas = []  # Alertas cuando el precio se acerca
 if 'señales_activas' not in st.session_state:
-    st.session_state.señales_activas = []  # Lista de señales definitivas
+    st.session_state.señales_activas = []  # Lista de señales definitivas (cada activo una sola vez)
 if 'historial' not in st.session_state:
     st.session_state.historial = []
 
 # Zona horaria Ecuador
 ecuador = pytz.timezone("America/Guayaquil")
 
-# Definir función generar_señal
+# Definir función generar_señal (ahora incluye timestamp)
 def generar_señal(activo, tipo_nivel, direccion, confirmacion=""):
     try:
         server_time = st.session_state.api.get_server_time()
@@ -48,7 +48,7 @@ def generar_señal(activo, tipo_nivel, direccion, confirmacion=""):
     entry_local = entry_dt.astimezone(ecuador)
     expiry_local = expiry_dt.astimezone(ecuador)
 
-    # Crear la nueva señal
+    # Crear nueva señal
     nueva_señal = {
         'asset': activo['asset'],
         'direccion': direccion,
@@ -60,11 +60,14 @@ def generar_señal(activo, tipo_nivel, direccion, confirmacion=""):
         'timestamp': datetime.now(ecuador)  # para ordenar
     }
 
-    # Verificar si ya existe una señal para el mismo activo
-    # Si existe, la eliminamos para reemplazarla por la nueva
+    # Eliminar señales previas del mismo activo (para evitar duplicados)
     st.session_state.señales_activas = [s for s in st.session_state.señales_activas if s['asset'] != activo['asset']]
-    # Agregar la nueva señal al inicio de la lista (para que aparezca primero)
-    st.session_state.señales_activas.insert(0, nueva_señal)
+    # Añadir la nueva
+    st.session_state.señales_activas.append(nueva_señal)
+    # Ordenar por timestamp descendente (más reciente primero)
+    st.session_state.señales_activas.sort(key=lambda x: x['timestamp'], reverse=True)
+    # Mantener solo las últimas 10 (para no saturar)
+    st.session_state.señales_activas = st.session_state.señales_activas[:10]
 
     st.session_state.historial.append(f"🎯 SEÑAL DEFINITIVA: {activo['asset']} - {direccion} a las {entry_local.strftime('%H:%M:%S')} ({tipo_nivel})")
 
@@ -153,9 +156,9 @@ if st.session_state.api is not None:
     # --- SECCIÓN 3: SEÑALES DEFINITIVAS LISTAS PARA OPERAR ---
     with st.expander("🚀 SEÑALES DEFINITIVAS", expanded=True):
         if st.session_state.señales_activas:
-            # Mostrar en orden de más reciente primero (ya lo están porque insertamos al inicio)
             cols = st.columns(2)
-            for idx, senal in enumerate(st.session_state.señales_activas[:6]):  # últimas 6 (o todas)
+            # Mostrar las señales en orden (ya están ordenadas por timestamp descendente)
+            for idx, senal in enumerate(st.session_state.señales_activas):
                 with cols[idx % 2]:
                     asset = senal['asset']
                     tipo = "📱 OTC"
@@ -269,7 +272,6 @@ if st.session_state.api is not None:
                             st.session_state.historial.append(alerta_msg)
 
                     # Verificar señal definitiva: cuando el precio toca el nivel (con tolerancia) y hay cruce de EMAs
-                    # Necesitamos velas completas para calcular EMAs
                     candles_full = st.session_state.api.get_candles(asset, 60, 100, time.time())
                     if not candles_full or len(candles_full) < 50:
                         continue
