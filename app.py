@@ -28,14 +28,14 @@ if 'activos_seguimiento' not in st.session_state:
 if 'alertas_anticipadas' not in st.session_state:
     st.session_state.alertas_anticipadas = []  # Alertas cuando el precio se acerca
 if 'señales_activas' not in st.session_state:
-    st.session_state.señales_activas = []  # Lista de señales, las más recientes al inicio
+    st.session_state.señales_activas = []  # Lista de señales definitivas
 if 'historial' not in st.session_state:
     st.session_state.historial = []
 
 # Zona horaria Ecuador
 ecuador = pytz.timezone("America/Guayaquil")
 
-# Definir función generar_señal (ahora maneja duplicados)
+# Definir función generar_señal
 def generar_señal(activo, tipo_nivel, direccion, confirmacion=""):
     try:
         server_time = st.session_state.api.get_server_time()
@@ -48,6 +48,7 @@ def generar_señal(activo, tipo_nivel, direccion, confirmacion=""):
     entry_local = entry_dt.astimezone(ecuador)
     expiry_local = expiry_dt.astimezone(ecuador)
 
+    # Crear la nueva señal
     nueva_señal = {
         'asset': activo['asset'],
         'direccion': direccion,
@@ -56,15 +57,14 @@ def generar_señal(activo, tipo_nivel, direccion, confirmacion=""):
         'tipo_nivel': tipo_nivel,
         'confirmacion': confirmacion,
         'fuerza': activo.get('fuerza', 50),
-        'timestamp': entry_local  # para ordenar
+        'timestamp': datetime.now(ecuador)  # para ordenar
     }
 
-    # Eliminar señales anteriores del mismo activo
+    # Verificar si ya existe una señal para el mismo activo
+    # Si existe, la eliminamos para reemplazarla por la nueva
     st.session_state.señales_activas = [s for s in st.session_state.señales_activas if s['asset'] != activo['asset']]
-    # Insertar la nueva al principio (más reciente)
+    # Agregar la nueva señal al inicio de la lista (para que aparezca primero)
     st.session_state.señales_activas.insert(0, nueva_señal)
-    # Opcional: limitar a un número máximo de señales (ej. 20)
-    st.session_state.señales_activas = st.session_state.señales_activas[:20]
 
     st.session_state.historial.append(f"🎯 SEÑAL DEFINITIVA: {activo['asset']} - {direccion} a las {entry_local.strftime('%H:%M:%S')} ({tipo_nivel})")
 
@@ -138,7 +138,7 @@ if st.session_state.api is not None:
                     "Fuerza": f"{a['fuerza']:.0f}%"
                 })
             df = pd.DataFrame(data)
-            st.dataframe(df, width='stretch')  # reemplazo use_container_width
+            st.dataframe(df, width='stretch')  # reemplazado use_container_width
         else:
             st.info("No hay activos en seguimiento.")
 
@@ -150,12 +150,12 @@ if st.session_state.api is not None:
         else:
             st.info("No hay alertas por ahora.")
 
-    # --- SECCIÓN 3: SEÑALES DEFINITIVAS (ordenadas por más reciente) ---
+    # --- SECCIÓN 3: SEÑALES DEFINITIVAS LISTAS PARA OPERAR ---
     with st.expander("🚀 SEÑALES DEFINITIVAS", expanded=True):
         if st.session_state.señales_activas:
-            # Mostrar en orden de lista (el primer elemento es el más reciente)
+            # Mostrar en orden de más reciente primero (ya lo están porque insertamos al inicio)
             cols = st.columns(2)
-            for idx, senal in enumerate(st.session_state.señales_activas[:6]):  # últimas 6
+            for idx, senal in enumerate(st.session_state.señales_activas[:6]):  # últimas 6 (o todas)
                 with cols[idx % 2]:
                     asset = senal['asset']
                     tipo = "📱 OTC"
@@ -209,7 +209,6 @@ if st.session_state.api is not None:
                     if len(df) < 50:
                         continue
                     indicators = calcular_indicadores(df)
-                    # Llamada correcta con el parámetro umbral_estabilidad
                     res = evaluar_activo(indicators, umbral_estabilidad=True)
                     if res:
                         candidatos.append({
