@@ -28,14 +28,14 @@ if 'activos_seguimiento' not in st.session_state:
 if 'alertas_anticipadas' not in st.session_state:
     st.session_state.alertas_anticipadas = []  # Alertas cuando el precio se acerca
 if 'señales_activas' not in st.session_state:
-    st.session_state.señales_activas = []  # Lista de señales definitivas (las más recientes primero)
+    st.session_state.señales_activas = []  # Lista de señales, las más recientes al inicio
 if 'historial' not in st.session_state:
     st.session_state.historial = []
 
 # Zona horaria Ecuador
 ecuador = pytz.timezone("America/Guayaquil")
 
-# Definir función generar_señal
+# Definir función generar_señal (ahora maneja duplicados)
 def generar_señal(activo, tipo_nivel, direccion, confirmacion=""):
     try:
         server_time = st.session_state.api.get_server_time()
@@ -48,7 +48,7 @@ def generar_señal(activo, tipo_nivel, direccion, confirmacion=""):
     entry_local = entry_dt.astimezone(ecuador)
     expiry_local = expiry_dt.astimezone(ecuador)
 
-    señal = {
+    nueva_señal = {
         'asset': activo['asset'],
         'direccion': direccion,
         'entry': entry_local.strftime("%H:%M:%S"),
@@ -56,14 +56,14 @@ def generar_señal(activo, tipo_nivel, direccion, confirmacion=""):
         'tipo_nivel': tipo_nivel,
         'confirmacion': confirmacion,
         'fuerza': activo.get('fuerza', 50),
-        'timestamp': datetime.now(ecuador)  # para ordenar
+        'timestamp': entry_local  # para ordenar
     }
 
-    # Eliminar señal duplicada del mismo activo (si existe)
+    # Eliminar señales anteriores del mismo activo
     st.session_state.señales_activas = [s for s in st.session_state.señales_activas if s['asset'] != activo['asset']]
-    # Insertar la nueva señal al principio (más reciente)
-    st.session_state.señales_activas.insert(0, señal)
-    # Mantener solo las últimas 20 señales (opcional)
+    # Insertar la nueva al principio (más reciente)
+    st.session_state.señales_activas.insert(0, nueva_señal)
+    # Opcional: limitar a un número máximo de señales (ej. 20)
     st.session_state.señales_activas = st.session_state.señales_activas[:20]
 
     st.session_state.historial.append(f"🎯 SEÑAL DEFINITIVA: {activo['asset']} - {direccion} a las {entry_local.strftime('%H:%M:%S')} ({tipo_nivel})")
@@ -138,7 +138,7 @@ if st.session_state.api is not None:
                     "Fuerza": f"{a['fuerza']:.0f}%"
                 })
             df = pd.DataFrame(data)
-            st.dataframe(df, use_container_width=True)
+            st.dataframe(df, width='stretch')  # reemplazo use_container_width
         else:
             st.info("No hay activos en seguimiento.")
 
@@ -150,12 +150,12 @@ if st.session_state.api is not None:
         else:
             st.info("No hay alertas por ahora.")
 
-    # --- SECCIÓN 3: SEÑALES DEFINITIVAS LISTAS PARA OPERAR ---
+    # --- SECCIÓN 3: SEÑALES DEFINITIVAS (ordenadas por más reciente) ---
     with st.expander("🚀 SEÑALES DEFINITIVAS", expanded=True):
         if st.session_state.señales_activas:
-            # Mostrar en orden de más reciente a más antigua (ya lo están porque insertamos al principio)
+            # Mostrar en orden de lista (el primer elemento es el más reciente)
             cols = st.columns(2)
-            for idx, senal in enumerate(st.session_state.señales_activas[:6]):  # mostramos las últimas 6 (más recientes)
+            for idx, senal in enumerate(st.session_state.señales_activas[:6]):  # últimas 6
                 with cols[idx % 2]:
                     asset = senal['asset']
                     tipo = "📱 OTC"
@@ -209,6 +209,7 @@ if st.session_state.api is not None:
                     if len(df) < 50:
                         continue
                     indicators = calcular_indicadores(df)
+                    # Llamada correcta con el parámetro umbral_estabilidad
                     res = evaluar_activo(indicators, umbral_estabilidad=True)
                     if res:
                         candidatos.append({
@@ -269,6 +270,7 @@ if st.session_state.api is not None:
                             st.session_state.historial.append(alerta_msg)
 
                     # Verificar señal definitiva: cuando el precio toca el nivel (con tolerancia) y hay cruce de EMAs
+                    # Necesitamos velas completas para calcular EMAs
                     candles_full = st.session_state.api.get_candles(asset, 60, 100, time.time())
                     if not candles_full or len(candles_full) < 50:
                         continue
@@ -280,16 +282,19 @@ if st.session_state.api is not None:
                         continue
                     indicators = calcular_indicadores(df_full)
 
+                    # Condición de toque: precio actual dentro de 0.1% del nivel
                     toca = abs(precio_actual - nivel) / nivel < 0.001
 
                     if toca and indicators['cruce_ema'] and indicators['direccion_cruce'] == activo['direccion']:
+                        # Señal definitiva
                         generar_señal(activo, activo['tipo'], activo['direccion'], confirmacion="EMA cruzada")
                         activos_a_remover.append(activo)
                         continue
 
-                    # Reevaluar activo
+                    # Si no hay señal, reevaluar si el activo sigue siendo válido
                     res = evaluar_activo(indicators, umbral_estabilidad=True)
                     if res:
+                        # Actualizar datos (puede cambiar nivel)
                         activo['nivel'] = res['nivel']
                         activo['fuerza'] = res['fuerza']
                         activo['descripcion'] = res['descripcion']
@@ -301,10 +306,12 @@ if st.session_state.api is not None:
                     st.session_state.historial.append(f"⚠️ Error monitoreando {asset}: {str(e)[:50]}")
                     activos_a_remover.append(activo)
 
+            # Limpiar
             for a in activos_a_remover:
                 if a in st.session_state.activos_seguimiento:
                     st.session_state.activos_seguimiento.remove(a)
 
+            # Si hay espacios, volver a selección
             if len(st.session_state.activos_seguimiento) < max_activos:
                 st.session_state.fase = "seleccion"
                 st.rerun()
