@@ -12,7 +12,7 @@ from bot import (
 from iqoptionapi.stable_api import IQ_Option
 
 st.set_page_config(layout="wide")
-st.title("🤖 BOT OTC - NIVELES CON 2 TOQUES + EMA (1 MIN) - SIN LÍMITE")
+st.title("🤖 BOT OTC - NIVELES CON 2 TOQUES + EMA (1 MIN) - FILTRO DE FUERZA")
 
 # Inicializar session_state
 if 'api' not in st.session_state:
@@ -63,9 +63,9 @@ def generar_señal(activo, tipo_nivel, direccion, confirmacion=""):
     st.session_state.señales_activas = [s for s in st.session_state.señales_activas if s['asset'] != activo['asset']]
     st.session_state.señales_activas.append(nueva_señal)
     st.session_state.señales_activas.sort(key=lambda x: x['timestamp'], reverse=True)
-    st.session_state.señales_activas = st.session_state.señales_activas[:20]  # Mantener últimas 20 (opcional)
+    st.session_state.señales_activas = st.session_state.señales_activas[:20]  # Mantener últimas 20
 
-    st.session_state.historial.append(f"🎯 SEÑAL DEFINITIVA: {activo['asset']} - {direccion} a las {entry_local.strftime('%H:%M:%S')} ({tipo_nivel})")
+    st.session_state.historial.append(f"🎯 SEÑAL DEFINITIVA: {activo['asset']} - {direccion} a las {entry_local.strftime('%H:%M:%S')} ({tipo_nivel}) - {confirmacion}")
 
 # Sidebar
 with st.sidebar:
@@ -73,7 +73,8 @@ with st.sidebar:
     email = st.text_input("📧 Email")
     password = st.text_input("🔑 Password", type="password")
 
-    # Parámetros (se mantienen)
+    # Parámetros de calidad
+    umbral_fuerza = st.slider("💪 Fuerza mínima para selección (%)", 0, 100, 50, 5)
     umbral_cerca = st.slider("🔍 Distancia para alerta anticipada (%)", 0.1, 2.0, 0.5, 0.1) / 100
     pausa_entre_rondas = st.number_input("⏱️ Pausa entre rondas (seg)", 5, 60, 10)
 
@@ -208,25 +209,27 @@ if st.session_state.api is not None:
                     indicators = calcular_indicadores(df)
                     res = evaluar_activo(indicators, umbral_estabilidad=True)
                     if res:
-                        candidatos.append({
-                            'asset': asset,
-                            'tipo': res['tipo'],
-                            'direccion': res['direccion'],
-                            'nivel': res['nivel'],
-                            'fuerza': res['fuerza'],
-                            'descripcion': res['descripcion'],
-                            'precio_actual': indicators['close'],
-                            'indicators': indicators
-                        })
+                        # Filtrar por fuerza mínima
+                        if res['fuerza'] >= umbral_fuerza:
+                            candidatos.append({
+                                'asset': asset,
+                                'tipo': res['tipo'],
+                                'direccion': res['direccion'],
+                                'nivel': res['nivel'],
+                                'fuerza': res['fuerza'],
+                                'descripcion': res['descripcion'],
+                                'precio_actual': indicators['close'],
+                                'indicators': indicators
+                            })
                 except Exception as e:
                     st.session_state.historial.append(f"⚠️ Error con {asset}: {str(e)[:50]}")
                     continue
                 time.sleep(0.2)
 
             if candidatos:
-                # SIN LÍMITE: tomamos todos los candidatos
+                # Ordenar por fuerza y tomar todos (sin límite)
                 candidatos.sort(key=lambda x: x['fuerza'], reverse=True)
-                st.session_state.activos_seguimiento = candidatos  # <--- sin rebanar
+                st.session_state.activos_seguimiento = candidatos
                 st.session_state.fase = "seguimiento"
                 st.session_state.historial.append(f"✅ Seleccionados {len(st.session_state.activos_seguimiento)} activos:")
                 for a in st.session_state.activos_seguimiento:
@@ -266,7 +269,7 @@ if st.session_state.api is not None:
                             st.session_state.alertas_anticipadas.append(alerta_msg)
                             st.session_state.historial.append(alerta_msg)
 
-                    # Verificar señal definitiva: toque + cruce de EMAs
+                    # Verificar señal definitiva: toque + cruce de EMAs + volumen fuerte
                     candles_full = st.session_state.api.get_candles(asset, 60, 100, time.time())
                     if not candles_full or len(candles_full) < 50:
                         continue
@@ -281,14 +284,14 @@ if st.session_state.api is not None:
                     # Condición de toque: dentro del 0.1% del nivel
                     toca = abs(precio_actual - nivel) / nivel < 0.001
 
-                    if toca and indicators['cruce_ema'] and indicators['direccion_cruce'] == activo['direccion']:
-                        generar_señal(activo, activo['tipo'], activo['direccion'], confirmacion="EMA cruzada")
+                    if toca and indicators['cruce_ema'] and indicators['direccion_cruce'] == activo['direccion'] and indicators['vol_rel'] > 1.2:
+                        generar_señal(activo, activo['tipo'], activo['direccion'], confirmacion="EMA + Volumen")
                         activos_a_remover.append(activo)
                         continue
 
-                    # Reevaluar si el activo sigue siendo válido
+                    # Reevaluar si el activo sigue siendo válido (con el mismo umbral de fuerza)
                     res = evaluar_activo(indicators, umbral_estabilidad=True)
-                    if res:
+                    if res and res['fuerza'] >= umbral_fuerza:
                         # Actualizar datos
                         activo['nivel'] = res['nivel']
                         activo['fuerza'] = res['fuerza']
