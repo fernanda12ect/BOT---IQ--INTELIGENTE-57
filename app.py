@@ -7,19 +7,16 @@ import pytz
 from bot import (
     obtener_activos_abiertos,
     calcular_indicadores,
-    evaluar_activo,
-    verificar_ruptura
+    evaluar_activo
 )
 from iqoptionapi.stable_api import IQ_Option
 
 st.set_page_config(layout="wide")
-st.title("🤖 IQ OPTION PRO - 10 ACTIVOS CON TENDENCIA (RUPTURA FIBONACCI)")
+st.title("🤖 BOT OTC - NIVELES CON 2 TOQUES + EMA (1 MIN)")
 
 # Inicializar session_state
 if 'api' not in st.session_state:
     st.session_state.api = None
-if 'activos_reales' not in st.session_state:
-    st.session_state.activos_reales = []
 if 'activos_otc' not in st.session_state:
     st.session_state.activos_otc = []
 if 'escaneando' not in st.session_state:
@@ -27,38 +24,41 @@ if 'escaneando' not in st.session_state:
 if 'fase' not in st.session_state:
     st.session_state.fase = "seleccion"
 if 'activos_seguimiento' not in st.session_state:
-    st.session_state.activos_seguimiento = []  # Máx 10 activos
+    st.session_state.activos_seguimiento = []  # Máx 6 activos
+if 'alertas_anticipadas' not in st.session_state:
+    st.session_state.alertas_anticipadas = []  # Alertas cuando el precio se acerca
 if 'señales_activas' not in st.session_state:
-    st.session_state.señales_activas = []  # Señales confirmadas
+    st.session_state.señales_activas = []  # Señales definitivas
 if 'historial' not in st.session_state:
     st.session_state.historial = []
 
 # Zona horaria Ecuador
 ecuador = pytz.timezone("America/Guayaquil")
 
-# Definir función generar_senal
-def generar_senal(activo, nivel_alcanzado):
+# Definir función generar_señal
+def generar_señal(activo, tipo_nivel, direccion, confirmacion=""):
     try:
         server_time = st.session_state.api.get_server_time()
         now_utc = datetime.fromtimestamp(server_time, tz=pytz.UTC)
     except:
         now_utc = datetime.now(pytz.UTC)
-    entry_dt = now_utc + timedelta(minutes=1)  # 1 minuto para prepararse
+    entry_dt = now_utc + timedelta(minutes=1)  # 1 minuto para prepararse (entrada en la próxima vela)
     entry_dt = entry_dt.replace(second=0, microsecond=0)
-    expiry_dt = entry_dt + timedelta(minutes=5)
+    expiry_dt = entry_dt + timedelta(minutes=1)  # vencimiento 1 minuto después
     entry_local = entry_dt.astimezone(ecuador)
     expiry_local = expiry_dt.astimezone(ecuador)
 
     señal = {
         'asset': activo['asset'],
-        'direccion': activo['direccion'],
+        'direccion': direccion,
         'entry': entry_local.strftime("%H:%M:%S"),
         'expiry': expiry_local.strftime("%H:%M:%S"),
-        'estrategia': f"Ruptura {nivel_alcanzado}",
-        'fuerza': activo['fuerza']
+        'tipo_nivel': tipo_nivel,
+        'confirmacion': confirmacion,
+        'fuerza': activo.get('fuerza', 50)
     }
     st.session_state.señales_activas.append(señal)
-    st.session_state.historial.append(f"🎯 Señal {activo['direccion']} para {activo['asset']} a las {entry_local.strftime('%H:%M:%S')} (ruptura {nivel_alcanzado})")
+    st.session_state.historial.append(f"🎯 SEÑAL DEFINITIVA: {activo['asset']} - {direccion} a las {entry_local.strftime('%H:%M:%S')} ({tipo_nivel})")
 
 # Sidebar
 with st.sidebar:
@@ -66,14 +66,10 @@ with st.sidebar:
     email = st.text_input("📧 Email")
     password = st.text_input("🔑 Password", type="password")
 
-    # Umbral de fuerza mínimo (bajo para capturar más)
-    umbral_fuerza = st.slider("🎯 Fuerza mínima de tendencia", 0, 100, 25, 5)
-
-    # Número de activos a seguir
-    NUM_ACTIVOS = 10
-
-    # Tiempo de espera entre rondas
-    pausa_entre_rondas = st.number_input("⏱️ Pausa entre rondas (seg)", 5, 120, 10)
+    # Parámetros
+    umbral_cerca = st.slider("🔍 Distancia para alerta anticipada (%)", 0.1, 2.0, 0.5, 0.1) / 100
+    max_activos = st.slider("📊 Máx activos en seguimiento", 1, 10, 6, 1)
+    pausa_entre_rondas = st.number_input("⏱️ Pausa entre rondas (seg)", 5, 60, 10)
 
     col1, col2 = st.columns(2)
     with col1:
@@ -92,14 +88,14 @@ if conectar:
             if check:
                 st.session_state.api = API
                 real, otc = obtener_activos_abiertos(API)
-                st.session_state.activos_reales = real
                 st.session_state.activos_otc = otc
                 st.session_state.escaneando = True
                 st.session_state.fase = "seleccion"
                 st.session_state.activos_seguimiento = []
+                st.session_state.alertas_anticipadas = []
                 st.session_state.señales_activas = []
                 st.session_state.historial = []
-                st.success("✅ Conectado - Buscando activos con tendencia...")
+                st.success("✅ Conectado - Buscando activos OTC estables...")
                 st.rerun()
             else:
                 st.error(f"❌ Error de conexión: {reason}")
@@ -110,91 +106,89 @@ if desconectar:
     st.session_state.api = None
     st.session_state.escaneando = False
     st.session_state.activos_seguimiento = []
+    st.session_state.alertas_anticipadas = []
     st.session_state.señales_activas = []
     st.success("Desconectado")
     st.rerun()
 
 # Área principal
 if st.session_state.api is not None:
-    real_count = len(st.session_state.activos_reales)
     otc_count = len(st.session_state.activos_otc)
-    if real_count > 0:
-        st.success(f"🌍 REAL: {real_count} | 📱 OTC: {otc_count}")
-    else:
-        st.warning(f"⚠️ Solo OTC ({otc_count})")
+    st.success(f"📱 OTC disponibles: {otc_count}")
 
-    # --- SECCIÓN 1: ACTIVOS EN SEGUIMIENTO ---
-    with st.expander(f"📌 ACTIVOS EN SEGUIMIENTO (MÁX {NUM_ACTIVOS})", expanded=True):
+    # --- SECCIÓN 1: ACTIVOS EN SEGUIMIENTO (hasta 6) ---
+    with st.expander("📌 ACTIVOS EN SEGUIMIENTO (MÁX 6)", expanded=True):
         if st.session_state.activos_seguimiento:
             data = []
-            for activo in st.session_state.activos_seguimiento:
-                niveles = activo.get('niveles_fib', {})
+            for a in st.session_state.activos_seguimiento:
                 data.append({
-                    "Activo": activo['asset'],
-                    "Dirección": activo['direccion'],
-                    "Fuerza": f"{activo['fuerza']:.1f}%",
-                    "Precio": f"{activo.get('precio_actual', 0):.5f}",
-                    "Fib 38.2%": f"{niveles.get('382', 0):.5f}",
-                    "Fib 50%": f"{niveles.get('500', 0):.5f}",
-                    "Fib 61.8%": f"{niveles.get('618', 0):.5f}"
+                    "Activo": a['asset'],
+                    "Tipo Nivel": a['tipo'],
+                    "Dirección": a['direccion'],
+                    "Nivel": f"{a['nivel']:.5f}",
+                    "Precio actual": f"{a.get('precio_actual', 0):.5f}",
+                    "Fuerza": f"{a['fuerza']:.0f}%"
                 })
             df = pd.DataFrame(data)
             st.dataframe(df, use_container_width=True)
         else:
-            st.info("No hay activos en seguimiento en este momento.")
+            st.info("No hay activos en seguimiento.")
 
-    # --- SECCIÓN 2: SEÑALES LISTAS PARA OPERAR ---
-    with st.expander("🚀 SEÑALES LISTAS PARA OPERAR", expanded=True):
+    # --- SECCIÓN 2: ALERTAS ANTICIPADAS (precio cerca del nivel) ---
+    with st.expander("🔔 ALERTAS ANTICIPADAS", expanded=True):
+        if st.session_state.alertas_anticipadas:
+            for alerta in st.session_state.alertas_anticipadas[-10:]:
+                st.warning(alerta)
+        else:
+            st.info("No hay alertas por ahora.")
+
+    # --- SECCIÓN 3: SEÑALES DEFINITIVAS LISTAS PARA OPERAR ---
+    with st.expander("🚀 SEÑALES DEFINITIVAS", expanded=True):
         if st.session_state.señales_activas:
             cols = st.columns(2)
-            for idx, senal in enumerate(st.session_state.señales_activas):
+            for idx, senal in enumerate(st.session_state.señales_activas[-6:]):  # últimas 6
                 with cols[idx % 2]:
                     asset = senal['asset']
-                    if "-OTC" in asset:
-                        tipo = "📱 OTC"
-                        asset_clean = asset.replace("-OTC", "")
-                    else:
-                        tipo = "🌍 REAL"
-                        asset_clean = asset
+                    tipo = "📱 OTC"
+                    asset_clean = asset.replace("-OTC", "")
                     color = "#006400" if senal['direccion'] == "CALL" else "#8B0000"
                     html_code = f"""
-                    <div style="background:#111; padding:20px; border-radius:15px; border:3px solid {color}; margin-bottom:10px;">
-                        <h3>{asset_clean} {tipo}</h3>
-                        <p style="color:{color}; font-size:2rem;">{senal['direccion']}</p>
-                        <p><strong>Estrategia:</strong> {senal['estrategia']}</p>
-                        <p><strong>Fuerza:</strong> {senal['fuerza']:.1f}%</p>
+                    <div style="background:#111; padding:15px; border-radius:10px; border:3px solid {color}; margin-bottom:10px;">
+                        <h4>{asset_clean} {tipo}</h4>
+                        <p style="color:{color}; font-size:1.8rem;">{senal['direccion']}</p>
+                        <p><strong>Tipo:</strong> {senal['tipo_nivel']}</p>
                         <p><strong>Entrada:</strong> {senal['entry']}</p>
                         <p><strong>Expira:</strong> {senal['expiry']}</p>
+                        <p><strong>Conf:</strong> {senal.get('confirmacion', '')}</p>
                         <p style="color:#0f0;">✅ LISTO PARA OPERAR</p>
                     </div>
                     """
                     st.markdown(html_code, unsafe_allow_html=True)
         else:
-            st.info("No hay señales listas en este momento.")
+            st.info("No hay señales definitivas aún.")
 
-    # --- SECCIÓN 3: HISTORIAL DE EVENTOS ---
+    # --- HISTORIAL ---
     with st.expander("📋 HISTORIAL DE EVENTOS", expanded=False):
         if st.session_state.historial:
-            for linea in st.session_state.historial[-50:]:
+            for linea in st.session_state.historial[-30:]:
                 st.text(linea)
         else:
-            st.info("No hay eventos registrados aún.")
+            st.info("Sin eventos.")
 
     # Lógica de escaneo continuo
     if st.session_state.escaneando:
         if st.session_state.fase == "seleccion":
-            st.info("🔍 Buscando activos con tendencia...")
-            todos_activos = st.session_state.activos_reales + st.session_state.activos_otc
-            if not todos_activos:
-                st.warning(f"No hay activos disponibles. Reintentando en {pausa_entre_rondas} seg...")
+            st.info("🔍 Analizando activos OTC...")
+            todos = st.session_state.activos_otc
+            if not todos:
+                st.warning(f"No hay OTC. Reintentando en {pausa_entre_rondas} seg...")
                 time.sleep(pausa_entre_rondas)
-                real, otc = obtener_activos_abiertos(st.session_state.api)
-                st.session_state.activos_reales = real
+                _, otc = obtener_activos_abiertos(st.session_state.api)
                 st.session_state.activos_otc = otc
                 st.rerun()
 
             candidatos = []
-            for asset in todos_activos:
+            for asset in todos:
                 try:
                     candles = st.session_state.api.get_candles(asset, 60, 100, time.time())
                     if not candles or len(candles) < 50:
@@ -206,61 +200,67 @@ if st.session_state.api is not None:
                     if len(df) < 50:
                         continue
                     indicators = calcular_indicadores(df)
-                    res = evaluar_activo(indicators, umbral_fuerza)
+                    res = evaluar_activo(indicators, umbral_estabilidad=True)
                     if res:
-                        direccion, fuerza, niveles = res
                         candidatos.append({
                             'asset': asset,
-                            'direccion': direccion,
-                            'fuerza': fuerza,
-                            'niveles_fib': niveles,
+                            'tipo': res['tipo'],
+                            'direccion': res['direccion'],
+                            'nivel': res['nivel'],
+                            'fuerza': res['fuerza'],
+                            'descripcion': res['descripcion'],
                             'precio_actual': indicators['close'],
                             'indicators': indicators
                         })
                 except Exception as e:
                     st.session_state.historial.append(f"⚠️ Error con {asset}: {str(e)[:50]}")
                     continue
-                time.sleep(0.1)
+                time.sleep(0.2)
 
             if candidatos:
                 candidatos.sort(key=lambda x: x['fuerza'], reverse=True)
-                st.session_state.activos_seguimiento = candidatos[:NUM_ACTIVOS]
+                st.session_state.activos_seguimiento = candidatos[:max_activos]
                 st.session_state.fase = "seguimiento"
                 st.session_state.historial.append(f"✅ Seleccionados {len(st.session_state.activos_seguimiento)} activos:")
                 for a in st.session_state.activos_seguimiento:
-                    st.session_state.historial.append(f"   - {a['asset']} ({a['direccion']}, {a['fuerza']:.1f}%)")
+                    st.session_state.historial.append(f"   - {a['asset']} ({a['direccion']}, {a['tipo']}, fuerza {a['fuerza']}%)")
                 time.sleep(2)
                 st.rerun()
             else:
-                st.session_state.historial.append("⚠️ No se encontraron activos con tendencia. Reintentando...")
+                st.session_state.historial.append("⚠️ No se encontraron activos estables con niveles. Reintentando...")
                 time.sleep(pausa_entre_rondas)
                 st.rerun()
 
         elif st.session_state.fase == "seguimiento":
-            st.info("🔄 Monitoreando activos para detectar rupturas de Fibonacci...")
+            st.info("🔄 Monitoreando niveles...")
             nuevos_seguimiento = []
             activos_a_remover = []
 
             for activo in st.session_state.activos_seguimiento:
                 asset = activo['asset']
                 try:
-                    # Obtener velas recientes (últimas 5 para precio y vela actual)
+                    # Obtener velas recientes
                     candles = st.session_state.api.get_candles(asset, 60, 5, time.time())
-                    if not candles or len(candles) < 1:
+                    if not candles:
                         continue
                     df_recent = pd.DataFrame(candles)
-                    last_candle = df_recent.iloc[-1]
-                    precio_actual = last_candle['close']
-                    vela_actual = {
-                        'open': last_candle['open'],
-                        'close': last_candle['close'],
-                        'high': last_candle['max'],
-                        'low': last_candle['min'],
-                        'volume': last_candle['volume']
-                    }
+                    last = df_recent.iloc[-1]
+                    precio_actual = last['close']
                     activo['precio_actual'] = precio_actual
 
-                    # Para volumen relativo, necesitamos el promedio de las últimas 20 velas
+                    # Calcular distancia al nivel
+                    nivel = activo['nivel']
+                    distancia = abs(precio_actual - nivel) / nivel if nivel else 1
+
+                    # Verificar alerta anticipada
+                    if distancia < umbral_cerca:
+                        alerta_msg = f"🔔 {asset} se acerca a {activo['tipo']} (distancia {distancia*100:.2f}%)"
+                        if alerta_msg not in st.session_state.alertas_anticipadas:
+                            st.session_state.alertas_anticipadas.append(alerta_msg)
+                            st.session_state.historial.append(alerta_msg)
+
+                    # Verificar señal definitiva: cuando el precio toca el nivel (con tolerancia) y hay cruce de EMAs
+                    # Necesitamos velas completas para calcular EMAs
                     candles_full = st.session_state.api.get_candles(asset, 60, 100, time.time())
                     if not candles_full or len(candles_full) < 50:
                         continue
@@ -270,38 +270,39 @@ if st.session_state.api is not None:
                     df_full.dropna(inplace=True)
                     if len(df_full) < 50:
                         continue
-                    vol_avg = df_full['volume'].rolling(20).mean().iloc[-1]
-                    vela_actual['volumen_rel'] = vela_actual['volume'] / vol_avg if vol_avg else 1
+                    indicators = calcular_indicadores(df_full)
 
-                    # Verificar ruptura
-                    roto, nivel = verificar_ruptura(activo, precio_actual, vela_actual, tolerancia=0.001)
-                    if roto:
-                        generar_senal(activo, nivel)
+                    # Condición de toque: precio actual dentro de 0.1% del nivel
+                    toca = abs(precio_actual - nivel) / nivel < 0.001
+
+                    if toca and indicators['cruce_ema'] and indicators['direccion_cruce'] == activo['direccion']:
+                        # Señal definitiva
+                        generar_señal(activo, activo['tipo'], activo['direccion'], confirmacion="EMA cruzada")
                         activos_a_remover.append(activo)
-                        st.session_state.historial.append(f"🔔 Ruptura en {asset} nivel {nivel} (vol_rel={vela_actual['volumen_rel']:.2f})")
                         continue
 
-                    # Si no hay ruptura, reevaluar tendencia con datos completos
-                    indicators = calcular_indicadores(df_full)
-                    res = evaluar_activo(indicators, umbral_fuerza)
+                    # Si no hay señal, reevaluar si el activo sigue siendo válido
+                    res = evaluar_activo(indicators, umbral_estabilidad=True)
                     if res:
-                        direccion, fuerza, niveles = res
-                        activo['direccion'] = direccion
-                        activo['fuerza'] = fuerza
-                        activo['niveles_fib'] = niveles
+                        # Actualizar datos (puede cambiar nivel)
+                        activo['nivel'] = res['nivel']
+                        activo['fuerza'] = res['fuerza']
+                        activo['descripcion'] = res['descripcion']
                         nuevos_seguimiento.append(activo)
                     else:
                         activos_a_remover.append(activo)
-                        st.session_state.historial.append(f"❌ Activo {asset} perdió tendencia")
+                        st.session_state.historial.append(f"❌ {asset} dejó de cumplir criterios")
                 except Exception as e:
                     st.session_state.historial.append(f"⚠️ Error monitoreando {asset}: {str(e)[:50]}")
                     activos_a_remover.append(activo)
 
+            # Limpiar
             for a in activos_a_remover:
                 if a in st.session_state.activos_seguimiento:
                     st.session_state.activos_seguimiento.remove(a)
 
-            if len(st.session_state.activos_seguimiento) < NUM_ACTIVOS:
+            # Si hay espacios, volver a selección
+            if len(st.session_state.activos_seguimiento) < max_activos:
                 st.session_state.fase = "seleccion"
                 st.rerun()
             else:
