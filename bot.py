@@ -46,31 +46,24 @@ def obtener_activos_abiertos(api):
         return REAL_ASSETS, OTC_ASSETS
 
 # =========================
-# INDICADORES BASE
+# INDICADORES
 # =========================
 
 def calcular_indicadores(df):
     df = df.copy()
-    # Renombrar columnas
     df.rename(columns={'max': 'high', 'min': 'low'}, inplace=True)
 
     # EMA
     df['ema20'] = df['close'].ewm(span=20).mean()
     df['ema50'] = df['close'].ewm(span=50).mean()
-    # RSI
-    delta = df['close'].diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.rolling(14).mean()
-    avg_loss = loss.rolling(14).mean()
-    rs = avg_gain / avg_loss
-    df['rsi'] = 100 - (100 / (1 + rs))
+
     # ATR
     high = df['high']
     low = df['low']
     close = df['close']
     tr = pd.concat([high - low, abs(high - close.shift()), abs(low - close.shift())], axis=1).max(axis=1)
     df['atr'] = tr.rolling(14).mean()
+
     # ADX
     df['tr'] = tr
     df['plus_dm'] = np.where((high - high.shift()) > (low.shift() - low), np.maximum(high - high.shift(), 0), 0)
@@ -81,42 +74,52 @@ def calcular_indicadores(df):
     df['dx'] = 100 * (abs(df['plus_di'] - df['minus_di']) / (df['plus_di'] + df['minus_di']))
     df['adx'] = df['dx'].rolling(14).mean()
 
-    # Última vela
     last = df.iloc[-1]
-    # Penúltima vela para comparar
-    prev = df.iloc[-2] if len(df) > 1 else last
 
     # Volumen promedio
     vol_avg = df['volume'].rolling(20).mean().iloc[-1]
     vol_now = last['volume']
     strong_volume = vol_now > vol_avg * 1.2 if not pd.isna(vol_avg) else False
 
-    # Determinar tendencia principal (más permisiva: solo ADX y EMAs)
-    if last['adx'] >= 25 and last['ema20'] > last['ema50'] and last['plus_di'] > last['minus_di']:
-        tendencia = "CALL"
-        fuerza_tendencia = last['adx']
-    elif last['adx'] >= 25 and last['ema20'] < last['ema50'] and last['minus_di'] > last['plus_di']:
-        tendencia = "PUT"
-        fuerza_tendencia = last['adx']
+    # Determinar tendencia
+    if last['adx'] >= 25 and last['ema20'] > last['ema50']:
+        # Verificar máximos y mínimos crecientes en últimas 20 velas
+        ultimos_20 = df.iloc[-20:]
+        maximos = ultimos_20['high'].values
+        minimos = ultimos_20['low'].values
+        if all(maximos[i] <= maximos[i+1] for i in range(len(maximos)-1)) and all(minimos[i] <= minimos[i+1] for i in range(len(minimos)-1)):
+            tendencia = "CALL"
+            fuerza = last['adx']
+        else:
+            tendencia = None
+            fuerza = 0
+    elif last['adx'] >= 25 and last['ema20'] < last['ema50']:
+        ultimos_20 = df.iloc[-20:]
+        maximos = ultimos_20['high'].values
+        minimos = ultimos_20['low'].values
+        if all(maximos[i] >= maximos[i+1] for i in range(len(maximos)-1)) and all(minimos[i] >= minimos[i+1] for i in range(len(minimos)-1)):
+            tendencia = "PUT"
+            fuerza = last['adx']
+        else:
+            tendencia = None
+            fuerza = 0
     else:
         tendencia = None
-        fuerza_tendencia = 0
+        fuerza = 0
 
-    # Calcular niveles de Fibonacci del último movimiento (50 velas)
+    # Niveles Fibonacci del último movimiento (50 velas)
     df_50 = df.iloc[-50:]
     minimo_50 = df_50['low'].min()
     maximo_50 = df_50['high'].max()
     movimiento = maximo_50 - minimo_50
     if tendencia == "CALL":
         niveles_fib = {
-            '236': maximo_50 - movimiento * 0.236,
             '382': maximo_50 - movimiento * 0.382,
             '500': maximo_50 - movimiento * 0.5,
             '618': maximo_50 - movimiento * 0.618
         }
     elif tendencia == "PUT":
         niveles_fib = {
-            '236': minimo_50 + movimiento * 0.236,
             '382': minimo_50 + movimiento * 0.382,
             '500': minimo_50 + movimiento * 0.5,
             '618': minimo_50 + movimiento * 0.618
@@ -129,10 +132,8 @@ def calcular_indicadores(df):
         'high': last['high'],
         'low': last['low'],
         'open': last['open'],
-        'prev_close': prev['close'],
         'ema20': last['ema20'],
         'ema50': last['ema50'],
-        'rsi': last['rsi'],
         'adx': last['adx'],
         'plus_di': last['plus_di'],
         'minus_di': last['minus_di'],
@@ -140,7 +141,7 @@ def calcular_indicadores(df):
         'volumen_rel': vol_now / vol_avg if vol_avg else 1,
         'strong_volume': strong_volume,
         'tendencia': tendencia,
-        'fuerza_tendencia': fuerza_tendencia,
+        'fuerza': fuerza,
         'niveles_fib': niveles_fib,
         'df': df
     }
@@ -150,34 +151,34 @@ def calcular_indicadores(df):
 # =========================
 
 def evaluar_activo(indicators, umbral_fuerza=30):
-    """
-    Retorna (direccion, fuerza, niveles_fib) si el activo tiene tendencia clara.
-    Requisitos: tendencia definida y fuerza >= umbral.
-    """
     if indicators['tendencia'] is None:
         return None
-    if indicators['fuerza_tendencia'] < umbral_fuerza:
+    if indicators['fuerza'] < umbral_fuerza:
         return None
-    return indicators['tendencia'], indicators['fuerza_tendencia'], indicators['niveles_fib']
+    return indicators['tendencia'], indicators['fuerza'], indicators['niveles_fib']
 
 # =========================
-# VERIFICAR PUNTO DE ENTRADA (versión más sensible)
+# VERIFICAR PUNTO DE ENTRADA
 # =========================
 
-def verificar_punto_entrada(activo, precio_actual, vela_actual, tolerancia=0.002):
+def verificar_punto_entrada(activo, vela_actual, tolerancia=0.002):
     """
-    vela_actual es un dict con 'open', 'close', 'high', 'low', 'volume', 'volumen_rel'
-    Retorna (True, nivel_alcanzado) si el precio está cerca de un nivel y la vela es del color correcto.
-    Ya no se exige volumen fuerte, solo se registra.
+    vela_actual: dict con open, close, high, low, volume, volumen_rel
+    Retorna (True, nivel) si el precio está cerca de un nivel Fibonacci y la vela confirma la continuación.
     """
     niveles = activo['niveles_fib']
     direccion = activo['direccion']
+    precio = vela_actual['close']
+
     for key, nivel in niveles.items():
-        if direccion == "CALL" and precio_actual <= nivel * (1 + tolerancia):
-            # Vela debe ser alcista
-            if vela_actual['close'] > vela_actual['open']:
-                return True, key
-        elif direccion == "PUT" and precio_actual >= nivel * (1 - tolerancia):
-            if vela_actual['close'] < vela_actual['open']:
-                return True, key
+        if direccion == "CALL":
+            # El precio debe estar cerca del nivel (por debajo o igual)
+            if precio <= nivel * (1 + tolerancia):
+                # La vela debe ser alcista (close > open) y tener volumen fuerte
+                if vela_actual['close'] > vela_actual['open'] and vela_actual['volumen_rel'] >= 1.2:
+                    return True, key
+        else:  # PUT
+            if precio >= nivel * (1 - tolerancia):
+                if vela_actual['close'] < vela_actual['open'] and vela_actual['volumen_rel'] >= 1.2:
+                    return True, key
     return False, None
