@@ -200,6 +200,7 @@ if st.session_state.api is not None:
                     if len(df) < 50:
                         continue
                     indicators = calcular_indicadores(df)
+                    # Llamada correcta con el parámetro umbral_estabilidad
                     res = evaluar_activo(indicators, umbral_estabilidad=True)
                     if res:
                         candidatos.append({
