@@ -4,6 +4,7 @@ import numpy as np
 import logging
 from datetime import datetime, timedelta
 import pytz
+from collections import defaultdict
 
 # Configurar logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -105,27 +106,17 @@ def detectar_niveles_horizontales(df, num_toques=2):
     """
     # Tomamos las últimas 100 velas para buscar niveles
     df = df.iloc[-100:].copy()
-    # Identificamos picos (máximos locales) y valles (mínimos locales)
     highs = df['high']
     lows = df['low']
-
-    # Método simple: agrupar por valor redondeado a ciertos decimales (depende del activo)
-    # Pero como los precios son flotantes, necesitamos una tolerancia.
-    # Usaremos una función más robusta: buscar niveles donde el precio se acercó varias veces.
-    niveles = []
     tolerancia = 0.0005  # 0.05% ajustable
 
-    # Para resistencias: máximos
-    for i in range(len(highs)-5, len(highs)):
-        # no considerar los muy recientes? mejor todo el rango
-        pass
-    # Es más fácil: buscar precios que se repiten dentro de una banda
-    from collections import defaultdict
     conteo = defaultdict(int)
+    # Contar máximos
     for idx, val in enumerate(highs):
         for j in range(max(0, idx-5), min(len(highs), idx+5)):
             if abs(highs.iloc[j] - val) / val < tolerancia:
-                conteo[round(val, 5)] += 1  # redondeamos para agrupar
+                conteo[round(val, 5)] += 1
+    # Contar mínimos
     for idx, val in enumerate(lows):
         for j in range(max(0, idx-5), min(len(lows), idx+5)):
             if abs(lows.iloc[j] - val) / val < tolerancia:
@@ -153,8 +144,6 @@ def detectar_lineas_tendencia(df):
     """
     # Usamos mínimos para tendencia alcista (conecta 2 mínimos crecientes)
     # y máximos para tendencia bajista (2 máximos decrecientes)
-    # Esto es una simplificación; en un bot real se necesitaría más sofisticación.
-    # Por simplicidad, buscaremos pares de puntos que formen una línea con pendiente significativa.
     # Limitamos a las últimas 50 velas.
     df = df.iloc[-50:].copy()
     minimos = df['low'].values
@@ -167,7 +156,6 @@ def detectar_lineas_tendencia(df):
         for j in range(i+5, len(minimos)):
             if minimos[j] > minimos[i] and (j - i) > 5:
                 pendiente = (minimos[j] - minimos[i]) / (j - i)
-                # Verificar si otros mínimos respetan la línea (opcional)
                 lineas.append({
                     'tipo': 'alcista',
                     'pendiente': pendiente,
@@ -187,12 +175,11 @@ def detectar_lineas_tendencia(df):
                     'toques': 2,
                     'puntos': (i, j)
                 })
-    # Podríamos agregar más lógica para seleccionar las mejores
-    # Por ahora, devolvemos las primeras (o las más recientes)
-    return lineas[:5]  # limitamos
+    # Devolvemos las primeras (o las más recientes)
+    return lineas[:5]
 
 # =========================
-# EVALUAR ACTIVO (selección)
+# EVALUAR ACTIVO (selección) - CON PARÁMETRO umbral_estabilidad
 # =========================
 def evaluar_activo(indicators, umbral_estabilidad=True):
     """
