@@ -46,11 +46,16 @@ def obtener_activos_abiertos(api):
         return REAL_ASSETS, OTC_ASSETS
 
 # =========================
-# INDICADORES
+# INDICADORES (CORREGIDO: usa max/min)
 # =========================
 
 def calcular_indicadores(df):
     df = df.copy()
+    # Asegurar nombres de columnas
+    # Las velas vienen con: open, max, min, close, volume
+    # Renombramos internamente para claridad, pero manteniendo acceso
+    df.rename(columns={'max': 'high', 'min': 'low'}, inplace=True)
+
     # EMA
     df['ema20'] = df['close'].ewm(span=20).mean()
     df['ema50'] = df['close'].ewm(span=50).mean()
@@ -63,8 +68,8 @@ def calcular_indicadores(df):
     rs = avg_gain / avg_loss
     df['rsi'] = 100 - (100 / (1 + rs))
     # ATR
-    high = df['max']
-    low = df['min']
+    high = df['high']
+    low = df['low']
     close = df['close']
     tr = pd.concat([high - low, abs(high - close.shift()), abs(low - close.shift())], axis=1).max(axis=1)
     df['atr'] = tr.rolling(14).mean()
@@ -111,8 +116,8 @@ def calcular_indicadores(df):
 
     return {
         'close': last['close'],
-        'high': last['max'],
-        'low': last['min'],
+        'high': last['high'],
+        'low': last['low'],
         'ema20': last['ema20'],
         'ema50': last['ema50'],
         'adx': last['adx'],
@@ -122,17 +127,17 @@ def calcular_indicadores(df):
         'fuerza': fuerza,
         'volumen_rel': vol_now / vol_avg if vol_avg else 1,
         'estructura_valida': estructura_valida,
-        'df': df
+        'df': df  # El df ya tiene high/low renombrados
     }
 
 # =========================
-# CALCULAR NIVELES DE RETROCESO (23.6%, 38.2%, 50%)
+# CALCULAR NIVELES DE RETROCESO (CORREGIDO)
 # =========================
 
 def calcular_niveles_retroceso(df, tendencia):
     """
     Calcula niveles de retroceso de Fibonacci: 23.6%, 38.2%, 50%.
-    Retorna un dict con los niveles.
+    df debe tener columnas 'high' y 'low'.
     """
     df = df.iloc[-50:].copy()
     minimo = df['low'].min()
@@ -150,7 +155,7 @@ def calcular_niveles_retroceso(df, tendencia):
     return {'236': nivel_236, '382': nivel_382, '50': nivel_50}
 
 # =========================
-# EVALUAR TENDENCIA (para selección inicial y reemplazo)
+# EVALUAR ACTIVO (para selección inicial y reemplazo)
 # =========================
 
 def evaluar_activo(indicators, umbral_fuerza):
