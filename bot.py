@@ -103,7 +103,7 @@ def calcular_indicadores(df):
     # Rango lateral (diferencia entre máximos y mínimos recientes)
     rango_reciente = df['high'].iloc[-20:].max() - df['low'].iloc[-20:].min()
     atr_actual = last['atr']
-    lateral = rango_reciente < atr_actual * 2.5  # Rango estrecho respecto al ATR
+    lateral = rango_reciente < atr_actual * 2.5
 
     return {
         'close': last['close'],
@@ -136,6 +136,13 @@ def calcular_indicadores(df):
 # =========================
 
 def estrategia_tendencia_adx(indicators):
+    """
+    CALL: EMA20 > EMA50, ADX >= 25, PlusDI > MinusDI
+    PUT: EMA20 < EMA50, ADX >= 25, MinusDI > PlusDI
+    Fuerza = ADX + bonus por volumen
+    Retorna (direccion, fuerza, nombre_estrategia, nivel_clave)
+    nivel_clave: para tendencia, usamos un retroceso del 38.2% del último movimiento
+    """
     if indicators['adx'] is None or pd.isna(indicators['adx']) or indicators['adx'] < 25:
         return None
     direccion = None
@@ -145,38 +152,37 @@ def estrategia_tendencia_adx(indicators):
         direccion = "PUT"
     else:
         return None
+
     fuerza = indicators['adx']
     if indicators['strong_volume']:
         fuerza = min(fuerza + 10, 100)
-    return direccion, fuerza, "Tendencia ADX"
+
+    # Calcular nivel de retroceso (38.2% del último movimiento relevante)
+    df = indicators['df'].iloc[-50:]
+    if direccion == "CALL":
+        # En tendencia alcista, buscamos el mínimo más bajo y el máximo más alto
+        minimo = df['low'].min()
+        maximo = df['high'].max()
+        nivel = maximo - (maximo - minimo) * 0.382
+    else:  # PUT
+        minimo = df['low'].min()
+        maximo = df['high'].max()
+        nivel = minimo + (maximo - minimo) * 0.382
+
+    return direccion, fuerza, "Tendencia ADX", nivel
 
 # =========================
 # ESTRATEGIA 2: SOPORTE FUERTE (COMPRA EN REBOTE)
 # =========================
 
 def estrategia_soporte_fuerte(indicators):
+    """
+    CALL: precio cerca de soporte, vela alcista fuerte (close > open), volumen alto
+    Retorna (direccion, fuerza, nombre_estrategia, nivel_clave) donde nivel_clave es el soporte
+    """
     if not indicators['cerca_soporte']:
         return None
-    if indicators['close'] <= indicators['open']:  # vela no alcista
-        return None
-    if not indicators['strong_volume']:
-        return None
-    cuerpo = abs(indicators['close'] - indicators['open'])
-    rango = indicators['high'] - indicators['low']
-    if cuerpo < rango * 0.5:  # vela pequeña
-        return None
-    fuerza = 60 + (20 if indicators['very_strong_volume'] else 0) + (10 if cuerpo > rango * 0.7 else 0)
-    fuerza = min(fuerza, 100)
-    return "CALL", fuerza, "Soporte fuerte"
-
-# =========================
-# ESTRATEGIA 3: RESISTENCIA FUERTE (VENTA EN RECHAZO)
-# =========================
-
-def estrategia_resistencia_fuerte(indicators):
-    if not indicators['cerca_resistencia']:
-        return None
-    if indicators['close'] >= indicators['open']:  # vela no bajista
+    if indicators['close'] <= indicators['open']:
         return None
     if not indicators['strong_volume']:
         return None
@@ -186,13 +192,40 @@ def estrategia_resistencia_fuerte(indicators):
         return None
     fuerza = 60 + (20 if indicators['very_strong_volume'] else 0) + (10 if cuerpo > rango * 0.7 else 0)
     fuerza = min(fuerza, 100)
-    return "PUT", fuerza, "Resistencia fuerte"
+    return "CALL", fuerza, "Soporte fuerte", indicators['soporte']
 
 # =========================
-# ESTRATEGIA 4: REVERSIÓN CON VELAS Y VOLUMEN
+# ESTRATEGIA 3: RESISTENCIA FUERTE (VENTA EN RECHAZO)
+# =========================
+
+def estrategia_resistencia_fuerte(indicators):
+    """
+    PUT: precio cerca de resistencia, vela bajista fuerte (close < open), volumen alto
+    """
+    if not indicators['cerca_resistencia']:
+        return None
+    if indicators['close'] >= indicators['open']:
+        return None
+    if not indicators['strong_volume']:
+        return None
+    cuerpo = abs(indicators['close'] - indicators['open'])
+    rango = indicators['high'] - indicators['low']
+    if cuerpo < rango * 0.5:
+        return None
+    fuerza = 60 + (20 if indicators['very_strong_volume'] else 0) + (10 if cuerpo > rango * 0.7 else 0)
+    fuerza = min(fuerza, 100)
+    return "PUT", fuerza, "Resistencia fuerte", indicators['resistencia']
+
+# =========================
+# ESTRATEGIA 4: REVERSIÓN CON VELAS Y VOLUMEN (SOBRECOMPRA/SOBREVENTA)
 # =========================
 
 def estrategia_reversion(indicators):
+    """
+    CALL: RSI < 30, precio cerca de soporte o banda inferior de Bollinger, vela de reversión alcista
+    PUT: RSI > 70, precio cerca de resistencia o banda superior, vela de reversión bajista
+    Retorna (direccion, fuerza, nombre_estrategia, nivel_clave) donde nivel_clave es el soporte/resistencia o banda
+    """
     df = indicators['df']
     ma20 = df['close'].rolling(20).mean().iloc[-1]
     std20 = df['close'].rolling(20).std().iloc[-1]
@@ -206,7 +239,9 @@ def estrategia_reversion(indicators):
             rango = indicators['high'] - indicators['low']
             if cuerpo > rango * 0.4 and indicators['strong_volume']:
                 fuerza = 70 + (10 if indicators['very_strong_volume'] else 0)
-                return "CALL", min(fuerza, 100), "Reversión sobreventa"
+                # nivel_clave puede ser el soporte o la banda inferior
+                nivel = min(indicators['soporte'], bb_lower)
+                return "CALL", min(fuerza, 100), "Reversión sobreventa", nivel
 
     # Reversión bajista
     if indicators['rsi'] > 70 and indicators['close'] >= bb_upper * 0.99:
@@ -215,8 +250,8 @@ def estrategia_reversion(indicators):
             rango = indicators['high'] - indicators['low']
             if cuerpo > rango * 0.4 and indicators['strong_volume']:
                 fuerza = 70 + (10 if indicators['very_strong_volume'] else 0)
-                return "PUT", min(fuerza, 100), "Reversión sobrecompra"
-
+                nivel = max(indicators['resistencia'], bb_upper)
+                return "PUT", min(fuerza, 100), "Reversión sobrecompra", nivel
     return None
 
 # =========================
@@ -224,6 +259,10 @@ def estrategia_reversion(indicators):
 # =========================
 
 def estrategia_breakout(indicators):
+    """
+    Detecta ruptura de un rango lateral con volumen alto.
+    Retorna (direccion, fuerza, nombre_estrategia, nivel_clave) donde nivel_clave es el límite roto.
+    """
     if not indicators['lateral']:
         return None
     df = indicators['df'].iloc[-20:]
@@ -232,58 +271,60 @@ def estrategia_breakout(indicators):
     precio = indicators['close']
     if precio > rango_alto * 1.001 and indicators['strong_volume']:
         fuerza = 70 + (10 if indicators['very_strong_volume'] else 0)
-        return "CALL", min(fuerza, 100), "Breakout alcista"
+        return "CALL", min(fuerza, 100), "Breakout alcista", rango_alto
     if precio < rango_bajo * 0.999 and indicators['strong_volume']:
         fuerza = 70 + (10 if indicators['very_strong_volume'] else 0)
-        return "PUT", min(fuerza, 100), "Breakout bajista"
+        return "PUT", min(fuerza, 100), "Breakout bajista", rango_bajo
     return None
 
 # =========================
-# EVALUADOR PRINCIPAL (retorna 4 valores)
+# EVALUADOR PRINCIPAL
 # =========================
 
 def evaluar_activo(indicators, umbral_fuerza=40):
+    """
+    Ejecuta las 5 estrategias y retorna la mejor señal (dirección, fuerza, estrategia, nivel_clave)
+    si alguna supera el umbral.
+    """
     mejores = []
     # Estrategia 1
     res1 = estrategia_tendencia_adx(indicators)
     if res1:
-        direccion, fuerza, nombre = res1
+        direccion, fuerza, nombre, nivel = res1
         if fuerza >= umbral_fuerza:
-            mejores.append((fuerza, direccion, nombre, None))
+            mejores.append((fuerza, direccion, nombre, nivel))
 
     # Estrategia 2
     res2 = estrategia_soporte_fuerte(indicators)
     if res2:
-        direccion, fuerza, nombre = res2
+        direccion, fuerza, nombre, nivel = res2
         if fuerza >= umbral_fuerza:
-            nivel_clave = indicators['soporte']
-            mejores.append((fuerza, direccion, nombre, nivel_clave))
+            mejores.append((fuerza, direccion, nombre, nivel))
 
     # Estrategia 3
     res3 = estrategia_resistencia_fuerte(indicators)
     if res3:
-        direccion, fuerza, nombre = res3
+        direccion, fuerza, nombre, nivel = res3
         if fuerza >= umbral_fuerza:
-            nivel_clave = indicators['resistencia']
-            mejores.append((fuerza, direccion, nombre, nivel_clave))
+            mejores.append((fuerza, direccion, nombre, nivel))
 
     # Estrategia 4
     res4 = estrategia_reversion(indicators)
     if res4:
-        direccion, fuerza, nombre = res4
+        direccion, fuerza, nombre, nivel = res4
         if fuerza >= umbral_fuerza:
-            mejores.append((fuerza, direccion, nombre, None))
+            mejores.append((fuerza, direccion, nombre, nivel))
 
     # Estrategia 5
     res5 = estrategia_breakout(indicators)
     if res5:
-        direccion, fuerza, nombre = res5
+        direccion, fuerza, nombre, nivel = res5
         if fuerza >= umbral_fuerza:
-            nivel_clave = indicators['close']  # o el nivel de ruptura
-            mejores.append((fuerza, direccion, nombre, nivel_clave))
+            mejores.append((fuerza, direccion, nombre, nivel))
 
     if not mejores:
         return None
+    # Ordenar por fuerza descendente
     mejores.sort(reverse=True)
-    fuerza, direccion, nombre, nivel_clave = mejores[0]
-    return direccion, fuerza, nombre, nivel_clave
+    fuerza, direccion, nombre, nivel = mejores[0]
+    return direccion, fuerza, nombre, nivel
