@@ -28,7 +28,7 @@ if 'activos_seguimiento' not in st.session_state:
 if 'alertas_anticipadas' not in st.session_state:
     st.session_state.alertas_anticipadas = []  # Alertas cuando el precio se acerca
 if 'señales_activas' not in st.session_state:
-    st.session_state.señales_activas = []  # Señales definitivas
+    st.session_state.señales_activas = {}  # DICCIONARIO: clave = activo, valor = señal
 if 'historial' not in st.session_state:
     st.session_state.historial = []
 
@@ -55,9 +55,11 @@ def generar_señal(activo, tipo_nivel, direccion, confirmacion=""):
         'expiry': expiry_local.strftime("%H:%M:%S"),
         'tipo_nivel': tipo_nivel,
         'confirmacion': confirmacion,
-        'fuerza': activo.get('fuerza', 50)
+        'fuerza': activo.get('fuerza', 50),
+        'timestamp': entry_dt  # para ordenar
     }
-    st.session_state.señales_activas.append(señal)
+    # Guardar en diccionario (clave = activo, así se sobreescribe la anterior)
+    st.session_state.señales_activas[activo['asset']] = señal
     st.session_state.historial.append(f"🎯 SEÑAL DEFINITIVA: {activo['asset']} - {direccion} a las {entry_local.strftime('%H:%M:%S')} ({tipo_nivel})")
 
 # Sidebar
@@ -93,7 +95,7 @@ if conectar:
                 st.session_state.fase = "seleccion"
                 st.session_state.activos_seguimiento = []
                 st.session_state.alertas_anticipadas = []
-                st.session_state.señales_activas = []
+                st.session_state.señales_activas = {}
                 st.session_state.historial = []
                 st.success("✅ Conectado - Buscando activos OTC estables...")
                 st.rerun()
@@ -107,7 +109,7 @@ if desconectar:
     st.session_state.escaneando = False
     st.session_state.activos_seguimiento = []
     st.session_state.alertas_anticipadas = []
-    st.session_state.señales_activas = []
+    st.session_state.señales_activas = {}
     st.success("Desconectado")
     st.rerun()
 
@@ -145,19 +147,34 @@ if st.session_state.api is not None:
     # --- SECCIÓN 3: SEÑALES DEFINITIVAS LISTAS PARA OPERAR ---
     with st.expander("🚀 SEÑALES DEFINITIVAS", expanded=True):
         if st.session_state.señales_activas:
+            # Convertir el diccionario a lista y ordenar por timestamp descendente (más reciente primero)
+            lista_señales = list(st.session_state.señales_activas.values())
+            lista_señales.sort(key=lambda x: x['timestamp'], reverse=True)
+            # Tomar las últimas 6 (o las que quieras)
+            lista_señales = lista_señales[:6]
+
             cols = st.columns(2)
-            for idx, senal in enumerate(st.session_state.señales_activas[-6:]):  # últimas 6
+            for idx, senal in enumerate(lista_señales):
                 with cols[idx % 2]:
                     asset = senal['asset']
                     tipo = "📱 OTC"
                     asset_clean = asset.replace("-OTC", "")
                     color = "#006400" if senal['direccion'] == "CALL" else "#8B0000"
+                    # Calcular tiempo restante (opcional)
+                    now = datetime.now(ecuador)
+                    entrada = datetime.strptime(senal['entry'], "%H:%M:%S").time()
+                    entrada_dt = datetime.combine(now.date(), entrada).replace(tzinfo=ecuador)
+                    if entrada_dt < now:
+                        entrada_dt += timedelta(days=1)  # si ya pasó hoy, asumimos mañana (pero no debería)
+                    tiempo_restante = (entrada_dt - now).total_seconds()
+                    mins, secs = divmod(max(0, int(tiempo_restante)), 60)
+
                     html_code = f"""
                     <div style="background:#111; padding:15px; border-radius:10px; border:3px solid {color}; margin-bottom:10px;">
                         <h4>{asset_clean} {tipo}</h4>
                         <p style="color:{color}; font-size:1.8rem;">{senal['direccion']}</p>
                         <p><strong>Tipo:</strong> {senal['tipo_nivel']}</p>
-                        <p><strong>Entrada:</strong> {senal['entry']}</p>
+                        <p><strong>Entrada:</strong> {senal['entry']} (en {mins}m {secs}s)</p>
                         <p><strong>Expira:</strong> {senal['expiry']}</p>
                         <p><strong>Conf:</strong> {senal.get('confirmacion', '')}</p>
                         <p style="color:#0f0;">✅ LISTO PARA OPERAR</p>
@@ -200,7 +217,6 @@ if st.session_state.api is not None:
                     if len(df) < 50:
                         continue
                     indicators = calcular_indicadores(df)
-                    # Llamada correcta con el parámetro umbral_estabilidad
                     res = evaluar_activo(indicators, umbral_estabilidad=True)
                     if res:
                         candidatos.append({
@@ -261,7 +277,6 @@ if st.session_state.api is not None:
                             st.session_state.historial.append(alerta_msg)
 
                     # Verificar señal definitiva: cuando el precio toca el nivel (con tolerancia) y hay cruce de EMAs
-                    # Necesitamos velas completas para calcular EMAs
                     candles_full = st.session_state.api.get_candles(asset, 60, 100, time.time())
                     if not candles_full or len(candles_full) < 50:
                         continue
