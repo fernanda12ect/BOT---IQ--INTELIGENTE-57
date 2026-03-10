@@ -114,7 +114,7 @@ if conectar:
                 st.success("Conectado")
                 st.rerun()
             else:
-                st.error(f"Error: {reason}")
+                st.error(f"❌ Error de conexión: {reason}")
         except Exception as e:
             st.error(f"Error: {e}")
 
