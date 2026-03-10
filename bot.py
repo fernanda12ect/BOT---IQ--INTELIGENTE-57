@@ -13,6 +13,32 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 ecuador = pytz.timezone("America/Guayaquil")
 
 # =========================
+# OBTENER ACTIVOS ABIERTOS (reales y OTC)
+# =========================
+def obtener_activos_abiertos(api):
+    """Obtiene listas de activos REAL y OTC abiertos en el momento."""
+    try:
+        open_time = api.get_all_open_time()
+        real = []
+        otc = []
+        now_utc = datetime.now(pytz.UTC)
+        dia_semana = now_utc.weekday()
+        es_fin_semana = dia_semana >= 5
+
+        if 'binary' in open_time:
+            for asset, data in open_time['binary'].items():
+                if data.get('open', False):
+                    if '-OTC' in asset:
+                        otc.append(asset)
+                    else:
+                        if not es_fin_semana:
+                            real.append(asset)
+        return real, otc
+    except Exception as e:
+        logging.error(f"Error obteniendo activos: {e}")
+        return [], []
+
+# =========================
 # INDICADORES COMUNES (sobre DataFrame)
 # =========================
 def calcular_indicadores(df):
@@ -72,6 +98,7 @@ def calcular_indicadores(df):
 
     # Última fila
     last = df.iloc[-1]
+    # También devolvemos el df completo para usar en algunas estrategias
     return {k: last[k] for k in df.columns}, df
 
 # =========================
