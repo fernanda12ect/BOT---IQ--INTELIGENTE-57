@@ -6,63 +6,58 @@ from datetime import datetime, timedelta
 import pytz
 from bot import (
     obtener_activos_abiertos,
-    calcular_indicadores,
+    seleccionar_mejores_activos,
     evaluar_activo
 )
 from iqoptionapi.stable_api import IQ_Option
 
 st.set_page_config(layout="wide")
-st.title("🤖 BOT OTC - SEÑALES SIMPLIFICADAS (1 MIN ANTES)")
+st.title("📈 GENERADOR DE SEÑALES M5 - SELECCIÓN AUTOMÁTICA DE ACTIVOS")
 
 # Inicializar session_state
 if 'api' not in st.session_state:
     st.session_state.api = None
+if 'activos_reales' not in st.session_state:
+    st.session_state.activos_reales = []
 if 'activos_otc' not in st.session_state:
     st.session_state.activos_otc = []
+if 'activos_seleccionados' not in st.session_state:
+    st.session_state.activos_seleccionados = []  # los que el bot elige
 if 'escaneando' not in st.session_state:
     st.session_state.escaneando = False
-if 'fase' not in st.session_state:
-    st.session_state.fase = "seleccion"
-if 'activos_seguimiento' not in st.session_state:
-    st.session_state.activos_seguimiento = []
-if 'alertas_anticipadas' not in st.session_state:
-    st.session_state.alertas_anticipadas = []
-if 'señales_activas' not in st.session_state:
-    st.session_state.señales_activas = []
-if 'historial' not in st.session_state:
-    st.session_state.historial = []
+if 'señales' not in st.session_state:
+    st.session_state.señales = []  # lista de dicts con señal, timestamp
+if 'historial_señales' not in st.session_state:
+    st.session_state.historial_señales = []
+if 'indice_activo' not in st.session_state:
+    st.session_state.indice_activo = 0
+if 'ultima_ejecucion' not in st.session_state:
+    st.session_state.ultima_ejecucion = None
+if 'log' not in st.session_state:
+    st.session_state.log = []
 
 # Zona horaria Ecuador
 ecuador = pytz.timezone("America/Guayaquil")
 
-def generar_señal(activo, tipo_nivel, direccion, confirmacion=""):
-    try:
-        server_time = st.session_state.api.get_server_time()
-        now_utc = datetime.fromtimestamp(server_time, tz=pytz.UTC)
-    except:
-        now_utc = datetime.now(pytz.UTC)
-    entry_dt = now_utc + timedelta(minutes=1)
-    entry_dt = entry_dt.replace(second=0, microsecond=0)
-    expiry_dt = entry_dt + timedelta(minutes=1)
-    entry_local = entry_dt.astimezone(ecuador)
-    expiry_local = expiry_dt.astimezone(ecuador)
-
-    nueva_señal = {
-        'asset': activo['asset'],
+# Función para añadir señal
+def añadir_señal(asset, direccion, estrategia):
+    now = datetime.now(ecuador)
+    # La entrada se estima al inicio de la siguiente vela M1 (aproximadamente 30-50 segundos)
+    entrada_estimada = now + timedelta(minutes=1)
+    entrada_estimada = entrada_estimada.replace(second=0, microsecond=0)
+    tiempo_restante = (entrada_estimada - now).total_seconds()
+    señal = {
+        'activo': asset,
         'direccion': direccion,
-        'entry': entry_local.strftime("%H:%M:%S"),
-        'expiry': expiry_local.strftime("%H:%M:%S"),
-        'tipo_nivel': tipo_nivel,
-        'confirmacion': confirmacion,
-        'fuerza': activo.get('fuerza', 50),
-        'timestamp': datetime.now(ecuador)
+        'estrategia': estrategia,
+        'entrada': entrada_estimada.strftime("%H:%M:%S"),
+        'tiempo_restante': f"{int(tiempo_restante)}s",
+        'timestamp': now
     }
-
-    st.session_state.señales_activas = [s for s in st.session_state.señales_activas if s['asset'] != activo['asset']]
-    st.session_state.señales_activas.append(nueva_señal)
-    st.session_state.señales_activas.sort(key=lambda x: x['timestamp'], reverse=True)
-    st.session_state.señales_activas = st.session_state.señales_activas[:20]
-    st.session_state.historial.append(f"🎯 SEÑAL: {activo['asset']} - {direccion} a las {entry_local.strftime('%H:%M:%S')} ({tipo_nivel})")
+    st.session_state.señales.insert(0, señal)  # la más reciente al principio
+    st.session_state.señales = st.session_state.señales[:20]  # mantener solo últimas 20
+    st.session_state.historial_señales.append(señal)
+    st.session_state.log.append(f"📊 SEÑAL: {asset} - {direccion} ({estrategia}) a las {entrada_estimada.strftime('%H:%M:%S')}")
 
 # Sidebar
 with st.sidebar:
@@ -70,16 +65,35 @@ with st.sidebar:
     email = st.text_input("📧 Email")
     password = st.text_input("🔑 Password", type="password")
 
-    umbral_estabilidad = st.slider("📊 Estabilidad máxima (%)", 1.0, 5.0, 2.5, 0.1) / 100
-    umbral_cerca = st.slider("🔍 Alerta anticipada (%)", 0.1, 2.0, 0.5, 0.1) / 100
-    fuerza_minima = st.slider("💪 Fuerza mínima para seguimiento", 0, 100, 30, 5)
-    pausa_entre_rondas = st.number_input("⏱️ Pausa (seg)", 5, 60, 10)
+    st.divider()
+    max_activos = st.slider("🎯 Número máximo de activos a seguir", 5, 30, 10, 5)
+    st.divider()
 
     col1, col2 = st.columns(2)
     with col1:
         conectar = st.button("🔌 Conectar")
     with col2:
         desconectar = st.button("⛔ Desconectar")
+
+    st.divider()
+    if st.session_state.api is not None:
+        if not st.session_state.escaneando:
+            iniciar = st.button("▶️ INICIAR MONITOREO")
+            if iniciar:
+                # Seleccionar automáticamente los mejores activos
+                with st.spinner("Seleccionando los mejores activos..."):
+                    todos_activos = st.session_state.activos_reales + st.session_state.activos_otc
+                    seleccionados = seleccionar_mejores_activos(st.session_state.api, todos_activos, max_activos)
+                    st.session_state.activos_seleccionados = seleccionados
+                    st.session_state.log.append(f"✅ Seleccionados {len(seleccionados)} activos: {', '.join(seleccionados[:5])}...")
+                st.session_state.escaneando = True
+                st.session_state.indice_activo = 0
+                st.rerun()
+        else:
+            detener = st.button("⏹️ DETENER MONITOREO")
+            if detener:
+                st.session_state.escaneando = False
+                st.rerun()
 
 # Lógica de conexión
 if conectar:
@@ -92,205 +106,99 @@ if conectar:
             if check:
                 st.session_state.api = API
                 real, otc = obtener_activos_abiertos(API)
+                st.session_state.activos_reales = real
                 st.session_state.activos_otc = otc
-                st.session_state.escaneando = True
-                st.session_state.fase = "seleccion"
-                st.session_state.activos_seguimiento = []
-                st.session_state.alertas_anticipadas = []
-                st.session_state.señales_activas = []
-                st.session_state.historial = []
-                st.success("✅ Conectado")
+                st.session_state.activos_seleccionados = []
+                st.session_state.escaneando = False
+                st.session_state.log.append("✅ Conectado")
+                st.success("Conectado")
                 st.rerun()
             else:
-                st.error(f"❌ Error de conexión: {reason}")
+                st.error(f"Error: {reason}")
         except Exception as e:
             st.error(f"Error: {e}")
 
 if desconectar:
     st.session_state.api = None
+    st.session_state.activos_seleccionados = []
     st.session_state.escaneando = False
-    st.session_state.activos_seguimiento = []
-    st.session_state.alertas_anticipadas = []
-    st.session_state.señales_activas = []
-    st.success("Desconectado")
+    st.session_state.log.append("🔌 Desconectado")
     st.rerun()
 
 # Área principal
 if st.session_state.api is not None:
-    st.success(f"📱 OTC disponibles: {len(st.session_state.activos_otc)}")
+    st.info(f"📊 Modo: Generador de señales | Activos en seguimiento: {len(st.session_state.activos_seleccionados)}")
 
-    with st.expander("📌 ACTIVOS EN SEGUIMIENTO", expanded=True):
-        if st.session_state.activos_seguimiento:
-            data = []
-            for a in st.session_state.activos_seguimiento:
-                data.append({
-                    "Activo": a['asset'],
-                    "Nivel": a['tipo'],
-                    "Dir": a['direccion'],
-                    "Precio nivel": f"{a['nivel']:.5f}",
-                    "Precio actual": f"{a.get('precio_actual', 0):.5f}",
-                    "Fuerza": f"{a['fuerza']:.0f}%"
-                })
-            df = pd.DataFrame(data)
-            st.dataframe(df, width='stretch')
+    # Mostrar los activos seleccionados (para que el usuario pueda abrir sus gráficos)
+    if st.session_state.activos_seleccionados:
+        with st.expander("📌 Activos seleccionados automáticamente"):
+            st.write("Los siguientes activos son los más prometedores según el análisis del bot:")
+            cols = st.columns(3)
+            for i, asset in enumerate(st.session_state.activos_seleccionados):
+                cols[i % 3].write(f"- {asset}")
+
+    # Mostrar señales activas (la más reciente primero)
+    st.subheader("🚀 SEÑALES ACTIVAS (próxima vela)")
+    if st.session_state.señales:
+        cols = st.columns(2)
+        for idx, señal in enumerate(st.session_state.señales[:6]):  # mostrar hasta 6
+            with cols[idx % 2]:
+                color = "#006400" if señal['direccion'] == "CALL" else "#8B0000"
+                html_code = f"""
+                <div style="background:#111; padding:15px; border-radius:10px; border:3px solid {color}; margin-bottom:10px;">
+                    <h4>{señal['activo']} 📱</h4>
+                    <p style="color:{color}; font-size:1.8rem;">{señal['direccion']}</p>
+                    <p><strong>Estrategia:</strong> {señal['estrategia']}</p>
+                    <p><strong>Entrada:</strong> {señal['entrada']}</p>
+                    <p><strong>⏳ {señal['tiempo_restante']}</strong></p>
+                </div>
+                """
+                st.markdown(html_code, unsafe_allow_html=True)
+    else:
+        st.info("No hay señales activas.")
+
+    # Historial de señales
+    with st.expander("📋 Historial de señales"):
+        if st.session_state.historial_señales:
+            df_hist = pd.DataFrame(st.session_state.historial_señales[-50:])
+            st.dataframe(df_hist[['activo', 'direccion', 'estrategia', 'entrada', 'timestamp']], width='stretch')
         else:
-            st.info("No hay activos en seguimiento.")
+            st.info("Sin historial.")
 
-    with st.expander("🔔 ALERTAS", expanded=True):
-        if st.session_state.alertas_anticipadas:
-            for alerta in st.session_state.alertas_anticipadas[-10:]:
-                st.warning(alerta)
-        else:
-            st.info("No hay alertas.")
+    # Log de eventos
+    with st.expander("📋 Log"):
+        for linea in st.session_state.log[-30:]:
+            st.text(linea)
 
-    with st.expander("🚀 SEÑALES (1 MIN ANTES)", expanded=True):
-        if st.session_state.señales_activas:
-            cols = st.columns(2)
-            for idx, senal in enumerate(st.session_state.señales_activas):
-                with cols[idx % 2]:
-                    asset = senal['asset'].replace("-OTC", "")
-                    color = "#006400" if senal['direccion'] == "CALL" else "#8B0000"
-                    html_code = f"""
-                    <div style="background:#111; padding:15px; border-radius:10px; border:3px solid {color}; margin-bottom:10px;">
-                        <h4>{asset} 📱</h4>
-                        <p style="color:{color}; font-size:1.8rem;">{senal['direccion']}</p>
-                        <p><strong>Entrada:</strong> {senal['entry']}</p>
-                        <p><strong>Expira:</strong> {senal['expiry']}</p>
-                        <p><strong>Conf:</strong> {senal.get('confirmacion', '')}</p>
-                        <p style="color:#0f0;">✅ LISTO</p>
-                    </div>
-                    """
-                    st.markdown(html_code, unsafe_allow_html=True)
-        else:
-            st.info("No hay señales aún.")
+    # Monitoreo continuo
+    if st.session_state.escaneando and st.session_state.activos_seleccionados:
+        activos = st.session_state.activos_seleccionados
+        total = len(activos)
 
-    with st.expander("📋 HISTORIAL", expanded=False):
-        if st.session_state.historial:
-            for linea in st.session_state.historial[-40:]:
-                st.text(linea)
-        else:
-            st.info("Sin eventos.")
+        # Rotación secuencial
+        idx = st.session_state.indice_activo
+        asset = activos[idx % total]
+        st.info(f"🔄 Analizando {asset} ({idx+1}/{total})...")
 
-    # Lógica de escaneo continuo
-    if st.session_state.escaneando:
-        if st.session_state.fase == "seleccion":
-            st.info("🔍 Escaneando activos...")
-            todos = st.session_state.activos_otc
-            if not todos:
-                time.sleep(pausa_entre_rondas)
-                _, otc = obtener_activos_abiertos(st.session_state.api)
-                st.session_state.activos_otc = otc
-                st.rerun()
+        try:
+            resultado = evaluar_activo(st.session_state.api, asset)
+            if resultado:
+                direccion, estrategia = resultado
+                añadir_señal(asset, direccion, estrategia)
+                # Después de una señal, esperamos un poco para no saturar (simula pausa humana)
+                time.sleep(5)
+        except Exception as e:
+            st.session_state.log.append(f"⚠️ Error con {asset}: {str(e)[:50]}")
 
-            candidatos = []
-            for asset in todos:
-                try:
-                    candles = st.session_state.api.get_candles(asset, 60, 100, time.time())
-                    if not candles or len(candles) < 50:
-                        continue
-                    df = pd.DataFrame(candles)
-                    for col in ['open', 'max', 'min', 'close', 'volume']:
-                        df[col] = pd.to_numeric(df[col], errors='coerce')
-                    df.dropna(inplace=True)
-                    if len(df) < 50:
-                        continue
-                    indicators = calcular_indicadores(df)
-                    res = evaluar_activo(indicators, umbral_estabilidad)
-                    if res and res['fuerza'] >= fuerza_minima:
-                        candidatos.append({
-                            'asset': asset,
-                            'tipo': res['tipo'],
-                            'direccion': res['direccion'],
-                            'nivel': res['nivel'],
-                            'fuerza': res['fuerza'],
-                            'descripcion': res['descripcion'],
-                            'precio_actual': indicators['close'],
-                            'indicators': indicators
-                        })
-                except Exception as e:
-                    continue
-                time.sleep(0.2)
+        # Avanzar al siguiente activo
+        st.session_state.indice_activo = (idx + 1) % total
+        # Pequeña pausa entre activos para no sobrecargar API
+        time.sleep(2)
+        st.rerun()
 
-            if candidatos:
-                candidatos.sort(key=lambda x: x['fuerza'], reverse=True)
-                st.session_state.activos_seguimiento = candidatos
-                st.session_state.fase = "seguimiento"
-                st.session_state.historial.append(f"✅ Seleccionados {len(candidatos)} activos")
-                time.sleep(2)
-                st.rerun()
-            else:
-                st.session_state.historial.append("⚠️ Sin activos. Reintentando...")
-                time.sleep(pausa_entre_rondas)
-                st.rerun()
-
-        elif st.session_state.fase == "seguimiento":
-            st.info("🔄 Monitoreando...")
-            nuevos = []
-            remover = []
-
-            for activo in st.session_state.activos_seguimiento:
-                asset = activo['asset']
-                try:
-                    # Obtener velas recientes
-                    candles = st.session_state.api.get_candles(asset, 60, 5, time.time())
-                    if not candles:
-                        continue
-                    df_recent = pd.DataFrame(candles)
-                    precio_actual = df_recent['close'].iloc[-1]
-                    activo['precio_actual'] = precio_actual
-
-                    nivel = activo['nivel']
-                    distancia = abs(precio_actual - nivel) / nivel if nivel else 1
-
-                    if distancia < umbral_cerca:
-                        alerta = f"🔔 {asset} cerca de {activo['tipo']} ({distancia*100:.2f}%)"
-                        if alerta not in st.session_state.alertas_anticipadas:
-                            st.session_state.alertas_anticipadas.append(alerta)
-                            st.session_state.historial.append(alerta)
-
-                    # Obtener datos completos para indicadores
-                    candles_full = st.session_state.api.get_candles(asset, 60, 100, time.time())
-                    if not candles_full or len(candles_full) < 50:
-                        continue
-                    df_full = pd.DataFrame(candles_full)
-                    for col in ['open', 'max', 'min', 'close', 'volume']:
-                        df_full[col] = pd.to_numeric(df_full[col], errors='coerce')
-                    df_full.dropna(inplace=True)
-                    if len(df_full) < 50:
-                        continue
-                    indicators = calcular_indicadores(df_full)
-
-                    # Condición de toque
-                    toca = abs(precio_actual - nivel) / nivel < 0.001
-
-                    # Señal simplificada: solo toque + cruce de EMA
-                    if toca and indicators['cruce_ema'] and indicators['direccion_cruce'] == activo['direccion']:
-                        generar_señal(activo, activo['tipo'], activo['direccion'], "EMA cruzada")
-                        remover.append(activo)
-                        continue
-
-                    # Reevaluar si el activo sigue siendo válido
-                    res = evaluar_activo(indicators, umbral_estabilidad)
-                    if res and res['fuerza'] >= fuerza_minima:
-                        activo['nivel'] = res['nivel']
-                        activo['fuerza'] = res['fuerza']
-                        nuevos.append(activo)
-                    else:
-                        remover.append(activo)
-                        st.session_state.historial.append(f"❌ {asset} dejó de cumplir")
-                except Exception as e:
-                    remover.append(activo)
-
-            for a in remover:
-                if a in st.session_state.activos_seguimiento:
-                    st.session_state.activos_seguimiento.remove(a)
-
-            if len(st.session_state.activos_seguimiento) == 0:
-                st.session_state.fase = "seleccion"
-                st.rerun()
-            else:
-                time.sleep(pausa_entre_rondas)
-                st.rerun()
+    elif not st.session_state.activos_seleccionados and st.session_state.escaneando:
+        st.warning("No se pudo seleccionar ningún activo. Reintentando...")
+        st.session_state.escaneando = False
 
 else:
     st.warning("🔒 Conéctate primero.")
