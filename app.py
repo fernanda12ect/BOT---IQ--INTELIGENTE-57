@@ -2,7 +2,6 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import time
-import threading
 from datetime import datetime, timedelta
 import pytz
 import plotly.graph_objects as go
@@ -18,58 +17,18 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# Estilos CSS personalizados
+# Estilos CSS
 st.markdown("""
 <style>
-    .stApp {
-        background-color: #0b0f17;
-        color: #e0e0e0;
-    }
-    section[data-testid="stSidebar"] {
-        background-color: #1a1f2b;
-        border-right: 1px solid #2a2f3a;
-    }
-    div[data-testid="stMetric"] {
-        background-color: #1e2430;
-        border-radius: 8px;
-        padding: 15px;
-        border-left: 4px solid #00a3ff;
-    }
-    .stButton > button {
-        background-color: #2a2f3a;
-        color: white;
-        border: 1px solid #3a4050;
-        border-radius: 5px;
-        padding: 10px 20px;
-        font-weight: 500;
-    }
-    .stButton > button:hover {
-        background-color: #3a4050;
-        border-color: #00a3ff;
-    }
-    .call-box {
-        background-color: #1a2a1a;
-        border-left: 4px solid #00ff88;
-        padding: 10px;
-        margin: 5px 0;
-        border-radius: 5px;
-    }
-    .put-box {
-        background-color: #2a1a1a;
-        border-left: 4px solid #ff4b4b;
-        padding: 10px;
-        margin: 5px 0;
-        border-radius: 5px;
-    }
-    h1 {
-        color: #00a3ff;
-        font-size: 2.5rem;
-        font-weight: 700;
-        margin-bottom: 0;
-    }
-    hr {
-        border-color: #2a2f3a;
-    }
+    .stApp { background-color: #0b0f17; color: #e0e0e0; }
+    section[data-testid="stSidebar"] { background-color: #1a1f2b; border-right: 1px solid #2a2f3a; }
+    div[data-testid="stMetric"] { background-color: #1e2430; border-radius: 8px; padding: 15px; border-left: 4px solid #00a3ff; }
+    .stButton > button { background-color: #2a2f3a; color: white; border: 1px solid #3a4050; border-radius: 5px; padding: 10px 20px; font-weight: 500; }
+    .stButton > button:hover { background-color: #3a4050; border-color: #00a3ff; }
+    .call-box { background-color: #1a2a1a; border-left: 4px solid #00ff88; padding: 10px; margin: 5px 0; border-radius: 5px; }
+    .put-box { background-color: #2a1a1a; border-left: 4px solid #ff4b4b; padding: 10px; margin: 5px 0; border-radius: 5px; }
+    h1 { color: #00a3ff; font-size: 2.5rem; font-weight: 700; margin-bottom: 0; }
+    hr { border-color: #2a2f3a; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -88,12 +47,10 @@ if 'activo_actual' not in st.session_state:
     st.session_state.activo_actual = None
 if 'ultima_operacion' not in st.session_state:
     st.session_state.ultima_operacion = None
-if 'cooldown_hasta' not in st.session_state:
-    st.session_state.cooldown_hasta = None
 if 'operaciones_pendientes' not in st.session_state:
-    st.session_state.operaciones_pendientes = []  # Lista de dicts con order_id, activo, direccion, monto, timestamp
+    st.session_state.operaciones_pendientes = []  # lista de dicts con order_id, activo, direccion, monto, timestamp
 if 'historial_ops' not in st.session_state:
-    st.session_state.historial_ops = []  # Lista de dicts con resultados reales
+    st.session_state.historial_ops = []
 if 'log' not in st.session_state:
     st.session_state.log = []
 if 'estrategias_activas' not in st.session_state:
@@ -114,8 +71,6 @@ if 'perdidas_totales' not in st.session_state:
     st.session_state.perdidas_totales = 0.0
 if 'total_operaciones' not in st.session_state:
     st.session_state.total_operaciones = 0
-if 'win_rate' not in st.session_state:
-    st.session_state.win_rate = 0.0
 
 # Zona horaria
 ecuador = pytz.timezone("America/Guayaquil")
@@ -167,33 +122,29 @@ def verificar_operaciones_pendientes():
     ahora = datetime.now(ecuador)
     nuevas_pendientes = []
     for op in st.session_state.operaciones_pendientes:
-        tiempo_vencimiento = (op['timestamp'] + timedelta(minutes=5))
+        tiempo_vencimiento = op['timestamp'] + timedelta(minutes=5)
         if ahora >= tiempo_vencimiento:
             # La operación ya venció, verificar resultado
             try:
                 resultado = st.session_state.api.check_win_v4(op['order_id'])
                 if resultado is not None:
                     # resultado es una tupla: (estado, ganancia)
-                    # estado puede ser 'win', 'loose', 'equal'
                     estado, ganancia = resultado if isinstance(resultado, tuple) else (resultado, 0)
                     
-                    # Actualizar saldo (IQ Option actualiza automáticamente, pero lo registramos)
                     if estado == 'win':
                         st.session_state.saldo += op['monto'] + ganancia
                         st.session_state.ganancias_totales += ganancia
                         resultado_texto = f"GANADA (+${ganancia:.2f})"
                         resultado_num = ganancia
                     elif estado == 'loose':
-                        # La pérdida ya se descontó al comprar
                         st.session_state.perdidas_totales += op['monto']
                         resultado_texto = f"PERDIDA (-${op['monto']:.2f})"
                         resultado_num = -op['monto']
-                    else:  # equal (devolución)
+                    else:  # equal
                         st.session_state.saldo += op['monto']
                         resultado_texto = "DEVUELTA"
                         resultado_num = 0
                     
-                    # Registrar en historial
                     st.session_state.historial_ops.append({
                         'Fecha': op['timestamp'].strftime("%Y-%m-%d %H:%M:%S"),
                         'Activo': op['activo'],
@@ -204,16 +155,14 @@ def verificar_operaciones_pendientes():
                         'Balance después': st.session_state.saldo
                     })
                     
-                    # Actualizar estadísticas
                     st.session_state.total_operaciones += 1
-                    if st.session_state.total_operaciones > 0:
-                        ganadas = sum(1 for op_hist in st.session_state.historial_ops if 'GANADA' in op_hist['Resultado'])
-                        st.session_state.win_rate = (ganadas / st.session_state.total_operaciones) * 100
-                    
                     st.session_state.log.append(f"📊 Operación {op['order_id']}: {resultado_texto}")
+                else:
+                    # Si no se pudo verificar, reintentar después
+                    nuevas_pendientes.append(op)
             except Exception as e:
                 st.session_state.log.append(f"⚠️ Error verificando operación {op['order_id']}: {e}")
-                nuevas_pendientes.append(op)  # Reintentar después
+                nuevas_pendientes.append(op)
         else:
             nuevas_pendientes.append(op)
     
@@ -236,9 +185,11 @@ def ejecutar_operacion(activo, direccion, monto, estrategia):
         # Ejecutar operación
         accion = "call" if direccion == "CALL" else "put"
         expiracion = int(time.time()) + 300  # 5 minutos
-        success, order_id = st.session_state.api.buy(monto, activo, accion, expiracion)
+        success, data = st.session_state.api.buy(monto, activo, accion, expiracion)
         
         if success:
+            # data es el order_id
+            order_id = data
             # Registrar operación pendiente
             st.session_state.operaciones_pendientes.append({
                 'order_id': order_id,
@@ -252,16 +203,18 @@ def ejecutar_operacion(activo, direccion, monto, estrategia):
             # Actualizar saldo (descuento inmediato)
             st.session_state.saldo -= monto
             
-            # Resetear contador de pérdidas consecutivas si estamos en martingala
-            if st.session_state.martingala and direccion == "CALL":  # Asumimos que si ganamos, se resetea
-                # La verificación real será cuando venza
+            # Resetear contador de pérdidas consecutivas (se actualizará al vencer)
+            if st.session_state.martingala and direccion == "CALL":
                 pass
             
             st.session_state.log.append(f"💰 Operación ejecutada: {activo} {direccion} ${monto} (ID: {order_id})")
             return True, f"Operación ejecutada (ID: {order_id})"
         else:
-            return False, "Error al ejecutar operación"
+            # data es el mensaje de error
+            st.session_state.log.append(f"❌ Error al ejecutar operación: {data}")
+            return False, f"Error: {data}"
     except Exception as e:
+        st.session_state.log.append(f"⚠️ Excepción en operación: {e}")
         return False, f"Excepción: {e}"
 
 def crear_grafico_velas(df, activo):
@@ -363,7 +316,6 @@ with st.sidebar:
         if not st.session_state.operando:
             if st.button("▶️ INICIAR BOT", use_container_width=True, type="primary"):
                 st.session_state.operando = True
-                st.session_state.cooldown_hasta = None
                 st.session_state.log.append("🚀 Bot iniciado")
                 st.rerun()
         else:
@@ -380,7 +332,7 @@ with st.sidebar:
 # ÁREA PRINCIPAL
 # =========================
 if st.session_state.conectado:
-    # Verificar operaciones pendientes periódicamente
+    # Verificar operaciones pendientes
     verificar_operaciones_pendientes()
     
     # Calcular estadísticas
@@ -415,8 +367,8 @@ if st.session_state.conectado:
     else:
         st.info("El gráfico se mostrará cuando se analice un activo.")
 
-    # Señales activas
-    st.subheader("📊 Señales activas")
+    # Señales activas (última operación lanzada)
+    st.subheader("📊 Última señal ejecutada")
     if st.session_state.ultima_operacion:
         op = st.session_state.ultima_operacion
         if op['direccion'] == 'CALL':
@@ -434,14 +386,16 @@ if st.session_state.conectado:
             </div>
             """, unsafe_allow_html=True)
 
-    # Operaciones pendientes (las que aún no han vencido)
+    # Operaciones pendientes con contador
     if st.session_state.operaciones_pendientes:
-        with st.expander("⏳ Operaciones pendientes de vencimiento", expanded=False):
+        with st.expander("⏳ Operaciones en curso", expanded=True):
             for op in st.session_state.operaciones_pendientes:
                 tiempo_restante = (op['timestamp'] + timedelta(minutes=5) - datetime.now(ecuador)).total_seconds()
                 if tiempo_restante > 0:
                     mins, segs = divmod(int(tiempo_restante), 60)
-                    st.text(f"{op['activo']} - {op['direccion']} - ${op['monto']} - Vence en {mins}m {segs}s")
+                    st.text(f"{op['activo']} - {op['direccion']} - ${op['monto']} - Tiempo restante: {mins:02d}:{segs:02d}")
+                else:
+                    st.text(f"{op['activo']} - {op['direccion']} - ${op['monto']} - VENCIDA (verificando resultado)")
 
     # Historial de operaciones
     with st.expander("📋 Historial de operaciones", expanded=True):
@@ -463,11 +417,13 @@ if st.session_state.conectado:
     if st.session_state.operando:
         now = datetime.now(ecuador)
         
-        # Cooldown
-        if st.session_state.cooldown_hasta and now < st.session_state.cooldown_hasta:
+        # Si hay operaciones pendientes, esperar a que venzan (no buscar nuevas señales)
+        if len(st.session_state.operaciones_pendientes) > 0:
+            # Mostrar tiempo restante y esperar 1 segundo para actualizar contador
             time.sleep(1)
             st.rerun()
         else:
+            # No hay operaciones pendientes, podemos buscar una nueva señal
             activos = obtener_activos()
             if not activos:
                 time.sleep(5)
@@ -519,8 +475,7 @@ if st.session_state.conectado:
                         'hora': ahora,
                         'monto': monto_actual
                     }
-                    st.session_state.cooldown_hasta = now + timedelta(minutes=2)
-                    st.session_state.log.append(f"⏸️ Cooldown activado por 2 minutos")
+                    # No hay cooldown, se esperará a que venza la operación
                 else:
                     st.session_state.log.append(f"❌ Falló operación: {msg}")
                 
