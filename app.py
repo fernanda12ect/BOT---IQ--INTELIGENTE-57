@@ -1,204 +1,456 @@
 import streamlit as st
 import pandas as pd
-import html
+import numpy as np
 import time
+import threading
 from datetime import datetime, timedelta
 import pytz
-from bot import (
-    obtener_activos_abiertos,
-    seleccionar_mejores_activos,
-    evaluar_activo
-)
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 from iqoptionapi.stable_api import IQ_Option
+from bot import evaluar_activo, ESTRATEGIAS, calcular_indicadores
 
-st.set_page_config(layout="wide")
-st.title("📈 GENERADOR DE SEÑALES M5 - SELECCIÓN AUTOMÁTICA DE ACTIVOS")
+# Configuración de página
+st.set_page_config(
+    page_title="IQ Option Bot Profesional",
+    page_icon="🤖",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
 
-# Inicializar session_state
+# Estilos CSS personalizados
+st.markdown("""
+<style>
+    .reportview-container {
+        background: #0e1117;
+    }
+    .sidebar .sidebar-content {
+        background: #1e1e1e;
+    }
+    .Widget>label {
+        color: white;
+    }
+    .stButton>button {
+        background-color: #00a3ff;
+        color: white;
+        border-radius: 5px;
+        border: none;
+        padding: 10px 20px;
+        font-weight: bold;
+    }
+    .stButton>button:hover {
+        background-color: #0082cc;
+    }
+    .success-box {
+        background-color: #1e3a3a;
+        border-left: 4px solid #00ff88;
+        padding: 10px;
+        margin: 5px 0;
+        border-radius: 5px;
+    }
+    .warning-box {
+        background-color: #3a2e1e;
+        border-left: 4px solid #ffaa00;
+        padding: 10px;
+        margin: 5px 0;
+        border-radius: 5px;
+    }
+    .info-box {
+        background-color: #1e2a3a;
+        border-left: 4px solid #00a3ff;
+        padding: 10px;
+        margin: 5px 0;
+        border-radius: 5px;
+    }
+    .call-box {
+        background-color: #1e3a2e;
+        border: 2px solid #00ff88;
+        padding: 15px;
+        border-radius: 10px;
+    }
+    .put-box {
+        background-color: #3a1e1e;
+        border: 2px solid #ff4b4b;
+        padding: 15px;
+        border-radius: 10px;
+    }
+    .logo-placeholder {
+        font-size: 2rem;
+        font-weight: bold;
+        color: #00a3ff;
+        text-align: center;
+        padding: 20px;
+        border: 2px dashed #00a3ff;
+        border-radius: 10px;
+        margin: 10px 0;
+    }
+</style>
+""", unsafe_allow_html=True)
+
+# Inicializar variables de sesión
 if 'api' not in st.session_state:
     st.session_state.api = None
-if 'activos_reales' not in st.session_state:
-    st.session_state.activos_reales = []
-if 'activos_otc' not in st.session_state:
-    st.session_state.activos_otc = []
-if 'activos_seleccionados' not in st.session_state:
-    st.session_state.activos_seleccionados = []  # los que el bot elige
-if 'escaneando' not in st.session_state:
-    st.session_state.escaneando = False
-if 'señales' not in st.session_state:
-    st.session_state.señales = []  # lista de dicts con señal, timestamp
-if 'historial_señales' not in st.session_state:
-    st.session_state.historial_señales = []
-if 'indice_activo' not in st.session_state:
-    st.session_state.indice_activo = 0
-if 'ultima_ejecucion' not in st.session_state:
-    st.session_state.ultima_ejecucion = None
+if 'conectado' not in st.session_state:
+    st.session_state.conectado = False
+if 'tipo_cuenta' not in st.session_state:
+    st.session_state.tipo_cuenta = "PRACTICE"
+if 'saldo' not in st.session_state:
+    st.session_state.saldo = 0.0
+if 'operando' not in st.session_state:
+    st.session_state.operando = False
+if 'activo_actual' not in st.session_state:
+    st.session_state.activo_actual = None
+if 'ultima_operacion' not in st.session_state:
+    st.session_state.ultima_operacion = None
+if 'cooldown_hasta' not in st.session_state:
+    st.session_state.cooldown_hasta = None
+if 'historial_ops' not in st.session_state:
+    st.session_state.historial_ops = []
 if 'log' not in st.session_state:
     st.session_state.log = []
+if 'estrategias_activas' not in st.session_state:
+    st.session_state.estrategias_activas = [nombre for nombre, _ in ESTRATEGIAS[:5]]  # primeras 5 por defecto
+if 'datos_grafico' not in st.session_state:
+    st.session_state.datos_grafico = None  # para almacenar último DataFrame del activo analizado
 
-# Zona horaria Ecuador
+# Zona horaria
 ecuador = pytz.timezone("America/Guayaquil")
 
-# Función para añadir señal
-def añadir_señal(asset, direccion, estrategia):
-    now = datetime.now(ecuador)
-    # La entrada se estima al inicio de la siguiente vela M1 (aproximadamente 30-50 segundos)
-    entrada_estimada = now + timedelta(minutes=1)
-    entrada_estimada = entrada_estimada.replace(second=0, microsecond=0)
-    tiempo_restante = (entrada_estimada - now).total_seconds()
-    señal = {
-        'activo': asset,
-        'direccion': direccion,
-        'estrategia': estrategia,
-        'entrada': entrada_estimada.strftime("%H:%M:%S"),
-        'tiempo_restante': f"{int(tiempo_restante)}s",
-        'timestamp': now
-    }
-    st.session_state.señales.insert(0, señal)  # la más reciente al principio
-    st.session_state.señales = st.session_state.señales[:20]  # mantener solo últimas 20
-    st.session_state.historial_señales.append(señal)
-    st.session_state.log.append(f"📊 SEÑAL: {asset} - {direccion} ({estrategia}) a las {entrada_estimada.strftime('%H:%M:%S')}")
+# =========================
+# FUNCIONES AUXILIARES
+# =========================
+def conectar(email, password):
+    try:
+        api = IQ_Option(email, password)
+        check, reason = api.connect()
+        if check:
+            st.session_state.api = api
+            st.session_state.conectado = True
+            api.change_balance(st.session_state.tipo_cuenta)
+            perfil = api.get_profile()
+            st.session_state.saldo = perfil.get('balance', 0)
+            st.session_state.log.append(f"✅ Conectado - Saldo: {st.session_state.saldo}")
+            return True
+        else:
+            st.error(f"Error de conexión: {reason}")
+            return False
+    except Exception as e:
+        st.error(f"Excepción: {e}")
+        return False
 
-# Sidebar
+def desconectar():
+    st.session_state.api = None
+    st.session_state.conectado = False
+    st.session_state.operando = False
+    st.session_state.log.append("🔌 Desconectado")
+
+def obtener_activos():
+    if not st.session_state.api:
+        return []
+    try:
+        open_time = st.session_state.api.get_all_open_time()
+        activos = []
+        if 'binary' in open_time:
+            for asset, data in open_time['binary'].items():
+                if data.get('open', False):
+                    activos.append(asset)
+        return activos
+    except:
+        return []
+
+def ejecutar_operacion(activo, direccion, monto):
+    if not st.session_state.api:
+        return False
+    try:
+        # Validar saldo suficiente
+        if monto > st.session_state.saldo:
+            st.session_state.log.append(f"❌ Saldo insuficiente: ${st.session_state.saldo} < ${monto}")
+            return False
+
+        accion = "call" if direccion == "CALL" else "put"
+        expiracion = int(time.time()) + 300  # 5 minutos
+        resultado = st.session_state.api.buy(monto, activo, accion, expiracion)
+        if resultado:
+            # Actualizar saldo (aproximado, la API no devuelve el nuevo saldo inmediatamente)
+            st.session_state.saldo -= monto
+            st.session_state.log.append(f"💰 Operación ejecutada: {activo} {direccion} ${monto}")
+            return True
+        else:
+            st.session_state.log.append(f"❌ Error al ejecutar operación")
+            return False
+    except Exception as e:
+        st.session_state.log.append(f"⚠️ Excepción en operación: {e}")
+        return False
+
+def crear_grafico_velas(df, activo):
+    """Crea gráfico de velas con EMAs y Bandas de Bollinger usando Plotly"""
+    fig = make_subplots(rows=2, cols=1, shared_xaxes=True,
+                        vertical_spacing=0.03,
+                        row_heights=[0.7, 0.3])
+
+    # Gráfico de velas
+    fig.add_trace(go.Candlestick(x=df.index,
+                                  open=df['open'],
+                                  high=df['high'],
+                                  low=df['low'],
+                                  close=df['close'],
+                                  name='Velas'),
+                  row=1, col=1)
+
+    # EMAs
+    fig.add_trace(go.Scatter(x=df.index, y=df['ema9'], line=dict(color='orange', width=1), name='EMA9'), row=1, col=1)
+    fig.add_trace(go.Scatter(x=df.index, y=df['ema21'], line=dict(color='blue', width=1), name='EMA21'), row=1, col=1)
+
+    # Bandas de Bollinger
+    fig.add_trace(go.Scatter(x=df.index, y=df['bb_upper'], line=dict(color='gray', width=1, dash='dash'), name='BB Superior'), row=1, col=1)
+    fig.add_trace(go.Scatter(x=df.index, y=df['bb_lower'], line=dict(color='gray', width=1, dash='dash'), name='BB Inferior'), row=1, col=1)
+
+    # RSI en subplot inferior
+    fig.add_trace(go.Scatter(x=df.index, y=df['rsi'], line=dict(color='purple', width=1), name='RSI'), row=2, col=1)
+    fig.add_hline(y=70, line_dash="dash", line_color="red", row=2, col=1)
+    fig.add_hline(y=30, line_dash="dash", line_color="green", row=2, col=1)
+
+    fig.update_layout(title=f"Análisis de {activo} - Últimas 50 velas M5",
+                      xaxis_rangeslider_visible=False,
+                      template='plotly_dark',
+                      height=600)
+    fig.update_yaxes(title_text="Precio", row=1, col=1)
+    fig.update_yaxes(title_text="RSI", row=2, col=1)
+
+    return fig
+
+# =========================
+# INTERFAZ DE USUARIO
+# =========================
+st.title("🤖 IQ Option Bot Profesional - 10 Estrategias")
+
+# Logo placeholder
+st.markdown('<div class="logo-placeholder">LOGO AQUÍ</div>', unsafe_allow_html=True)
+
+# Barra lateral
 with st.sidebar:
     st.header("⚙️ Configuración")
-    email = st.text_input("📧 Email")
-    password = st.text_input("🔑 Password", type="password")
+    email = st.text_input("📧 Email", placeholder="tu@email.com")
+    password = st.text_input("🔑 Password", type="password", placeholder="********")
 
     st.divider()
-    max_activos = st.slider("🎯 Número máximo de activos a seguir", 5, 30, 10, 5)
+
+    # Selector de cuenta
+    tipo_cuenta = st.radio("💰 Tipo de cuenta", ["PRACTICE", "REAL"], index=0)
+    if tipo_cuenta != st.session_state.tipo_cuenta and st.session_state.conectado:
+        st.session_state.tipo_cuenta = tipo_cuenta
+        st.session_state.api.change_balance(tipo_cuenta)
+        # Actualizar saldo
+        perfil = st.session_state.api.get_profile()
+        st.session_state.saldo = perfil.get('balance', 0)
+        st.session_state.log.append(f"🔄 Cambio a cuenta {tipo_cuenta} - Saldo: {st.session_state.saldo}")
+
+    # Monto por operación
+    monto_operacion = st.number_input("💵 Monto por operación ($)", min_value=1.0, max_value=1000.0, value=10.0, step=1.0)
+
     st.divider()
 
+    # Botones de conexión
     col1, col2 = st.columns(2)
     with col1:
-        conectar = st.button("🔌 Conectar")
+        if st.button("🔌 CONECTAR", use_container_width=True):
+            if email and password:
+                conectar(email, password)
+            else:
+                st.warning("Ingresa email y password")
     with col2:
-        desconectar = st.button("⛔ Desconectar")
+        if st.button("⛔ DESCONECTAR", use_container_width=True):
+            desconectar()
 
     st.divider()
-    if st.session_state.api is not None:
-        if not st.session_state.escaneando:
-            iniciar = st.button("▶️ INICIAR MONITOREO")
-            if iniciar:
-                # Seleccionar automáticamente los mejores activos
-                with st.spinner("Seleccionando los mejores activos..."):
-                    todos_activos = st.session_state.activos_reales + st.session_state.activos_otc
-                    seleccionados = seleccionar_mejores_activos(st.session_state.api, todos_activos, max_activos)
-                    st.session_state.activos_seleccionados = seleccionados
-                    st.session_state.log.append(f"✅ Seleccionados {len(seleccionados)} activos: {', '.join(seleccionados[:5])}...")
-                st.session_state.escaneando = True
-                st.session_state.indice_activo = 0
+
+    # Estrategias activas
+    st.subheader("🎯 Estrategias activas")
+    nuevas_estrategias = []
+    for nombre, _ in ESTRATEGIAS:
+        activa = st.checkbox(nombre, value=(nombre in st.session_state.estrategias_activas))
+        if activa:
+            nuevas_estrategias.append(nombre)
+    st.session_state.estrategias_activas = nuevas_estrategias
+
+    st.divider()
+
+    # Botón de inicio/parada
+    if st.session_state.conectado:
+        if not st.session_state.operando:
+            if st.button("▶️ INICIAR BOT", use_container_width=True, type="primary"):
+                st.session_state.operando = True
+                st.session_state.cooldown_hasta = None
+                st.session_state.log.append("🚀 Bot iniciado")
                 st.rerun()
         else:
-            detener = st.button("⏹️ DETENER MONITOREO")
-            if detener:
-                st.session_state.escaneando = False
+            if st.button("⏹️ DETENER BOT", use_container_width=True, type="secondary"):
+                st.session_state.operando = False
+                st.session_state.log.append("🛑 Bot detenido")
                 st.rerun()
 
-# Lógica de conexión
-if conectar:
-    if not email or not password:
-        st.error("❌ Ingresa email y password")
-    else:
-        try:
-            API = IQ_Option(email, password)
-            check, reason = API.connect()
-            if check:
-                st.session_state.api = API
-                real, otc = obtener_activos_abiertos(API)
-                st.session_state.activos_reales = real
-                st.session_state.activos_otc = otc
-                st.session_state.activos_seleccionados = []
-                st.session_state.escaneando = False
-                st.session_state.log.append("✅ Conectado")
-                st.success("Conectado")
-                st.rerun()
-            else:
-                st.error(f"❌ Error de conexión: {reason}")
-        except Exception as e:
-            st.error(f"Error: {e}")
-
-if desconectar:
-    st.session_state.api = None
-    st.session_state.activos_seleccionados = []
-    st.session_state.escaneando = False
-    st.session_state.log.append("🔌 Desconectado")
-    st.rerun()
+    # Información de estado
+    if st.session_state.conectado:
+        st.divider()
+        st.metric("Saldo actual", f"${st.session_state.saldo:.2f}")
+        st.metric("Estrategias activas", len(st.session_state.estrategias_activas))
 
 # Área principal
-if st.session_state.api is not None:
-    st.info(f"📊 Modo: Generador de señales | Activos en seguimiento: {len(st.session_state.activos_seleccionados)}")
-
-    # Mostrar los activos seleccionados (para que el usuario pueda abrir sus gráficos)
-    if st.session_state.activos_seleccionados:
-        with st.expander("📌 Activos seleccionados automáticamente"):
-            st.write("Los siguientes activos son los más prometedores según el análisis del bot:")
-            cols = st.columns(3)
-            for i, asset in enumerate(st.session_state.activos_seleccionados):
-                cols[i % 3].write(f"- {asset}")
-
-    # Mostrar señales activas (la más reciente primero)
-    st.subheader("🚀 SEÑALES ACTIVAS (próxima vela)")
-    if st.session_state.señales:
-        cols = st.columns(2)
-        for idx, señal in enumerate(st.session_state.señales[:6]):  # mostrar hasta 6
-            with cols[idx % 2]:
-                color = "#006400" if señal['direccion'] == "CALL" else "#8B0000"
-                html_code = f"""
-                <div style="background:#111; padding:15px; border-radius:10px; border:3px solid {color}; margin-bottom:10px;">
-                    <h4>{señal['activo']} 📱</h4>
-                    <p style="color:{color}; font-size:1.8rem;">{señal['direccion']}</p>
-                    <p><strong>Estrategia:</strong> {señal['estrategia']}</p>
-                    <p><strong>Entrada:</strong> {señal['entrada']}</p>
-                    <p><strong>⏳ {señal['tiempo_restante']}</strong></p>
-                </div>
-                """
-                st.markdown(html_code, unsafe_allow_html=True)
-    else:
-        st.info("No hay señales activas.")
-
-    # Historial de señales
-    with st.expander("📋 Historial de señales"):
-        if st.session_state.historial_señales:
-            df_hist = pd.DataFrame(st.session_state.historial_señales[-50:])
-            st.dataframe(df_hist[['activo', 'direccion', 'estrategia', 'entrada', 'timestamp']], width='stretch')
+if st.session_state.conectado:
+    # Panel superior: información en vivo
+    col1, col2, col3, col4 = st.columns(4)
+    with col1:
+        st.info(f"📊 Cuenta: **{st.session_state.tipo_cuenta}**")
+    with col2:
+        st.info(f"🤖 Estado: **{'ACTIVO' if st.session_state.operando else 'DETENIDO'}**")
+    with col3:
+        if st.session_state.activo_actual:
+            st.info(f"🔍 Analizando: **{st.session_state.activo_actual}**")
         else:
-            st.info("Sin historial.")
+            st.info("🔍 Analizando: **Ninguno**")
+    with col4:
+        if st.session_state.cooldown_hasta:
+            seg_rest = max(0, (st.session_state.cooldown_hasta - datetime.now(ecuador)).total_seconds())
+            st.info(f"⏳ Cooldown: **{int(seg_rest)}s**")
+        else:
+            st.info("⏳ Cooldown: **Listo**")
+
+    st.divider()
+
+    # Sección de señal actual
+    st.subheader("🚀 Señal actual")
+    if st.session_state.ultima_operacion:
+        op = st.session_state.ultima_operacion
+        if op['direccion'] == 'CALL':
+            with st.container():
+                st.markdown(f"""
+                <div class="call-box">
+                    <h3 style="color:#00ff88;">🔵 COMPRA (CALL)</h3>
+                    <p style="font-size:1.2rem;">Activo: {op['activo']}</p>
+                    <p>Estrategia: {op['estrategia']}</p>
+                    <p>Hora: {op['hora']}</p>
+                    <p>Monto: ${op['monto']}</p>
+                </div>
+                """, unsafe_allow_html=True)
+        else:
+            with st.container():
+                st.markdown(f"""
+                <div class="put-box">
+                    <h3 style="color:#ff4b4b;">🔴 VENTA (PUT)</h3>
+                    <p style="font-size:1.2rem;">Activo: {op['activo']}</p>
+                    <p>Estrategia: {op['estrategia']}</p>
+                    <p>Hora: {op['hora']}</p>
+                    <p>Monto: ${op['monto']}</p>
+                </div>
+                """, unsafe_allow_html=True)
+    else:
+        st.info("No hay señal activa en este momento.")
+
+    st.divider()
+
+    # Gráfico en tiempo real (si hay datos)
+    if st.session_state.datos_grafico is not None:
+        fig = crear_grafico_velas(st.session_state.datos_grafico, st.session_state.activo_actual or "Activo")
+        st.plotly_chart(fig, use_container_width=True)
+    else:
+        st.info("Esperando datos para mostrar el gráfico...")
+
+    # Historial de operaciones
+    with st.expander("📋 Historial de operaciones", expanded=True):
+        if st.session_state.historial_ops:
+            df_hist = pd.DataFrame(st.session_state.historial_ops)
+            st.dataframe(df_hist, use_container_width=True)
+        else:
+            st.info("Sin operaciones aún.")
 
     # Log de eventos
-    with st.expander("📋 Log"):
-        for linea in st.session_state.log[-30:]:
+    with st.expander("📋 Log de eventos", expanded=False):
+        for linea in st.session_state.log[-20:]:
             st.text(linea)
 
-    # Monitoreo continuo
-    if st.session_state.escaneando and st.session_state.activos_seleccionados:
-        activos = st.session_state.activos_seleccionados
-        total = len(activos)
-
-        # Rotación secuencial
-        idx = st.session_state.indice_activo
-        asset = activos[idx % total]
-        st.info(f"🔄 Analizando {asset} ({idx+1}/{total})...")
-
-        try:
-            resultado = evaluar_activo(st.session_state.api, asset)
-            if resultado:
-                direccion, estrategia = resultado
-                añadir_señal(asset, direccion, estrategia)
-                # Después de una señal, esperamos un poco para no saturar (simula pausa humana)
+    # =========================
+    # LÓGICA PRINCIPAL DEL BOT
+    # =========================
+    if st.session_state.operando:
+        # Verificar cooldown
+        now = datetime.now(ecuador)
+        if st.session_state.cooldown_hasta and now < st.session_state.cooldown_hasta:
+            # Esperar y recargar
+            time.sleep(1)
+            st.rerun()
+        else:
+            # Obtener lista de activos
+            activos = obtener_activos()
+            if not activos:
+                st.warning("No se pudieron obtener activos. Reintentando...")
                 time.sleep(5)
-        except Exception as e:
-            st.session_state.log.append(f"⚠️ Error con {asset}: {str(e)[:50]}")
+                st.rerun()
 
-        # Avanzar al siguiente activo
-        st.session_state.indice_activo = (idx + 1) % total
-        # Pequeña pausa entre activos para no sobrecargar API
-        time.sleep(2)
-        st.rerun()
+            # Analizar activos secuencialmente
+            señal_encontrada = None
+            for asset in activos:
+                if not st.session_state.operando:
+                    break
+                st.session_state.activo_actual = asset
+                # Evaluar con estrategias activas
+                resultado = evaluar_activo(st.session_state.api, asset, st.session_state.estrategias_activas)
+                if resultado:
+                    direccion, nombre_estr = resultado
+                    señal_encontrada = (asset, direccion, nombre_estr)
+                    st.session_state.log.append(f"🔔 Señal detectada: {asset} - {direccion} ({nombre_estr})")
+                    break
+                # Pequeña pausa entre activos
+                time.sleep(0.5)
 
-    elif not st.session_state.activos_seleccionados and st.session_state.escaneando:
-        st.warning("No se pudo seleccionar ningún activo. Reintentando...")
-        st.session_state.escaneando = False
+            if señal_encontrada:
+                asset, direccion, nombre_estr = señal_encontrada
+                # Obtener datos para el gráfico (últimas 50 velas)
+                try:
+                    candles = st.session_state.api.get_candles(asset, 300, 50, time.time())
+                    if candles:
+                        df = pd.DataFrame(candles)
+                        for col in ['open', 'max', 'min', 'close', 'volume']:
+                            df[col] = pd.to_numeric(df[col], errors='coerce')
+                        df.dropna(inplace=True)
+                        df = calcular_indicadores(df)
+                        st.session_state.datos_grafico = df
+                except:
+                    pass
+
+                # Ejecutar operación
+                exito = ejecutar_operacion(asset, direccion, monto_operacion)
+                if exito:
+                    # Registrar en historial
+                    ahora = now.strftime("%Y-%m-%d %H:%M:%S")
+                    st.session_state.historial_ops.append({
+                        'Fecha': ahora,
+                        'Activo': asset,
+                        'Dirección': direccion,
+                        'Estrategia': nombre_estr,
+                        'Monto': monto_operacion,
+                        'Resultado': 'Pendiente',
+                        'Balance después': st.session_state.saldo
+                    })
+                    st.session_state.ultima_operacion = {
+                        'activo': asset,
+                        'direccion': direccion,
+                        'estrategia': nombre_estr,
+                        'hora': ahora,
+                        'monto': monto_operacion
+                    }
+                    # Activar cooldown de 2 minutos
+                    st.session_state.cooldown_hasta = now + timedelta(minutes=2)
+                    st.session_state.log.append(f"⏸️ Cooldown activado por 2 minutos")
+                else:
+                    st.session_state.log.append(f"❌ Falló la ejecución de la operación")
+                # Pequeña pausa antes de recargar
+                time.sleep(2)
+                st.rerun()
+            else:
+                # No se encontró señal, esperar y continuar
+                st.session_state.activo_actual = None
+                time.sleep(5)
+                st.rerun()
 
 else:
-    st.warning("🔒 Conéctate primero.")
+    st.warning("🔒 Por favor, conéctate desde el panel izquierdo.")
