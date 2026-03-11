@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import time
+import threading
 from datetime import datetime, timedelta
 import pytz
 import plotly.graph_objects as go
@@ -17,27 +18,23 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# Estilos CSS personalizados para lograr el look de las imágenes
+# Estilos CSS personalizados
 st.markdown("""
 <style>
-    /* Fondo general */
     .stApp {
         background-color: #0b0f17;
         color: #e0e0e0;
     }
-    /* Sidebar */
     section[data-testid="stSidebar"] {
         background-color: #1a1f2b;
         border-right: 1px solid #2a2f3a;
     }
-    /* Tarjetas de métricas */
     div[data-testid="stMetric"] {
         background-color: #1e2430;
         border-radius: 8px;
         padding: 15px;
         border-left: 4px solid #00a3ff;
     }
-    /* Botones */
     .stButton > button {
         background-color: #2a2f3a;
         color: white;
@@ -50,7 +47,6 @@ st.markdown("""
         background-color: #3a4050;
         border-color: #00a3ff;
     }
-    /* Cajas de señal */
     .call-box {
         background-color: #1a2a1a;
         border-left: 4px solid #00ff88;
@@ -65,14 +61,12 @@ st.markdown("""
         margin: 5px 0;
         border-radius: 5px;
     }
-    /* Título principal */
     h1 {
         color: #00a3ff;
         font-size: 2.5rem;
         font-weight: 700;
         margin-bottom: 0;
     }
-    /* Divisores */
     hr {
         border-color: #2a2f3a;
     }
@@ -96,8 +90,10 @@ if 'ultima_operacion' not in st.session_state:
     st.session_state.ultima_operacion = None
 if 'cooldown_hasta' not in st.session_state:
     st.session_state.cooldown_hasta = None
+if 'operaciones_pendientes' not in st.session_state:
+    st.session_state.operaciones_pendientes = []  # Lista de dicts con order_id, activo, direccion, monto, timestamp
 if 'historial_ops' not in st.session_state:
-    st.session_state.historial_ops = []
+    st.session_state.historial_ops = []  # Lista de dicts con resultados reales
 if 'log' not in st.session_state:
     st.session_state.log = []
 if 'estrategias_activas' not in st.session_state:
@@ -112,6 +108,14 @@ if 'martingala' not in st.session_state:
     st.session_state.martingala = False
 if 'perdidas_consecutivas' not in st.session_state:
     st.session_state.perdidas_consecutivas = 0
+if 'ganancias_totales' not in st.session_state:
+    st.session_state.ganancias_totales = 0.0
+if 'perdidas_totales' not in st.session_state:
+    st.session_state.perdidas_totales = 0.0
+if 'total_operaciones' not in st.session_state:
+    st.session_state.total_operaciones = 0
+if 'win_rate' not in st.session_state:
+    st.session_state.win_rate = 0.0
 
 # Zona horaria
 ecuador = pytz.timezone("America/Guayaquil")
@@ -126,9 +130,7 @@ def conectar(email, password):
         if check:
             st.session_state.api = api
             st.session_state.conectado = True
-            # Cambiar a cuenta seleccionada y obtener saldo
             api.change_balance(st.session_state.tipo_cuenta)
-            # Obtener saldo correctamente (sin get_profile)
             saldo = api.get_balance()
             st.session_state.saldo = saldo if saldo is not None else 0.0
             st.session_state.log.append(f"✅ Conectado - Saldo: {st.session_state.saldo}")
@@ -160,46 +162,113 @@ def obtener_activos():
     except:
         return []
 
-def ejecutar_operacion(activo, direccion, monto):
+def verificar_operaciones_pendientes():
+    """Revisa si hay operaciones pendientes que ya vencieron y actualiza resultados"""
+    ahora = datetime.now(ecuador)
+    nuevas_pendientes = []
+    for op in st.session_state.operaciones_pendientes:
+        tiempo_vencimiento = (op['timestamp'] + timedelta(minutes=5))
+        if ahora >= tiempo_vencimiento:
+            # La operación ya venció, verificar resultado
+            try:
+                resultado = st.session_state.api.check_win_v4(op['order_id'])
+                if resultado is not None:
+                    # resultado es una tupla: (estado, ganancia)
+                    # estado puede ser 'win', 'loose', 'equal'
+                    estado, ganancia = resultado if isinstance(resultado, tuple) else (resultado, 0)
+                    
+                    # Actualizar saldo (IQ Option actualiza automáticamente, pero lo registramos)
+                    if estado == 'win':
+                        st.session_state.saldo += op['monto'] + ganancia
+                        st.session_state.ganancias_totales += ganancia
+                        resultado_texto = f"GANADA (+${ganancia:.2f})"
+                        resultado_num = ganancia
+                    elif estado == 'loose':
+                        # La pérdida ya se descontó al comprar
+                        st.session_state.perdidas_totales += op['monto']
+                        resultado_texto = f"PERDIDA (-${op['monto']:.2f})"
+                        resultado_num = -op['monto']
+                    else:  # equal (devolución)
+                        st.session_state.saldo += op['monto']
+                        resultado_texto = "DEVUELTA"
+                        resultado_num = 0
+                    
+                    # Registrar en historial
+                    st.session_state.historial_ops.append({
+                        'Fecha': op['timestamp'].strftime("%Y-%m-%d %H:%M:%S"),
+                        'Activo': op['activo'],
+                        'Dirección': op['direccion'],
+                        'Estrategia': op['estrategia'],
+                        'Monto': op['monto'],
+                        'Resultado': resultado_texto,
+                        'Balance después': st.session_state.saldo
+                    })
+                    
+                    # Actualizar estadísticas
+                    st.session_state.total_operaciones += 1
+                    if st.session_state.total_operaciones > 0:
+                        ganadas = sum(1 for op_hist in st.session_state.historial_ops if 'GANADA' in op_hist['Resultado'])
+                        st.session_state.win_rate = (ganadas / st.session_state.total_operaciones) * 100
+                    
+                    st.session_state.log.append(f"📊 Operación {op['order_id']}: {resultado_texto}")
+            except Exception as e:
+                st.session_state.log.append(f"⚠️ Error verificando operación {op['order_id']}: {e}")
+                nuevas_pendientes.append(op)  # Reintentar después
+        else:
+            nuevas_pendientes.append(op)
+    
+    st.session_state.operaciones_pendientes = nuevas_pendientes
+
+def ejecutar_operacion(activo, direccion, monto, estrategia):
     if not st.session_state.api:
         return False, "No conectado"
     try:
-        # Validar saldo
-        if monto > st.session_state.saldo:
-            return False, f"Saldo insuficiente: ${st.session_state.saldo} < ${monto}"
-        # Validar stop loss
-        perdidas_totales = sum(op.get('resultado_num', 0) for op in st.session_state.historial_ops if op.get('resultado_num', 0) < 0)
-        if abs(perdidas_totales) >= st.session_state.stop_loss:
+        # Validar stop loss/take profit
+        perdidas_totales = abs(st.session_state.perdidas_totales)
+        if st.session_state.stop_loss > 0 and perdidas_totales >= st.session_state.stop_loss:
             st.session_state.operando = False
-            return False, f"Stop loss alcanzado (${abs(perdidas_totales):.2f})"
-        # Validar take profit
-        ganancias_totales = sum(op.get('resultado_num', 0) for op in st.session_state.historial_ops if op.get('resultado_num', 0) > 0)
-        if ganancias_totales >= st.session_state.take_profit:
+            return False, f"Stop loss alcanzado (${perdidas_totales:.2f})"
+        
+        if st.session_state.take_profit > 0 and st.session_state.ganancias_totales >= st.session_state.take_profit:
             st.session_state.operando = False
-            return False, f"Take profit alcanzado (${ganancias_totales:.2f})"
+            return False, f"Take profit alcanzado (${st.session_state.ganancias_totales:.2f})"
 
+        # Ejecutar operación
         accion = "call" if direccion == "CALL" else "put"
         expiracion = int(time.time()) + 300  # 5 minutos
-        resultado = st.session_state.api.buy(monto, activo, accion, expiracion)
-        if resultado:
-            # Actualizar saldo (restando monto, luego se actualizará con get_balance)
+        success, order_id = st.session_state.api.buy(monto, activo, accion, expiracion)
+        
+        if success:
+            # Registrar operación pendiente
+            st.session_state.operaciones_pendientes.append({
+                'order_id': order_id,
+                'activo': activo,
+                'direccion': direccion,
+                'estrategia': estrategia,
+                'monto': monto,
+                'timestamp': datetime.now(ecuador)
+            })
+            
+            # Actualizar saldo (descuento inmediato)
             st.session_state.saldo -= monto
-            st.session_state.perdidas_consecutivas = 0  # reset si ganó? luego se actualiza con resultado real
-            return True, "Operación ejecutada"
+            
+            # Resetear contador de pérdidas consecutivas si estamos en martingala
+            if st.session_state.martingala and direccion == "CALL":  # Asumimos que si ganamos, se resetea
+                # La verificación real será cuando venza
+                pass
+            
+            st.session_state.log.append(f"💰 Operación ejecutada: {activo} {direccion} ${monto} (ID: {order_id})")
+            return True, f"Operación ejecutada (ID: {order_id})"
         else:
-            st.session_state.perdidas_consecutivas += 1
             return False, "Error al ejecutar operación"
     except Exception as e:
-        st.session_state.perdidas_consecutivas += 1
         return False, f"Excepción: {e}"
 
 def crear_grafico_velas(df, activo):
-    """Gráfico estilo profesional con EMAs y RSI"""
     fig = make_subplots(rows=2, cols=1, shared_xaxes=True,
                         vertical_spacing=0.05,
                         row_heights=[0.7, 0.3])
 
-    # Velas
     fig.add_trace(go.Candlestick(x=df.index,
                                   open=df['open'],
                                   high=df['high'],
@@ -210,15 +279,12 @@ def crear_grafico_velas(df, activo):
                                   decreasing_line_color='#ff4b4b'),
                   row=1, col=1)
 
-    # EMAs
     fig.add_trace(go.Scatter(x=df.index, y=df['ema9'], line=dict(color='#ffaa00', width=1), name='EMA9'), row=1, col=1)
     fig.add_trace(go.Scatter(x=df.index, y=df['ema21'], line=dict(color='#00a3ff', width=1), name='EMA21'), row=1, col=1)
 
-    # Bollinger Bands
     fig.add_trace(go.Scatter(x=df.index, y=df['bb_upper'], line=dict(color='#888', width=1, dash='dash'), name='BB Sup'), row=1, col=1)
     fig.add_trace(go.Scatter(x=df.index, y=df['bb_lower'], line=dict(color='#888', width=1, dash='dash'), name='BB Inf'), row=1, col=1)
 
-    # RSI
     fig.add_trace(go.Scatter(x=df.index, y=df['rsi'], line=dict(color='#aa88ff', width=1), name='RSI'), row=2, col=1)
     fig.add_hline(y=70, line_dash="dash", line_color="#ff4b4b", row=2, col=1)
     fig.add_hline(y=30, line_dash="dash", line_color="#00ff88", row=2, col=1)
@@ -235,13 +301,12 @@ def crear_grafico_velas(df, activo):
     return fig
 
 # =========================
-# BARRA LATERAL (CONFIGURACIÓN)
+# BARRA LATERAL
 # =========================
 with st.sidebar:
     st.markdown("## 🧠 NEUROTRADER")
     st.markdown("---")
 
-    # Sección de conexión
     st.markdown("### 🔌 Conexión IQ Option")
     email = st.text_input("Correo electrónico", placeholder="tu@email.com")
     password = st.text_input("Contraseña", type="password", placeholder="********")
@@ -259,7 +324,6 @@ with st.sidebar:
 
     st.markdown("---")
 
-    # Tipo de cuenta
     st.markdown("### 💳 Tipo de cuenta")
     tipo_cuenta = st.radio("", ["PRACTICE", "REAL"], index=0, horizontal=True)
     if tipo_cuenta != st.session_state.tipo_cuenta and st.session_state.conectado:
@@ -269,13 +333,11 @@ with st.sidebar:
         st.session_state.saldo = saldo if saldo is not None else 0.0
         st.session_state.log.append(f"🔄 Cambio a cuenta {tipo_cuenta} - Saldo: {st.session_state.saldo}")
 
-    # Monto por operación
     st.markdown("### 💵 Monto por operación")
     monto_operacion = st.number_input("", min_value=1.0, max_value=1000.0, value=10.0, step=1.0, label_visibility="collapsed")
 
     st.markdown("---")
 
-    # Gestión de riesgo
     st.markdown("### ⚖️ Gestión de riesgo")
     stop_loss = st.number_input("Stop Loss ($)", min_value=0.0, value=100.0, step=10.0)
     take_profit = st.number_input("Take Profit ($)", min_value=0.0, value=50.0, step=10.0)
@@ -287,7 +349,6 @@ with st.sidebar:
 
     st.markdown("---")
 
-    # Estrategias activas
     st.markdown("### 🎯 Estrategias activas")
     nuevas_estrategias = []
     for nombre, _ in ESTRATEGIAS:
@@ -298,7 +359,6 @@ with st.sidebar:
 
     st.markdown("---")
 
-    # Botón de inicio/parada
     if st.session_state.conectado:
         if not st.session_state.operando:
             if st.button("▶️ INICIAR BOT", use_container_width=True, type="primary"):
@@ -312,28 +372,36 @@ with st.sidebar:
                 st.session_state.log.append("🛑 Bot detenido")
                 st.rerun()
 
-    # Saldo actual
     if st.session_state.conectado:
         st.markdown("---")
         st.metric("Saldo actual", f"${st.session_state.saldo:.2f}")
 
 # =========================
-# ÁREA PRINCIPAL (DASHBOARD)
+# ÁREA PRINCIPAL
 # =========================
 if st.session_state.conectado:
+    # Verificar operaciones pendientes periódicamente
+    verificar_operaciones_pendientes()
+    
+    # Calcular estadísticas
+    ganadas = sum(1 for op in st.session_state.historial_ops if 'GANADA' in op['Resultado'])
+    perdidas = sum(1 for op in st.session_state.historial_ops if 'PERDIDA' in op['Resultado'])
+    total = ganadas + perdidas
+    win_rate = (ganadas / total * 100) if total > 0 else 0
+    profit_total = st.session_state.ganancias_totales - st.session_state.perdidas_totales
+
     # Cabecera con métricas
-    col1, col2, col3, col4 = st.columns(4)
+    col1, col2, col3, col4, col5 = st.columns(5)
     with col1:
         st.metric("Saldo", f"${st.session_state.saldo:.2f}")
     with col2:
-        win_rate = 52.0  # Placeholder, se podría calcular del historial
-        st.metric("Win Rate", f"{win_rate}%")
+        st.metric("Win Rate", f"{win_rate:.1f}%")
     with col3:
-        profit_total = -183.20  # Placeholder
         st.metric("Profit Total", f"${profit_total:.2f}")
     with col4:
-        num_ops = len(st.session_state.historial_ops)
-        st.metric("Operaciones", num_ops)
+        st.metric("Operaciones", total)
+    with col5:
+        st.metric("Estrategias Activas", len(st.session_state.estrategias_activas))
 
     # Activo actual y gráfico
     if st.session_state.activo_actual:
@@ -341,17 +409,15 @@ if st.session_state.conectado:
     else:
         st.subheader("🔍 Esperando análisis...")
 
-    # Gráfico en tiempo real
     if st.session_state.datos_grafico is not None:
         fig = crear_grafico_velas(st.session_state.datos_grafico, st.session_state.activo_actual or "Activo")
         st.plotly_chart(fig, use_container_width=True)
     else:
         st.info("El gráfico se mostrará cuando se analice un activo.")
 
-    # Señales activas (tarjetas)
+    # Señales activas
     st.subheader("📊 Señales activas")
     if st.session_state.ultima_operacion:
-        # Mostrar la última señal como tarjeta destacada
         op = st.session_state.ultima_operacion
         if op['direccion'] == 'CALL':
             st.markdown(f"""
@@ -368,24 +434,23 @@ if st.session_state.conectado:
             </div>
             """, unsafe_allow_html=True)
 
+    # Operaciones pendientes (las que aún no han vencido)
+    if st.session_state.operaciones_pendientes:
+        with st.expander("⏳ Operaciones pendientes de vencimiento", expanded=False):
+            for op in st.session_state.operaciones_pendientes:
+                tiempo_restante = (op['timestamp'] + timedelta(minutes=5) - datetime.now(ecuador)).total_seconds()
+                if tiempo_restante > 0:
+                    mins, segs = divmod(int(tiempo_restante), 60)
+                    st.text(f"{op['activo']} - {op['direccion']} - ${op['monto']} - Vence en {mins}m {segs}s")
+
     # Historial de operaciones
     with st.expander("📋 Historial de operaciones", expanded=True):
         if st.session_state.historial_ops:
             df_hist = pd.DataFrame(st.session_state.historial_ops)
-            # Renombrar columnas para mejor presentación
-            df_hist = df_hist.rename(columns={
-                'Fecha': 'Hora',
-                'Activo': 'Activo',
-                'Dirección': 'Señal',
-                'Estrategia': 'Estrategia',
-                'Monto': 'Monto',
-                'Resultado': 'Resultado',
-                'Balance después': 'Balance'
-            })
-            st.dataframe(df_hist[['Hora', 'Activo', 'Señal', 'Monto', 'Estrategia', 'Resultado', 'Balance']],
+            st.dataframe(df_hist[['Fecha', 'Activo', 'Dirección', 'Monto', 'Estrategia', 'Resultado', 'Balance después']],
                          use_container_width=True, hide_index=True)
         else:
-            st.info("No hay operaciones aún.")
+            st.info("No hay operaciones en el historial aún.")
 
     # Log de eventos
     with st.expander("📋 Log de eventos", expanded=False):
@@ -397,6 +462,7 @@ if st.session_state.conectado:
     # =========================
     if st.session_state.operando:
         now = datetime.now(ecuador)
+        
         # Cooldown
         if st.session_state.cooldown_hasta and now < st.session_state.cooldown_hasta:
             time.sleep(1)
@@ -422,6 +488,7 @@ if st.session_state.conectado:
 
             if señal_encontrada:
                 asset, direccion, nombre_estr = señal_encontrada
+                
                 # Obtener datos para gráfico
                 try:
                     candles = st.session_state.api.get_candles(asset, 300, 50, time.time())
@@ -435,25 +502,16 @@ if st.session_state.conectado:
                 except:
                     pass
 
-                # Aplicar martingala si corresponde
+                # Aplicar martingala
                 monto_actual = monto_operacion
                 if st.session_state.martingala and st.session_state.perdidas_consecutivas > 0:
                     monto_actual = monto_operacion * (2 ** st.session_state.perdidas_consecutivas)
                     if monto_actual > st.session_state.saldo:
-                        monto_actual = st.session_state.saldo  # no arriesgar más del saldo
+                        monto_actual = st.session_state.saldo
 
-                exito, msg = ejecutar_operacion(asset, direccion, monto_actual)
+                exito, msg = ejecutar_operacion(asset, direccion, monto_actual, nombre_estr)
                 if exito:
                     ahora = now.strftime("%Y-%m-%d %H:%M:%S")
-                    st.session_state.historial_ops.append({
-                        'Fecha': ahora,
-                        'Activo': asset,
-                        'Dirección': direccion,
-                        'Estrategia': nombre_estr,
-                        'Monto': monto_actual,
-                        'Resultado': 'Pendiente',
-                        'Balance después': st.session_state.saldo
-                    })
                     st.session_state.ultima_operacion = {
                         'activo': asset,
                         'direccion': direccion,
@@ -465,6 +523,7 @@ if st.session_state.conectado:
                     st.session_state.log.append(f"⏸️ Cooldown activado por 2 minutos")
                 else:
                     st.session_state.log.append(f"❌ Falló operación: {msg}")
+                
                 time.sleep(2)
                 st.rerun()
             else:
