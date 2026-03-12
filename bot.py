@@ -73,9 +73,6 @@ def calcular_indicadores(df):
     mad = tp.rolling(20).apply(lambda x: np.abs(x - x.mean()).mean())
     df['cci'] = (tp - sma_tp) / (0.015 * mad)
 
-    # Parabolic SAR (aproximación simple)
-    df['sar'] = df['close'].shift(1)  # placeholder
-
     # Heiken Ashi
     df['ha_close'] = (df['open'] + df['high'] + df['low'] + df['close']) / 4
     df['ha_open'] = (df['open'].shift(1) + df['close'].shift(1)) / 2
@@ -97,118 +94,120 @@ def calcular_indicadores(df):
     return df
 
 # =========================
-# 10 ESTRATEGIAS
+# 10 ESTRATEGIAS (ahora devuelven (score, direccion, lista_para_entrar) )
 # =========================
 def estrategia_1_ema_adx(df):
     """Cruce de EMAs + ADX > 25"""
     if len(df) < 2:
-        return 0, False
+        return 0, None, False
     last = df.iloc[-1]
     prev = df.iloc[-2]
+    # Cruce alcista
     if prev['ema9'] <= prev['ema21'] and last['ema9'] > last['ema21'] and last['adx'] > 25:
-        return 100, True
+        return 100, 'CALL', True
+    # Cruce bajista
     if prev['ema9'] >= prev['ema21'] and last['ema9'] < last['ema21'] and last['adx'] > 25:
-        return 100, True
-    # También puede estar lista para entrar si el cruce ya ocurrió y el precio sigue la tendencia
+        return 100, 'PUT', True
+    # Tendencia establecida (puntuación pero no lista para entrar)
     if last['ema9'] > last['ema21'] and last['adx'] > 25:
-        return 100, False
+        return 100, 'CALL', False
     if last['ema9'] < last['ema21'] and last['adx'] > 25:
-        return 100, False
-    return 0, False
+        return 100, 'PUT', False
+    return 0, None, False
 
 def estrategia_2_macd_adx(df):
     """MACD crossover + ADX < 25"""
     if len(df) < 2:
-        return 0, False
+        return 0, None, False
     last = df.iloc[-1]
     prev = df.iloc[-2]
     if prev['macd'] <= prev['signal'] and last['macd'] > last['signal'] and last['hist'] > 0 and last['adx'] < 25:
-        return 100, True
+        return 100, 'CALL', True
     if prev['macd'] >= prev['signal'] and last['macd'] < last['signal'] and last['hist'] < 0 and last['adx'] < 25:
-        return 100, True
+        return 100, 'PUT', True
     if last['macd'] > last['signal'] and last['hist'] > 0:
-        return 100, False
+        return 100, 'CALL', False
     if last['macd'] < last['signal'] and last['hist'] < 0:
-        return 100, False
-    return 0, False
+        return 100, 'PUT', False
+    return 0, None, False
 
 def estrategia_3_bb_rsi(df):
     """Bollinger + RSI extremo"""
     last = df.iloc[-1]
     if last['close'] <= last['bb_lower'] and last['rsi'] < 30:
-        return 100, True
+        return 100, 'CALL', True
     if last['close'] >= last['bb_upper'] and last['rsi'] > 70:
-        return 100, True
-    return 0, False
+        return 100, 'PUT', True
+    return 0, None, False
 
 def estrategia_4_sar_ema(df):
     """Parabolic SAR + EMA 50 (simulado con precio vs EMA50)"""
     last = df.iloc[-1]
     prev = df.iloc[-2]
     if prev['close'] <= prev['ema50'] and last['close'] > last['ema50']:
-        return 100, True
+        return 100, 'CALL', True
     if prev['close'] >= prev['ema50'] and last['close'] < last['ema50']:
-        return 100, True
-    return 0, False
+        return 100, 'PUT', True
+    return 0, None, False
 
 def estrategia_5_stoch_adx(df):
     """Stochastic + ADX"""
     if len(df) < 2:
-        return 0, False
+        return 0, None, False
     last = df.iloc[-1]
     prev = df.iloc[-2]
     if prev['stoch_k'] < 20 and last['stoch_k'] > last['stoch_d'] and last['adx'] > 25:
-        return 100, True
+        return 100, 'CALL', True
     if prev['stoch_k'] > 80 and last['stoch_k'] < last['stoch_d'] and last['adx'] > 25:
-        return 100, True
+        return 100, 'PUT', True
     if last['stoch_k'] > last['stoch_d'] and last['adx'] > 25:
-        return 100, False
+        return 100, 'CALL', False
     if last['stoch_k'] < last['stoch_d'] and last['adx'] > 25:
-        return 100, False
-    return 0, False
+        return 100, 'PUT', False
+    return 0, None, False
 
 def estrategia_6_supertrend_adx(df):
     """Supertrend + ADX (simulado con EMAs)"""
     last = df.iloc[-1]
     if last['ema9'] > last['ema21'] and last['adx'] > 25:
-        return 100, True
+        return 100, 'CALL', True
     if last['ema9'] < last['ema21'] and last['adx'] > 25:
-        return 100, True
-    return 0, False
+        return 100, 'PUT', True
+    return 0, None, False
 
 def estrategia_7_heiken_ashi_ema(df):
     """Heiken Ashi + EMA 9"""
     if len(df) < 2:
-        return 0, False
+        return 0, None, False
     last = df.iloc[-1]
     prev = df.iloc[-2]
     if prev['ha_close'] > prev['ha_open'] and last['ha_close'] > last['ha_open'] and last['close'] > last['ema9']:
-        return 100, True
+        return 100, 'CALL', True
     if prev['ha_close'] < prev['ha_open'] and last['ha_close'] < last['ha_open'] and last['close'] < last['ema9']:
-        return 100, True
+        return 100, 'PUT', True
     if last['ha_close'] > last['ha_open']:
-        return 100, False
+        return 100, 'CALL', False
     if last['ha_close'] < last['ha_open']:
-        return 100, False
-    return 0, False
+        return 100, 'PUT', False
+    return 0, None, False
 
 def estrategia_8_cci_bb(df):
     """CCI + Bollinger"""
     last = df.iloc[-1]
     if last['cci'] > -100 and last['close'] <= last['bb_lower']:
-        return 100, True
+        return 100, 'CALL', True
     if last['cci'] < 100 and last['close'] >= last['bb_upper']:
-        return 100, True
-    return 0, False
+        return 100, 'PUT', True
+    return 0, None, False
 
 def estrategia_9_alligator_momentum(df):
     """Alligator + Momentum"""
     last = df.iloc[-1]
     if last['lips'] > last['teeth'] > last['jaw'] and last['momentum'] > 0:
-        return 100, True
+        return 100, 'CALL', True
     if last['lips'] < last['teeth'] < last['jaw'] and last['momentum'] < 0:
-        return 100, True
-    return 0, False
+        return 100, 'PUT', True
+    return 0, None, False
 
 def estrategia_10_pivot_stoch(df):
     """Pivot Points + Stochastic"""
@@ -216,10 +215,10 @@ def estrategia_10_pivot_stoch(df):
     max20 = df['high'].iloc[-20:].max()
     min20 = df['low'].iloc[-20:].min()
     if last['close'] < min20 * 1.002 and last['stoch_k'] < 20 and last['stoch_k'] > last['stoch_d']:
-        return 100, True
+        return 100, 'CALL', True
     if last['close'] > max20 * 0.998 and last['stoch_k'] > 80 and last['stoch_k'] < last['stoch_d']:
-        return 100, True
-    return 0, False
+        return 100, 'PUT', True
+    return 0, None, False
 
 # Lista de estrategias (nombre, función)
 ESTRATEGIAS = [
@@ -236,7 +235,7 @@ ESTRATEGIAS = [
 ]
 
 # =========================
-# EVALUAR UN ACTIVO (retorna puntuación, lista de estrategias cumplidas, y si alguna está lista para entrar)
+# EVALUAR UN ACTIVO (retorna puntuación, lista de estrategias, dirección consistente y si está listo)
 # =========================
 def evaluar_activo(api, asset, estrategias_activas):
     try:
@@ -254,25 +253,36 @@ def evaluar_activo(api, asset, estrategias_activas):
 
         puntuacion_total = 0
         estrategias_cumplidas = []
+        direcciones = []
         lista_para_entrar = False
 
         for nombre, funcion in ESTRATEGIAS:
             if nombre not in estrategias_activas:
                 continue
             try:
-                score, lista = funcion(df)
+                score, direc, lista = funcion(df)
                 if score > 0:
                     puntuacion_total += score
                     estrategias_cumplidas.append(nombre)
+                    if direc:
+                        direcciones.append(direc)
                     if lista:
                         lista_para_entrar = True
             except Exception as e:
                 continue
 
+        # Determinar dirección consistente
+        direccion_final = None
+        if direcciones:
+            # Si todas las direcciones son iguales, usamos esa; si no, no hay consistencia
+            if all(d == direcciones[0] for d in direcciones):
+                direccion_final = direcciones[0]
+
         return {
             'asset': asset,
             'puntuacion': puntuacion_total,
             'estrategias': estrategias_cumplidas,
+            'direccion': direccion_final,
             'lista_para_entrar': lista_para_entrar,
             'precio': df['close'].iloc[-1],
             'timestamp': datetime.now(ecuador)
