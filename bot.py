@@ -73,9 +73,6 @@ def calcular_indicadores(df):
     mad = tp.rolling(20).apply(lambda x: np.abs(x - x.mean()).mean())
     df['cci'] = (tp - sma_tp) / (0.015 * mad)
 
-    # Parabolic SAR (aproximación simple)
-    df['sar'] = df['close'].shift(1)  # placeholder, necesitaríamos implementación completa
-
     # Heiken Ashi
     df['ha_close'] = (df['open'] + df['high'] + df['low'] + df['close']) / 4
     df['ha_open'] = (df['open'].shift(1) + df['close'].shift(1)) / 2
@@ -97,114 +94,114 @@ def calcular_indicadores(df):
     return df
 
 # =========================
-# 10 ESTRATEGIAS (cada una retorna un score entre 0 y 100)
+# 10 ESTRATEGIAS (cada una retorna True/False y la dirección)
 # =========================
 def estrategia_1_ema_adx(df):
     """Cruce de EMAs + ADX > 25"""
     if len(df) < 2:
-        return 0
+        return None
     last = df.iloc[-1]
     prev = df.iloc[-2]
     if prev['ema9'] <= prev['ema21'] and last['ema9'] > last['ema21'] and last['adx'] > 25:
-        return 100
+        return 'CALL'
     if prev['ema9'] >= prev['ema21'] and last['ema9'] < last['ema21'] and last['adx'] > 25:
-        return 100
-    return 0
+        return 'PUT'
+    return None
 
 def estrategia_2_macd_adx(df):
     """MACD crossover + ADX < 25 o bajando"""
     if len(df) < 2:
-        return 0
+        return None
     last = df.iloc[-1]
     prev = df.iloc[-2]
     if prev['macd'] <= prev['signal'] and last['macd'] > last['signal'] and last['hist'] > 0 and last['adx'] < 25:
-        return 100
+        return 'CALL'
     if prev['macd'] >= prev['signal'] and last['macd'] < last['signal'] and last['hist'] < 0 and last['adx'] < 25:
-        return 100
-    return 0
+        return 'PUT'
+    return None
 
 def estrategia_3_bb_rsi(df):
     """Bollinger + RSI extremo"""
     last = df.iloc[-1]
     if last['close'] <= last['bb_lower'] and last['rsi'] < 30:
-        return 100
+        return 'CALL'
     if last['close'] >= last['bb_upper'] and last['rsi'] > 70:
-        return 100
-    return 0
+        return 'PUT'
+    return None
 
 def estrategia_4_sar_ema(df):
-    """Parabolic SAR + EMA 50 (simulado)"""
-    # Simplificación: usamos cruce de precio con una media
+    """Parabolic SAR + EMA 50 (simulado con cruce de precio y EMA50)"""
+    if len(df) < 2:
+        return None
     last = df.iloc[-1]
     prev = df.iloc[-2]
     if prev['close'] <= prev['ema50'] and last['close'] > last['ema50']:
-        return 100
+        return 'CALL'
     if prev['close'] >= prev['ema50'] and last['close'] < last['ema50']:
-        return 100
-    return 0
+        return 'PUT'
+    return None
 
 def estrategia_5_stoch_adx(df):
     """Stochastic + ADX"""
     if len(df) < 2:
-        return 0
+        return None
     last = df.iloc[-1]
     prev = df.iloc[-2]
     if prev['stoch_k'] < 20 and last['stoch_k'] > last['stoch_d'] and last['adx'] > 25:
-        return 100
+        return 'CALL'
     if prev['stoch_k'] > 80 and last['stoch_k'] < last['stoch_d'] and last['adx'] > 25:
-        return 100
-    return 0
+        return 'PUT'
+    return None
 
 def estrategia_6_supertrend_adx(df):
-    """Supertrend + ADX (simulado con EMAs)"""
+    """Supertrend simulado con EMA + ADX"""
     last = df.iloc[-1]
     if last['ema9'] > last['ema21'] and last['adx'] > 25:
-        return 100
+        return 'CALL'
     if last['ema9'] < last['ema21'] and last['adx'] > 25:
-        return 100
-    return 0
+        return 'PUT'
+    return None
 
 def estrategia_7_heiken_ashi_ema(df):
     """Heiken Ashi + EMA 9"""
     if len(df) < 2:
-        return 0
+        return None
     last = df.iloc[-1]
     prev = df.iloc[-2]
     if prev['ha_close'] > prev['ha_open'] and last['ha_close'] > last['ha_open'] and last['close'] > last['ema9']:
-        return 100
+        return 'CALL'
     if prev['ha_close'] < prev['ha_open'] and last['ha_close'] < last['ha_open'] and last['close'] < last['ema9']:
-        return 100
-    return 0
+        return 'PUT'
+    return None
 
 def estrategia_8_cci_bb(df):
     """CCI + Bollinger"""
     last = df.iloc[-1]
     if last['cci'] > -100 and last['close'] <= last['bb_lower']:
-        return 100
+        return 'CALL'
     if last['cci'] < 100 and last['close'] >= last['bb_upper']:
-        return 100
-    return 0
+        return 'PUT'
+    return None
 
 def estrategia_9_alligator_momentum(df):
     """Alligator + Momentum"""
     last = df.iloc[-1]
     if last['lips'] > last['teeth'] > last['jaw'] and last['momentum'] > 0:
-        return 100
+        return 'CALL'
     if last['lips'] < last['teeth'] < last['jaw'] and last['momentum'] < 0:
-        return 100
-    return 0
+        return 'PUT'
+    return None
 
 def estrategia_10_pivot_stoch(df):
-    """Pivot Points + Stochastic (simulado con niveles)"""
-    # No tenemos pivotes, usamos máximo/mínimo de 20 velas
+    """Pivot Points + Stochastic (simulado)"""
     last = df.iloc[-1]
     max20 = df['high'].iloc[-20:].max()
     min20 = df['low'].iloc[-20:].min()
     if last['close'] < min20 * 1.002 and last['stoch_k'] < 20 and last['stoch_k'] > last['stoch_d']:
-        return 100
+        return 'CALL'
     if last['close'] > max20 * 0.998 and last['stoch_k'] > 80 and last['stoch_k'] < last['stoch_d']:
-        return 100
-    return 0
+        return 'PUT'
+    return None
 
 # Lista de estrategias (nombre, función)
 ESTRATEGIAS = [
@@ -221,9 +218,12 @@ ESTRATEGIAS = [
 ]
 
 # =========================
-# EVALUAR UN ACTIVO (retorna puntuación total y lista de estrategias cumplidas)
+# EVALUAR UN ACTIVO (retorna puntuación y lista de estrategias cumplidas)
 # =========================
-def evaluar_activo(api, asset):
+def evaluar_activo(api, asset, estrategias_activas):
+    """
+    Retorna un dict con la información del activo si es estable y tiene al menos una estrategia cumplida.
+    """
     try:
         candles = api.get_candles(asset, 300, 100, time.time())
         if not candles or len(candles) < 50:
@@ -236,17 +236,24 @@ def evaluar_activo(api, asset):
             return None
 
         df = calcular_indicadores(df)
-        ultimo_precio = df['close'].iloc[-1]
 
-        # Evaluar cada estrategia
-        puntuacion_total = 0
+        # Evaluar cada estrategia activa
+        puntuacion = 0
         estrategias_cumplidas = []
+        direccion_general = None
         for nombre, funcion in ESTRATEGIAS:
+            if nombre not in estrategias_activas:
+                continue
             try:
-                score = funcion(df)
-                if score > 0:
-                    puntuacion_total += score
+                direccion = funcion(df)
+                if direccion:
+                    puntuacion += 100
                     estrategias_cumplidas.append(nombre)
+                    if direccion_general is None:
+                        direccion_general = direccion
+                    elif direccion_general != direccion:
+                        # Si hay estrategias que apuntan en direcciones opuestas, anulamos
+                        direccion_general = None
             except Exception as e:
                 continue
 
@@ -254,14 +261,15 @@ def evaluar_activo(api, asset):
         volatilidad = (df['high'].iloc[-20:].max() - df['low'].iloc[-20:].min()) / df['close'].iloc[-1]
         estable = volatilidad < 0.015  # 1.5% en 20 velas
 
-        return {
-            'asset': asset,
-            'puntuacion': puntuacion_total,
-            'estrategias': estrategias_cumplidas,
-            'estable': estable,
-            'precio': ultimo_precio,
-            'volatilidad': volatilidad
-        }
+        if puntuacion > 0 and estable and direccion_general is not None:
+            return {
+                'asset': asset,
+                'puntuacion': puntuacion,
+                'estrategias': estrategias_cumplidas,
+                'direccion': direccion_general,
+                'precio': df['close'].iloc[-1]
+            }
+        return None
     except Exception as e:
         logger.error(f"Error evaluando {asset}: {e}")
         return None
@@ -290,26 +298,24 @@ def obtener_activos_abiertos(api, tipo_mercado):
 # =========================
 # SELECCIONAR LOS MEJORES ACTIVOS DE UNA RONDA (hasta 2)
 # =========================
-def seleccionar_mejores_de_ronda(api, lista_activos, max_activos=2):
+def seleccionar_mejores_de_ronda(api, lista_activos, estrategias_activas, max_activos=2):
     """
     Evalúa una lista de activos y retorna los mejores (hasta max_activos) basado en puntuación y estabilidad.
     """
     resultados = []
     for asset in lista_activos:
         try:
-            res = evaluar_activo(api, asset)
-            if res and res['estable'] and res['puntuacion'] > 0:
+            res = evaluar_activo(api, asset, estrategias_activas)
+            if res:
                 resultados.append(res)
-            time.sleep(0.1)  # pausa entre llamadas
+            time.sleep(0.1)
         except:
             continue
-    # Ordenar por puntuación descendente
     resultados.sort(key=lambda x: x['puntuacion'], reverse=True)
     return resultados[:max_activos]
 
 # =========================
 # GENERAR ALERTA PREVIA (simulada)
 # =========================
-def generar_alerta_previa(activo, estrategias):
-    """Genera un texto de alerta con tiempo estimado (aquí se podría calcular distancia a niveles)"""
-    return f"🔔 {activo} - Preparándose: cumple {len(estrategias)} estrategias. Señal inminente en ~2-3 min."
+def generar_alerta_previa(activo):
+    return f"🔔 {activo['asset']} - Preparándose: cumple {len(activo['estrategias'])} estrategias. Señal inminente en ~2-3 min."
