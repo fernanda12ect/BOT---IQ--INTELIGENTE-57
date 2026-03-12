@@ -207,7 +207,7 @@ def estrategia_10_pivot_stoch(df):
         return 100, 'PUT', True
     return 0, None, False
 
-# Lista de estrategias (nombre, función)
+# Lista de estrategias
 ESTRATEGIAS = [
     ("EMA + ADX", estrategia_1_ema_adx),
     ("MACD + ADX", estrategia_2_macd_adx),
@@ -262,13 +262,36 @@ def evaluar_activo(api, asset, estrategias_activas):
         if direcciones and all(d == direcciones[0] for d in direcciones):
             direccion_final = direcciones[0]
 
+        # Determinar tendencia de medio plazo (EMA50)
+        precio_actual = df['close'].iloc[-1]
+        precio_anterior = df['close'].iloc[-2] if len(df) > 1 else precio_actual
+        ema50_actual = df['ema50'].iloc[-1]
+        ema50_anterior = df['ema50'].iloc[-2] if len(df) > 1 else ema50_actual
+
+        tendencia_mp = 'CALL' if precio_actual > ema50_actual else 'PUT' if precio_actual < ema50_actual else None
+        cruce_ema50 = (precio_anterior <= ema50_anterior and precio_actual > ema50_actual) or \
+                      (precio_anterior >= ema50_anterior and precio_actual < ema50_actual)
+
+        # Nueva condición: señal válida si coincide con tendencia o es un cruce reciente
+        señal_valida = False
+        if direccion_final:
+            if direccion_final == tendencia_mp:
+                señal_valida = True
+            elif cruce_ema50 and direccion_final == ('CALL' if precio_actual > ema50_actual else 'PUT'):
+                señal_valida = True
+
+        # Tendencia fuerte (para alertas) se mantiene
+        tendencia_fuerte = (puntuacion_total >= 500) and señal_valida
+
         return {
             'asset': asset,
             'puntuacion': puntuacion_total,
             'estrategias': estrategias_cumplidas,
             'direccion': direccion_final,
             'lista_para_entrar': lista_para_entrar,
-            'precio': df['close'].iloc[-1],
+            'señal_valida': señal_valida,  # nueva bandera
+            'tendencia_fuerte': tendencia_fuerte,
+            'precio': precio_actual,
             'timestamp': datetime.now(ecuador)
         }
     except Exception as e:
