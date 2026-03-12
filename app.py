@@ -5,9 +5,8 @@ from datetime import datetime, timedelta
 import pytz
 from iqoptionapi.stable_api import IQ_Option
 from bot import (
-    evaluar_activo_seleccion,
     evaluar_activo_seguimiento,
-    seleccionar_mejor_activo,
+    seleccionar_primer_activo,
     obtener_activos_abiertos
 )
 
@@ -66,7 +65,7 @@ if 'saldo' not in st.session_state:
 if 'monitoreando' not in st.session_state:
     st.session_state.monitoreando = False
 if 'activo_seleccionado' not in st.session_state:
-    st.session_state.activo_seleccionado = None  # dict con datos del activo
+    st.session_state.activo_seleccionado = None  # dict con info de selección
 if 'alerta' not in st.session_state:
     st.session_state.alerta = None
 if 'señal' not in st.session_state:
@@ -132,10 +131,11 @@ with st.sidebar:
     st.markdown("---")
     st.markdown("### ⚙️ Configuración")
     mercado = st.selectbox("Mercado", ["OTC", "REAL", "AMBOS"], index=2)
-    tamaño_ronda = st.slider("Activos por ronda", 10, 50, 20, 5)
+    activos_por_ronda = st.slider("Activos por ronda", 5, 20, 10, 5,
+                                   help="Número de activos a analizar en cada ronda")
     pausa_entre_rondas = st.slider("Pausa entre rondas (seg)", 5, 60, 15, 5)
-    min_puntuacion = st.slider("Puntuación mínima para selección", 10, 100, 20, 5,
-                                help="Valor más bajo = más activos candidatos")
+    umbral_adx = st.slider("Umbral ADX mínimo", 15, 30, 20, 1,
+                           help="ADX mínimo para considerar tendencia")
     timeout_monitoreo = st.slider("Timeout de monitoreo (minutos)", 1, 30, 10, 1,
                                    help="Si el activo no da señal en este tiempo, se descarta.")
 
@@ -233,7 +233,7 @@ if st.session_state.conectado:
                 lista_para_entrar, direccion, fuerza, estrategia = evaluar_activo_seguimiento(
                     st.session_state.api,
                     st.session_state.activo_seleccionado['asset'],
-                    st.session_state.activo_seleccionado['tendencia']
+                    st.session_state.activo_seleccionado
                 )
                 if lista_para_entrar and direccion:
                     entrada = now.strftime("%H:%M:%S")
@@ -268,8 +268,8 @@ if st.session_state.conectado:
                 activos_filtrados = activos_totales
 
             # Dividir en rondas
-            inicio = st.session_state.indice_ronda * tamaño_ronda
-            fin = inicio + tamaño_ronda
+            inicio = st.session_state.indice_ronda * activos_por_ronda
+            fin = inicio + activos_por_ronda
             ronda_actual = activos_filtrados[inicio:fin]
 
             if not ronda_actual:
@@ -277,19 +277,23 @@ if st.session_state.conectado:
                 st.rerun()
 
             st.session_state.log.append(f"Analizando ronda {st.session_state.indice_ronda + 1} ({len(ronda_actual)} activos)...")
-            mejor = seleccionar_mejor_activo(
+            mejor = seleccionar_primer_activo(
                 st.session_state.api,
                 ronda_actual,
-                min_puntuacion=min_puntuacion
+                umbral_adx=umbral_adx
             )
 
             if mejor:
                 st.session_state.activo_seleccionado = mejor
-                st.session_state.alerta = f"🔔 {mejor['asset']} - Tendencia {mejor['tendencia']} (fuerza {mejor['fuerza']:.1f}). Esperando retroceso y cruce EMA."
+                tipo = mejor['tipo']
+                if tipo == 'tendencia':
+                    st.session_state.alerta = f"🔔 {mejor['asset']} - Tendencia {mejor['direccion']} (ADX {mejor['fuerza']:.1f}). Esperando confirmación."
+                else:
+                    st.session_state.alerta = f"🔔 {mejor['asset']} - Mercado lateral detectado. Esperando vela de reversión."
                 st.session_state.tiempo_inicio_monitoreo = datetime.now(ecuador)
-                st.session_state.log.append(f"✅ Activo seleccionado: {mejor['asset']} ({mejor['tendencia']}, fuerza {mejor['fuerza']:.1f})")
+                st.session_state.log.append(f"✅ Activo seleccionado: {mejor['asset']} ({mejor['tipo']})")
             else:
-                st.session_state.log.append("⚠️ No se encontraron activos con tendencia clara.")
+                st.session_state.log.append("⚠️ No se encontraron activos con condiciones base.")
 
             st.session_state.indice_ronda += 1
             time.sleep(pausa_entre_rondas)
