@@ -5,10 +5,10 @@ from datetime import datetime, timedelta
 import pytz
 from iqoptionapi.stable_api import IQ_Option
 from bot import (
-    buscar_candidato,
-    evaluar_confirmacion_final,
-    obtener_activos_disponibles,
-    ACTIVOS_TARGET
+    evaluar_activo_seleccion,
+    evaluar_activo_seguimiento,
+    seleccionar_mejor_activo,
+    obtener_activos_abiertos
 )
 
 st.set_page_config(
@@ -65,8 +65,8 @@ if 'saldo' not in st.session_state:
     st.session_state.saldo = 0.0
 if 'monitoreando' not in st.session_state:
     st.session_state.monitoreando = False
-if 'candidato' not in st.session_state:
-    st.session_state.candidato = None  # activo seleccionado en espera de confirmación
+if 'activo_seleccionado' not in st.session_state:
+    st.session_state.activo_seleccionado = None
 if 'alerta' not in st.session_state:
     st.session_state.alerta = None
 if 'señal' not in st.session_state:
@@ -75,10 +75,10 @@ if 'log' not in st.session_state:
     st.session_state.log = []
 if 'indice_ronda' not in st.session_state:
     st.session_state.indice_ronda = 0
-if 'activos_a_analizar' not in st.session_state:
-    st.session_state.activos_a_analizar = []  # lista completa de activos a escanear
-if 'tiempo_inicio_espera' not in st.session_state:
-    st.session_state.tiempo_inicio_espera = None
+if 'activos_totales' not in st.session_state:
+    st.session_state.activos_totales = []
+if 'tiempo_inicio_monitoreo' not in st.session_state:
+    st.session_state.tiempo_inicio_monitoreo = None
 
 # Zona horaria
 ecuador = pytz.timezone("America/Guayaquil")
@@ -94,9 +94,7 @@ def conectar(email, password):
             saldo = api.get_balance()
             st.session_state.saldo = saldo if saldo is not None else 0.0
             st.session_state.log.append(f"✅ Conectado - Saldo: {st.session_state.saldo}")
-            # Podemos obtener activos de la API o usar la lista predefinida
-            # Por ahora, usamos la lista predefinida más algunos OTC si se desea
-            st.session_state.activos_a_analizar = ACTIVOS_TARGET.copy()
+            st.session_state.activos_totales = obtener_activos_abiertos(api, "AMBOS")
             return True
         else:
             st.error(f"Error: {reason}")
@@ -109,7 +107,7 @@ def desconectar():
     st.session_state.api = None
     st.session_state.conectado = False
     st.session_state.monitoreando = False
-    st.session_state.candidato = None
+    st.session_state.activo_seleccionado = None
     st.session_state.alerta = None
     st.session_state.señal = None
 
@@ -133,26 +131,26 @@ with st.sidebar:
 
     st.markdown("---")
     st.markdown("### ⚙️ Configuración")
-    # Opción de usar lista predefinida o todos los activos
-    modo_activos = st.radio("Activos a analizar", ["Lista objetivo", "Todos (OTC+REAL)"], index=0)
-    tiempo_max_espera = st.slider("Tiempo máximo de espera (min)", 5, 60, 15, 5,
-                                   help="Si el candidato no confirma en este tiempo, se descarta")
-    pausa_entre_rondas = st.slider("Pausa entre escaneos (seg)", 5, 30, 10, 5)
+    mercado = st.selectbox("Mercado", ["OTC", "REAL", "AMBOS"], index=2)
+    tipo_operacion = st.selectbox("Tipo de operación", ["Binarias", "Digitales", "Blitz"], index=0,
+                                   help="Selecciona el tipo de activo/operación (la API puede limitar algunos)")
+    tamaño_ronda = st.slider("Activos por ronda", 10, 50, 20, 5)
+    pausa_entre_rondas = st.slider("Pausa entre rondas (seg)", 5, 60, 15, 5)
+    timeout_monitoreo = st.slider("Timeout de monitoreo (minutos)", 1, 30, 10, 1,
+                                   help="Si el activo no da señal en este tiempo, se descarta.")
+    anticipacion = st.slider("Anticipación de la señal (segundos)", 10, 60, 30, 5,
+                              help="La señal se generará estos segundos antes de la hora de entrada.")
 
     st.markdown("---")
     if st.session_state.conectado:
         if not st.session_state.monitoreando:
             if st.button("▶️ INICIAR", use_container_width=True, type="primary"):
                 st.session_state.monitoreando = True
-                st.session_state.candidato = None
+                st.session_state.indice_ronda = 0
+                st.session_state.activo_seleccionado = None
                 st.session_state.alerta = None
                 st.session_state.señal = None
-                st.session_state.indice_ronda = 0
-                if modo_activos == "Lista objetivo":
-                    st.session_state.activos_a_analizar = ACTIVOS_TARGET.copy()
-                else:
-                    # Obtener todos los activos abiertos
-                    st.session_state.activos_a_analizar = obtener_activos_disponibles(st.session_state.api, "AMBOS")
+                st.session_state.tiempo_inicio_monitoreo = None
                 st.session_state.log.append("🚀 Monitoreo iniciado")
                 st.rerun()
         else:
@@ -170,18 +168,18 @@ if st.session_state.conectado:
     with col1:
         st.metric("Saldo", f"${st.session_state.saldo:.2f}")
     with col2:
-        if st.session_state.candidato:
-            st.metric("Candidato", st.session_state.candidato['asset'])
+        if st.session_state.activo_seleccionado:
+            st.metric("Activo en seguimiento", st.session_state.activo_seleccionado['asset'])
         else:
-            st.metric("Candidato", "Ninguno")
+            st.metric("Activo en seguimiento", "Ninguno")
     with col3:
         st.metric("Señales generadas", len([s for s in st.session_state.log if "SEÑAL" in s]))
 
-    # Alerta (cuando hay candidato en espera)
+    # Alerta previa
     if st.session_state.alerta:
         st.markdown(f'<div class="alert-card">{st.session_state.alerta}</div>', unsafe_allow_html=True)
 
-    # Señal definitiva
+    # Señal definitiva (si existe)
     if st.session_state.señal:
         card_class = "call-card" if st.session_state.señal['direccion'] == "CALL" else "put-card"
         st.markdown(f"""
@@ -190,6 +188,7 @@ if st.session_state.conectado:
             <div class="signal-detail"><strong>Activo:</strong> {st.session_state.señal['asset']}</div>
             <div class="signal-detail"><strong>Entrada:</strong> {st.session_state.señal['entrada']}</div>
             <div class="signal-detail"><strong>Vencimiento:</strong> {st.session_state.señal['vencimiento']}</div>
+            <div class="signal-detail"><strong>Tipo:</strong> {st.session_state.señal['tipo_operacion']}</div>
             <div class="signal-detail"><strong>Estrategia:</strong> {st.session_state.señal['estrategia']}</div>
         </div>
         """, unsafe_allow_html=True)
@@ -203,81 +202,100 @@ if st.session_state.conectado:
     if st.session_state.monitoreando:
         now = datetime.now(ecuador)
 
-        # Si ya hay una señal, esperamos 5 minutos y luego reiniciamos
-        if st.session_state.señal:
-            tiempo_transcurrido = (now - st.session_state.señal['timestamp']).total_seconds()
-            if tiempo_transcurrido > 300:  # 5 minutos
-                st.session_state.candidato = None
-                st.session_state.alerta = None
-                st.session_state.señal = None
-                st.session_state.log.append("🔄 Reiniciando búsqueda...")
-                time.sleep(2)
-                st.rerun()
-            else:
-                time.sleep(5)
-                st.rerun()
-        elif st.session_state.candidato:
-            # Estamos esperando confirmación de un candidato
-            # Verificar timeout
-            if st.session_state.tiempo_inicio_espera is None:
-                st.session_state.tiempo_inicio_espera = now
-            else:
-                tiempo_espera = (now - st.session_state.tiempo_inicio_espera).total_seconds() / 60
-                if tiempo_espera > tiempo_max_espera:
-                    st.session_state.log.append(f"⏰ Timeout: {st.session_state.candidato['asset']} no confirmó. Buscando otro...")
-                    st.session_state.candidato = None
+        # Si ya tenemos un activo seleccionado
+        if st.session_state.activo_seleccionado:
+            # Verificar si ya pasó el tiempo de la señal (para reiniciar después de 5 min)
+            if st.session_state.señal:
+                tiempo_transcurrido = (now - st.session_state.señal['timestamp']).total_seconds()
+                if tiempo_transcurrido > 300:  # 5 minutos
+                    st.session_state.activo_seleccionado = None
                     st.session_state.alerta = None
-                    st.session_state.tiempo_inicio_espera = None
+                    st.session_state.señal = None
+                    st.session_state.tiempo_inicio_monitoreo = None
+                    st.session_state.log.append("🔄 Reiniciando búsqueda...")
                     time.sleep(2)
                     st.rerun()
-
-            # Evaluar confirmación final
-            listo, direccion, estrategia = evaluar_confirmacion_final(
-                st.session_state.api,
-                st.session_state.candidato['asset'],
-                st.session_state.candidato
-            )
-            if listo:
-                entrada = now.strftime("%H:%M:%S")
-                vencimiento = (now + timedelta(minutes=5)).strftime("%H:%M:%S")
-                st.session_state.señal = {
-                    'asset': st.session_state.candidato['asset'],
-                    'direccion': direccion,
-                    'entrada': entrada,
-                    'vencimiento': vencimiento,
-                    'estrategia': estrategia,
-                    'timestamp': now
-                }
-                st.session_state.log.append(f"🚀 SEÑAL GENERADA: {st.session_state.candidato['asset']} - {direccion} a las {entrada}")
-                st.rerun()
+                else:
+                    time.sleep(5)
+                    st.rerun()
             else:
-                time.sleep(5)
-                st.rerun()
+                # Verificar timeout de monitoreo
+                if st.session_state.tiempo_inicio_monitoreo is None:
+                    st.session_state.tiempo_inicio_monitoreo = now
+                else:
+                    tiempo_espera = (now - st.session_state.tiempo_inicio_monitoreo).total_seconds() / 60
+                    if tiempo_espera > timeout_monitoreo:
+                        st.session_state.log.append(f"⏰ Timeout alcanzado para {st.session_state.activo_seleccionado['asset']}. Buscando otro...")
+                        st.session_state.activo_seleccionado = None
+                        st.session_state.alerta = None
+                        st.session_state.tiempo_inicio_monitoreo = None
+                        time.sleep(2)
+                        st.rerun()
+
+                # Monitorear el activo seleccionado
+                lista_para_entrar, direccion, fuerza = evaluar_activo_seguimiento(
+                    st.session_state.api,
+                    st.session_state.activo_seleccionado['asset'],
+                    st.session_state.activo_seleccionado.get('direccion'),
+                    tipo=st.session_state.activo_seleccionado.get('tipo', 'tendencia')
+                )
+                if lista_para_entrar and direccion:
+                    # Generar señal con anticipación
+                    entrada = (now + timedelta(seconds=anticipacion)).strftime("%H:%M:%S")
+                    vencimiento = (now + timedelta(seconds=anticipacion + 300)).strftime("%H:%M:%S")
+                    st.session_state.señal = {
+                        'asset': st.session_state.activo_seleccionado['asset'],
+                        'direccion': direccion,
+                        'entrada': entrada,
+                        'vencimiento': vencimiento,
+                        'tipo_operacion': tipo_operacion,
+                        'estrategia': f"Pullback + confirmación ({st.session_state.activo_seleccionado.get('tipo', 'tendencia')})",
+                        'timestamp': now
+                    }
+                    st.session_state.log.append(f"🚀 SEÑAL GENERADA: {st.session_state.activo_seleccionado['asset']} - {direccion} a las {entrada}")
+                    st.rerun()
+                else:
+                    time.sleep(2)
+                    st.rerun()
         else:
-            # No hay candidato, buscamos uno
-            # Tomamos un grupo de activos (por ejemplo, de 10 en 10)
-            total_activos = st.session_state.activos_a_analizar
-            if not total_activos:
-                st.warning("No hay activos en la lista.")
+            # No tenemos activo, buscamos uno nuevo
+            activos_totales = st.session_state.activos_totales
+            if not activos_totales:
+                st.warning("No hay activos disponibles")
                 time.sleep(pausa_entre_rondas)
                 st.rerun()
 
-            # Dividir en rondas de 10
-            inicio = st.session_state.indice_ronda * 10
-            fin = inicio + 10
-            ronda = total_activos[inicio:fin]
-            if not ronda:
-                # Reiniciar rondas
-                st.session_state.indice_ronda = 0
-                ronda = total_activos[:10]
+            # Filtrar por mercado
+            if mercado == "OTC":
+                activos_filtrados = [a for a in activos_totales if '-OTC' in a]
+            elif mercado == "REAL":
+                activos_filtrados = [a for a in activos_totales if '-OTC' not in a]
+            else:
+                activos_filtrados = activos_totales
 
-            st.session_state.log.append(f"Analizando ronda {st.session_state.indice_ronda + 1} ({len(ronda)} activos)...")
-            candidato = buscar_candidato(st.session_state.api, ronda)
-            if candidato:
-                st.session_state.candidato = candidato
-                st.session_state.alerta = f"🔔 Candidato seleccionado: {candidato['asset']} ({candidato['tipo']}, dirección {candidato['direccion']}). Esperando confirmación..."
-                st.session_state.tiempo_inicio_espera = datetime.now(ecuador)
-                st.session_state.log.append(f"✅ Candidato: {candidato['asset']} - {candidato['tipo']} - {candidato['direccion']}")
+            # Dividir en rondas
+            inicio = st.session_state.indice_ronda * tamaño_ronda
+            fin = inicio + tamaño_ronda
+            ronda_actual = activos_filtrados[inicio:fin]
+
+            if not ronda_actual:
+                st.session_state.indice_ronda = 0
+                st.rerun()
+
+            st.session_state.log.append(f"Analizando ronda {st.session_state.indice_ronda + 1} ({len(ronda_actual)} activos)...")
+            mejor = seleccionar_mejor_activo(
+                st.session_state.api,
+                ronda_actual
+            )
+
+            if mejor:
+                st.session_state.activo_seleccionado = mejor
+                if mejor.get('tipo') == 'lateral':
+                    st.session_state.alerta = f"🔔 {mejor['asset']} - Mercado lateral detectado. Esperando reversión."
+                else:
+                    st.session_state.alerta = f"🔔 {mejor['asset']} - Tendencia {mejor['direccion']} (fuerza {mejor['fuerza']:.1f}). Esperando pullback y confirmación."
+                st.session_state.tiempo_inicio_monitoreo = datetime.now(ecuador)
+                st.session_state.log.append(f"✅ Activo seleccionado: {mejor['asset']} ({mejor.get('tipo', 'tendencia')})")
             else:
                 st.session_state.log.append("⚠️ No se encontraron activos con condiciones base.")
 
