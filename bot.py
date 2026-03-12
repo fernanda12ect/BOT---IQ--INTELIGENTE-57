@@ -12,12 +12,6 @@ logger = logging.getLogger(__name__)
 # Zona horaria de Ecuador
 ecuador = pytz.timezone("America/Guayaquil")
 
-# Lista de activos objetivo (puedes ampliarla o hacerla configurable)
-ACTIVOS_TARGET = [
-    "Volatility 75 Index", "Volatility 100 Index", "Crash 500 Index", "Boom 500 Index",
-    "EURUSD", "GBPUSD", "USDJPY", "AUDUSD", "USDCAD", "NZDUSD"
-]
-
 # =========================
 # INDICADORES COMUNES
 # =========================
@@ -28,7 +22,6 @@ def calcular_indicadores(df):
     # EMAs
     df['ema20'] = df['close'].ewm(span=20, adjust=False).mean()
     df['ema50'] = df['close'].ewm(span=50, adjust=False).mean()
-    df['ema100'] = df['close'].ewm(span=100, adjust=False).mean()  # para niveles
 
     # RSI
     delta = df['close'].diff()
@@ -68,137 +61,117 @@ def calcular_indicadores(df):
     return df
 
 # =========================
-# DETECCIÓN DE TENDENCIA
+# DETECCIÓN DE CONDICIONES BASE (para selección)
 # =========================
-def detectar_tendencia(df):
+def condiciones_base(df):
     """
-    Retorna: direccion ('CALL'/'PUT'), fuerza (ADX), y si la tendencia es válida.
-    Condiciones: ADX > 18 y al menos no esté cayendo en las últimas 3 velas (opcional),
-                 y +DI/-DI indican dirección.
+    Retorna (direccion, fuerza) si se cumplen las condiciones base para tendencia:
+    - ADX > 20 (o >18 y subiendo)
+    - EMA20 y EMA50 alineadas (o precio sobre EMA20)
+    - RSI entre 45-55 (opcional, para evitar extremos)
     """
     if len(df) < 50:
-        return None, 0, False
+        return None, 0
     last = df.iloc[-1]
-    adx = last['adx']
-    if adx > 18:
-        # Verificar dirección
-        if last['plus_di'] > last['minus_di']:
+    prev = df.iloc[-2] if len(df) > 1 else last
+    prev2 = df.iloc[-3] if len(df) > 2 else prev
+
+    # Condición ADX
+    adx_ok = last['adx'] > 20 or (last['adx'] > 18 and last['adx'] > prev['adx'] > prev2['adx'])
+    if not adx_ok:
+        return None, 0
+
+    # Dirección basada en EMAs y +DI/-DI
+    if last['ema20'] > last['ema50'] and last['plus_di'] > last['minus_di']:
+        direccion = 'CALL'
+    elif last['ema20'] < last['ema50'] and last['minus_di'] > last['plus_di']:
+        direccion = 'PUT'
+    else:
+        # Si no está clara, usamos precio sobre EMA20
+        if last['close'] > last['ema20'] and last['plus_di'] > last['minus_di']:
             direccion = 'CALL'
-        elif last['plus_di'] < last['minus_di']:
+        elif last['close'] < last['ema20'] and last['minus_di'] > last['plus_di']:
             direccion = 'PUT'
         else:
-            return None, adx, False
-        # Opcional: verificar que ADX no esté cayendo bruscamente
-        if len(df) >= 3:
-            adx_prev = df['adx'].iloc[-3:].mean()
-            if adx < adx_prev * 0.9:  # si ha caído más del 10%
-                return direccion, adx, False
-        return direccion, adx, True
-    return None, adx, False
+            return None, 0
+
+    # RSI en rango neutral (opcional, podemos relajar)
+    rsi_ok = 40 <= last['rsi'] <= 60
+    if not rsi_ok:
+        # No descartamos, solo reducimos fuerza
+        pass
+
+    fuerza = last['adx'] + (last['vol_ratio'] * 5)
+    return direccion, fuerza
 
 # =========================
-# DETECCIÓN DE PULLBACK A NIVEL
+# DETECCIÓN DE MERCADO LATERAL (para posibles reversiones)
+# =========================
+def condiciones_lateral(df):
+    """
+    Detecta si el mercado está lateral: ADX <20 por al menos 10 velas y BB apretadas.
+    """
+    if len(df) < 20:
+        return False
+    ultimas_adx = df['adx'].iloc[-10:]
+    if all(ultimas_adx < 20):
+        bb_estrecho = df['bb_width'].iloc[-1] / df['close'].iloc[-1] < 0.02  # 2% de ancho
+        return bb_estrecho
+    return False
+
+# =========================
+# DETECCIÓN DE PULLBACK A SOPORTE/RESISTENCIA
 # =========================
 def detectar_pullback(df, direccion):
     """
-    Detecta si el precio está cerca de un nivel de soporte/resistencia relevante.
-    Usamos EMA100 como nivel dinámico, y máximos/mínimos de las últimas 50 velas.
-    Retorna True si el precio está dentro de 1x ATR del nivel.
-    """
-    if len(df) < 50:
-        return False
-    last = df.iloc[-1]
-    precio = last['close']
-    atr = last['atr']
-    if direccion == 'CALL':
-        # Buscar soporte: mínimo de las últimas 50 velas y EMA100
-        soporte = min(df['low'].iloc[-50:].min(), df['ema100'].iloc[-1])
-        if precio - soporte <= atr:
-            return True
-    else:  # PUT
-        resistencia = max(df['high'].iloc[-50:].max(), df['ema100'].iloc[-1])
-        if resistencia - precio <= atr:
-            return True
-    return False
-
-# =========================
-# CONFIRMACIÓN EXTRA
-# =========================
-def confirmacion_extra(df, direccion):
-    """
-    RSI entre 45-55, y vela de rechazo/continuación.
-    Vela de rechazo: mecha larga en dirección contraria.
-    Vela de continuación: cuerpo grande.
-    """
-    if len(df) < 2:
-        return False
-    last = df.iloc[-1]
-    prev = df.iloc[-2]
-    rsi = last['rsi']
-    if not (45 <= rsi <= 55):
-        return False
-
-    # Vela de rechazo
-    if direccion == 'CALL':
-        # Vela alcista con mecha inferior larga
-        cuerpo = last['close'] - last['open']
-        mecha_inf = last['open'] - last['low'] if last['open'] > last['close'] else last['close'] - last['low']
-        if last['close'] > last['open'] and mecha_inf > cuerpo * 0.5:
-            return True
-    else:  # PUT
-        cuerpo = last['open'] - last['close']
-        mecha_sup = last['high'] - last['open'] if last['open'] < last['close'] else last['high'] - last['close']
-        if last['close'] < last['open'] and mecha_sup > cuerpo * 0.5:
-            return True
-
-    # Vela de continuación (cuerpo grande)
-    rango = last['high'] - last['low']
-    cuerpo = abs(last['close'] - last['open'])
-    if cuerpo > rango * 0.7:
-        return True
-
-    return False
-
-# =========================
-# DETECCIÓN DE MERCADO LATERAL
-# =========================
-def detectar_lateral(df):
-    """
-    ADX < 20 por al menos 10 velas, Bollinger Bands estrechas, y vela de reversión.
-    Retorna True y la dirección probable de la reversión (CALL/PUT) o None.
+    Verifica si el precio ha hecho un pullback a una zona de soporte/resistencia.
+    Usamos máximos y mínimos recientes (últimas 20 velas) como niveles.
     """
     if len(df) < 20:
-        return False, None
-    # ADX bajo sostenido
-    adx_bajo = all(df['adx'].iloc[-10:] < 20)
-    if not adx_bajo:
-        return False, None
-    # Bandas estrechas (ancho < 0.5% del precio medio)
-    bb_width_pct = df['bb_width'].iloc[-1] / df['close'].iloc[-1]
-    if bb_width_pct > 0.005:
-        return False, None
-    # Vela de reversión (última vela)
-    last = df.iloc[-1]
-    prev = df.iloc[-2]
-    rango = last['high'] - last['low']
-    cuerpo = abs(last['close'] - last['open'])
-    if cuerpo > rango * 0.7:
-        if last['close'] > last['open']:
-            return True, 'CALL'
-        else:
-            return True, 'PUT'
-    return False, None
+        return False
+    ultimas20 = df.iloc[-20:]
+    precio_actual = df['close'].iloc[-1]
+    atr = df['atr'].iloc[-1]
+    if direccion == 'CALL':
+        # Buscamos soporte: mínimo reciente
+        soporte = ultimas20['low'].min()
+        distancia = abs(precio_actual - soporte)
+        return distancia <= atr  # tolerancia 1 ATR
+    else:
+        # Resistencia
+        resistencia = ultimas20['high'].max()
+        distancia = abs(resistencia - precio_actual)
+        return distancia <= atr
 
 # =========================
-# EVALUACIÓN INICIAL (condiciones base)
+# CONFIRMACIÓN FINAL (vela de rechazo/continuación)
 # =========================
-def evaluar_condiciones_base(api, asset):
+def confirmacion_final(df, direccion):
     """
-    Verifica si el activo cumple las condiciones básicas para ser candidato.
-    Retorna un dict con la información o None.
+    Busca una vela de rechazo en la dirección esperada.
+    Para CALL: vela alcista con mecha inferior larga (rechazo de soporte).
+    Para PUT: vela bajista con mecha superior larga.
     """
+    if len(df) < 1:
+        return False
+    last = df.iloc[-1]
+    rango = last['high'] - last['low']
+    if rango == 0:
+        return False
+    if direccion == 'CALL':
+        # Mecha inferior larga (rechazo)
+        mecha_inf = min(last['open'], last['close']) - last['low']
+        return mecha_inf > 0.5 * rango and last['close'] > last['open']
+    else:
+        mecha_sup = last['high'] - max(last['open'], last['close'])
+        return mecha_sup > 0.5 * rango and last['close'] < last['open']
+
+# =========================
+# EVALUAR ACTIVO PARA SELECCIÓN
+# =========================
+def evaluar_activo_seleccion(api, asset):
     try:
-        candles = api.get_candles(asset, 300, 100, time.time())  # M5
+        candles = api.get_candles(asset, 300, 100, time.time())
         if not candles or len(candles) < 50:
             return None
         df = pd.DataFrame(candles)
@@ -209,93 +182,66 @@ def evaluar_condiciones_base(api, asset):
             return None
 
         df = calcular_indicadores(df)
-
-        # Primero verificar si es mercado lateral
-        lateral, direccion_lateral = detectar_lateral(df)
-        if lateral:
-            return {
-                'asset': asset,
-                'tipo': 'lateral',
-                'direccion': direccion_lateral,
-                'fuerza': 0,
-                'df': df
-            }
-
-        # Si no, verificar tendencia
-        direccion, fuerza, valida = detectar_tendencia(df)
-        if not valida:
-            return None
-
-        # Verificar pullback
-        pullback = detectar_pullback(df, direccion)
-        if not pullback:
-            return None
-
-        # Confirmación extra (opcional, pero ayuda)
-        confirm = confirmacion_extra(df, direccion)
-        if not confirm:
+        direccion, fuerza = condiciones_base(df)
+        if direccion is None:
+            # Verificar si es lateral
+            if condiciones_lateral(df):
+                return {'asset': asset, 'tipo': 'lateral', 'fuerza': 10}
             return None
 
         return {
             'asset': asset,
-            'tipo': 'tendencia',
             'direccion': direccion,
             'fuerza': fuerza,
-            'df': df
+            'tipo': 'tendencia',
+            'precio': df['close'].iloc[-1]
         }
     except Exception as e:
         logger.error(f"Error evaluando {asset}: {e}")
         return None
 
 # =========================
-# EVALUACIÓN PARA SEGUIMIENTO (confirmación final)
+# EVALUAR ACTIVO EN SEGUIMIENTO (para confirmación)
 # =========================
-def evaluar_confirmacion_final(api, asset, info_candidato):
-    """
-    Monitorea el activo para detectar el punto de entrada final.
-    Para tendencia: esperar pullback + confirmación extra en la misma dirección.
-    Para lateral: esperar vela de reversión.
-    Retorna (lista_para_entrar, direccion, estrategia)
-    """
+def evaluar_activo_seguimiento(api, asset, direccion_esperada, tipo='tendencia'):
     try:
-        candles = api.get_candles(asset, 300, 50, time.time())  # menos velas para rapidez
-        if not candles or len(candles) < 20:
-            return False, None, None
+        candles = api.get_candles(asset, 300, 100, time.time())
+        if not candles or len(candles) < 50:
+            return False, None, 0
         df = pd.DataFrame(candles)
         for col in ['open', 'max', 'min', 'close', 'volume']:
             df[col] = pd.to_numeric(df[col], errors='coerce')
         df.dropna(inplace=True)
-        if len(df) < 20:
-            return False, None, None
+        if len(df) < 50:
+            return False, None, 0
 
         df = calcular_indicadores(df)
-
-        if info_candidato['tipo'] == 'tendencia':
-            # Verificar que la tendencia se mantiene
-            direccion, fuerza, valida = detectar_tendencia(df)
-            if not valida or direccion != info_candidato['direccion']:
-                return False, None, None
+        if tipo == 'tendencia':
+            # Verificar que la tendencia sigue
+            direccion_actual, fuerza = condiciones_base(df)
+            if direccion_actual != direccion_esperada:
+                return False, None, 0
             # Verificar pullback y confirmación
-            pullback = detectar_pullback(df, direccion)
-            confirm = confirmacion_extra(df, direccion)
-            if pullback and confirm:
-                return True, direccion, f"Pullback + confirmación en tendencia {direccion}"
-            else:
-                return False, None, None
+            pullback_ok = detectar_pullback(df, direccion_actual)
+            confirmacion_ok = confirmacion_final(df, direccion_actual)
+            if pullback_ok and confirmacion_ok:
+                return True, direccion_actual, fuerza
         else:  # lateral
-            lateral, direccion = detectar_lateral(df)
-            if lateral:
-                return True, direccion, "Reversión en mercado lateral"
-            else:
-                return False, None, None
+            # Buscar vela de reversión
+            if confirmacion_final(df, 'CALL') or confirmacion_final(df, 'PUT'):
+                # Determinar dirección por la vela
+                last = df.iloc[-1]
+                direccion = 'CALL' if last['close'] > last['open'] else 'PUT'
+                return True, direccion, 30  # fuerza baja
+        return False, None, 0
     except Exception as e:
         logger.error(f"Error en seguimiento de {asset}: {e}")
-        return False, None, None
+        return False, None, 0
 
 # =========================
-# OBTENER ACTIVOS (si no se especifica lista)
+# OBTENER ACTIVOS ABIERTOS
 # =========================
-def obtener_activos_disponibles(api, tipo_mercado="AMBOS"):
+def obtener_activos_abiertos(api, tipo_mercado):
     try:
         open_time = api.get_all_open_time()
         activos = []
@@ -314,18 +260,23 @@ def obtener_activos_disponibles(api, tipo_mercado="AMBOS"):
         return []
 
 # =========================
-# SELECCIONAR CANDIDATO DE UNA LISTA
+# SELECCIONAR EL MEJOR ACTIVO DE UNA RONDA
 # =========================
-def buscar_candidato(api, lista_activos):
+def seleccionar_mejor_activo(api, lista_activos):
     """
-    Itera sobre la lista de activos y retorna el primero que cumpla condiciones base.
+    Elige el activo con mayor fuerza (o lateral) que cumpla condiciones base.
     """
+    mejores = []
     for asset in lista_activos:
         try:
-            candidato = evaluar_condiciones_base(api, asset)
-            if candidato:
-                return candidato
-            time.sleep(0.2)
+            res = evaluar_activo_seleccion(api, asset)
+            if res:
+                mejores.append(res)
+            time.sleep(0.1)
         except:
             continue
-    return None
+    if not mejores:
+        return None
+    # Ordenar por fuerza descendente, dando prioridad a tendencia sobre lateral
+    mejores.sort(key=lambda x: (x.get('tipo') == 'tendencia', x['fuerza']), reverse=True)
+    return mejores[0]
