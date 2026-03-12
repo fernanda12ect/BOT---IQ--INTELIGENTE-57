@@ -62,13 +62,13 @@ def calcular_indicadores(df):
     return df
 
 # =========================
-# DETECCIÓN DE TENDENCIA (flexible)
+# DETECCIÓN DE TENDENCIA (más flexible)
 # =========================
-def detectar_tendencia(df, umbral_adx=18):
+def detectar_tendencia(df, umbral_adx=12):
     """
     Retorna dirección de tendencia ('CALL'/'PUT') y fuerza (ADX) si:
-    - ADX > umbral (por defecto 18) y está subiendo en las últimas 3 velas (opcional)
-    - EMA20 y EMA50 alineadas
+    - ADX > umbral (por defecto 12)
+    - EMA9 y EMA21 están alineadas (EMA9 > EMA21 para CALL, EMA9 < EMA21 para PUT)
     """
     if len(df) < 50:
         return None, 0
@@ -76,25 +76,16 @@ def detectar_tendencia(df, umbral_adx=18):
     if last['adx'] <= umbral_adx:
         return None, 0
 
-    # Verificar si ADX está subiendo (últimas 3 velas)
-    adx_series = df['adx'].iloc[-3:].values
-    adx_subiendo = all(adx_series[i] <= adx_series[i+1] for i in range(len(adx_series)-1))
-
-    # Usar EMA20 y EMA50 para dirección
-    if last['ema20'] > last['ema50']:
+    if last['ema9'] > last['ema21']:
         return 'CALL', last['adx']
-    elif last['ema20'] < last['ema50']:
+    elif last['ema9'] < last['ema21']:
         return 'PUT', last['adx']
     return None, 0
 
 # =========================
-# DETECCIÓN DE PULLBACK (más sensible)
+# DETECCIÓN DE PULLBACK
 # =========================
 def detectar_pullback(df, tendencia, umbral_pullback=0.3):
-    """
-    Analiza las últimas 5 velas para ver si ha ocurrido un pullback contra la tendencia.
-    Retorna True si el precio se ha movido en contra al menos un umbral * ATR.
-    """
     if len(df) < 5:
         return False
     ultimas = df.iloc[-5:]
@@ -102,25 +93,19 @@ def detectar_pullback(df, tendencia, umbral_pullback=0.3):
     atr_actual = df['atr'].iloc[-1]
 
     if tendencia == 'CALL':
-        # En tendencia alcista, pullback es cuando el precio baja respecto al máximo reciente
         maximo_reciente = ultimas['high'].max()
         if maximo_reciente - precio_actual > umbral_pullback * atr_actual:
             return True
-    else:  # PUT
-        # En tendencia bajista, pullback es cuando el precio sube respecto al mínimo reciente
+    else:
         minimo_reciente = ultimas['low'].min()
         if precio_actual - minimo_reciente > umbral_pullback * atr_actual:
             return True
     return False
 
 # =========================
-# CONFIRMACIÓN DE CRUCE DE EMA (con ventana)
+# CONFIRMACIÓN DE CRUCE DE EMA
 # =========================
 def confirmar_cruce_ema(df, tendencia, ventana=2):
-    """
-    Verifica si ha ocurrido un cruce de EMAs en la dirección de la tendencia
-    en las últimas `ventana` velas.
-    """
     if len(df) < ventana + 1:
         return False
     for i in range(1, ventana + 1):
@@ -135,29 +120,9 @@ def confirmar_cruce_ema(df, tendencia, ventana=2):
     return False
 
 # =========================
-# CONDICIONES PARA MERCADOS LATERALES (opcional)
+# EVALUAR ACTIVO PARA SELECCIÓN
 # =========================
-def es_lateral(df):
-    """
-    Detecta si el mercado está lateral (ADX bajo y BB apretadas)
-    """
-    if len(df) < 20:
-        return False
-    ultimas = df.iloc[-20:]
-    adx_medio = ultimas['adx'].mean()
-    bb_width_medio = ultimas['bb_width'].mean()
-    precio_medio = ultimas['close'].mean()
-    if adx_medio < 20 and (bb_width_medio / precio_medio) < 0.005:  # ancho BB < 0.5%
-        return True
-    return False
-
-# =========================
-# EVALUAR ACTIVO PARA SELECCIÓN (condiciones base)
-# =========================
-def evaluar_activo_seleccion(api, asset, umbral_adx=18):
-    """
-    Versión para selección inicial: verifica tendencia y devuelve datos si cumple.
-    """
+def evaluar_activo_seleccion(api, asset, umbral_adx=12):
     try:
         candles = api.get_candles(asset, 300, 100, time.time())
         if not candles or len(candles) < 50:
@@ -174,8 +139,8 @@ def evaluar_activo_seleccion(api, asset, umbral_adx=18):
         if tendencia is None:
             return None
 
-        # Puntuación: ADX + volumen relativo
-        puntuacion = fuerza + (df['vol_ratio'].iloc[-1] * 10)
+        # Puntuación solo basada en ADX (más simple)
+        puntuacion = fuerza
         return {
             'asset': asset,
             'tendencia': tendencia,
@@ -188,13 +153,9 @@ def evaluar_activo_seleccion(api, asset, umbral_adx=18):
         return None
 
 # =========================
-# EVALUAR ACTIVO EN SEGUIMIENTO (pullback + cruce)
+# EVALUAR ACTIVO EN SEGUIMIENTO
 # =========================
 def evaluar_activo_seguimiento(api, asset, tendencia_esperada, umbral_pullback=0.3, ventana_cruce=2):
-    """
-    Para un activo ya seleccionado, verifica si hay pullback y cruce de EMA.
-    Retorna: (lista_para_entrar, direccion, fuerza, estrategia)
-    """
     try:
         candles = api.get_candles(asset, 300, 100, time.time())
         if not candles or len(candles) < 50:
@@ -207,7 +168,7 @@ def evaluar_activo_seguimiento(api, asset, tendencia_esperada, umbral_pullback=0
             return False, None, 0, None
 
         df = calcular_indicadores(df)
-        tendencia_actual, fuerza = detectar_tendencia(df, umbral_adx=15)  # umbral más bajo en seguimiento
+        tendencia_actual, fuerza = detectar_tendencia(df, umbral_adx=10)  # umbral más bajo en seguimiento
         if tendencia_actual != tendencia_esperada:
             return False, None, 0, None
 
@@ -222,13 +183,9 @@ def evaluar_activo_seguimiento(api, asset, tendencia_esperada, umbral_pullback=0
         return False, None, 0, None
 
 # =========================
-# OBTENER ACTIVOS ABIERTOS (con filtro por tipo)
+# OBTENER ACTIVOS ABIERTOS (todos los binarios)
 # =========================
-def obtener_activos_abiertos(api, tipo_mercado, tipo_opcion="binarias"):
-    """
-    tipo_mercado: 'OTC', 'REAL', 'AMBOS'
-    tipo_opcion: 'binarias', 'digitales', 'blitz' (por ahora solo afecta a los activos seleccionados)
-    """
+def obtener_activos_abiertos(api, tipo_mercado="AMBOS"):
     try:
         open_time = api.get_all_open_time()
         activos = []
@@ -241,11 +198,7 @@ def obtener_activos_abiertos(api, tipo_mercado, tipo_opcion="binarias"):
                         activos.append(asset)
                     elif tipo_mercado == 'AMBOS':
                         activos.append(asset)
-        # Si es blitz, podríamos añadir activos específicos (simulado)
-        if tipo_opcion == "blitz":
-            # Aquí se pueden añadir activos como "Volatility 75 Index", etc.
-            # Por ahora, mantenemos los mismos
-            pass
+        logger.info(f"Se obtuvieron {len(activos)} activos abiertos")
         return activos
     except Exception as e:
         logger.error(f"Error obteniendo activos: {e}")
@@ -254,9 +207,9 @@ def obtener_activos_abiertos(api, tipo_mercado, tipo_opcion="binarias"):
 # =========================
 # SELECCIONAR EL MEJOR ACTIVO DE UNA RONDA
 # =========================
-def seleccionar_mejor_activo(api, lista_activos, umbral_adx=18, min_puntuacion=20):
+def seleccionar_mejor_activo(api, lista_activos, umbral_adx=12, min_puntuacion=12):
     """
-    Elige el activo con mayor puntuación (ADX + volumen) que supere el mínimo.
+    Elige el activo con mayor puntuación (ADX) que supere el mínimo.
     """
     mejores = []
     for asset in lista_activos:
