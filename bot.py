@@ -12,7 +12,7 @@ logger = logging.getLogger(__name__)
 # Zona horaria de Ecuador
 ecuador = pytz.timezone("America/Guayaquil")
 
-# Lista de activos por si falla la API
+# Lista de activos comunes (fallback)
 FALLBACK_ACTIVOS = [
     "EURUSD-OTC", "GBPUSD-OTC", "AUDUSD-OTC", "USDJPY-OTC",
     "USDCHF-OTC", "NZDUSD-OTC", "USDCAD-OTC", "GBPJPY-OTC",
@@ -68,7 +68,6 @@ def calcular_indicadores(df):
     df['bb_std'] = df['close'].rolling(20).std()
     df['bb_upper'] = df['bb_ma'] + 2 * df['bb_std']
     df['bb_lower'] = df['bb_ma'] - 2 * df['bb_std']
-    df['bb_width'] = df['bb_upper'] - df['bb_lower']
 
     # Stochastic
     low14 = df['low'].rolling(14).min()
@@ -103,140 +102,173 @@ def calcular_indicadores(df):
     return df
 
 # =========================
-# 10 ESTRATEGIAS (devuelven dirección si se cumplen)
+# DETECCIÓN DE SOPORTES Y RESISTENCIAS
+# =========================
+def detectar_soportes_resistencias(df, num_toques=2, tolerancia=0.001):
+    """
+    Detecta niveles horizontales con al menos num_toques toques.
+    Retorna lista de (precio, tipo) donde tipo es 'soporte' o 'resistencia'.
+    """
+    df = df.iloc[-100:].copy()
+    highs = df['high']
+    lows = df['low']
+    conteo = {}
+    for i in range(1, len(df)-1):
+        # Máximos locales
+        if highs.iloc[i] > highs.iloc[i-1] and highs.iloc[i] > highs.iloc[i+1]:
+            precio = round(highs.iloc[i], 5)
+            conteo[precio] = conteo.get(precio, 0) + 1
+        # Mínimos locales
+        if lows.iloc[i] < lows.iloc[i-1] and lows.iloc[i] < lows.iloc[i+1]:
+            precio = round(lows.iloc[i], 5)
+            conteo[precio] = conteo.get(precio, 0) + 1
+
+    niveles = []
+    precio_actual = df['close'].iloc[-1]
+    for precio, cnt in conteo.items():
+        if cnt >= num_toques:
+            tipo = 'resistencia' if precio > precio_actual else 'soporte'
+            niveles.append((precio, tipo))
+    # Ordenar por cercanía al precio actual
+    niveles.sort(key=lambda x: abs(x[0] - precio_actual))
+    return niveles
+
+# =========================
+# 10 ESTRATEGIAS (cada una devuelve dirección y peso)
 # =========================
 def estrategia_1_ema_adx(df):
-    """EMA9 cruza EMA21 + ADX > 20"""
+    """EMA9/21 + ADX > 15"""
     if len(df) < 2:
-        return None
+        return None, 0
     last = df.iloc[-1]
-    prev = df.iloc[-2]
-    if prev['ema9'] <= prev['ema21'] and last['ema9'] > last['ema21'] and last['adx'] > 20:
-        return 'CALL'
-    if prev['ema9'] >= prev['ema21'] and last['ema9'] < last['ema21'] and last['adx'] > 20:
-        return 'PUT'
-    return None
+    if last['adx'] > 15:
+        if last['ema9'] > last['ema21']:
+            return 'CALL', 10
+        elif last['ema9'] < last['ema21']:
+            return 'PUT', 10
+    return None, 0
 
 def estrategia_2_macd_adx(df):
-    """MACD cruza señal + ADX < 25 (mercado lateral con posible reversión)"""
+    """MACD cruce señal + ADX < 20 (reversión)"""
     if len(df) < 2:
-        return None
+        return None, 0
     last = df.iloc[-1]
     prev = df.iloc[-2]
-    if prev['macd'] <= prev['signal'] and last['macd'] > last['signal'] and last['hist'] > 0 and last['adx'] < 25:
-        return 'CALL'
-    if prev['macd'] >= prev['signal'] and last['macd'] < last['signal'] and last['hist'] < 0 and last['adx'] < 25:
-        return 'PUT'
-    return None
+    if last['adx'] < 20:
+        if prev['macd'] <= prev['signal'] and last['macd'] > last['signal'] and last['hist'] > 0:
+            return 'CALL', 8
+        if prev['macd'] >= prev['signal'] and last['macd'] < last['signal'] and last['hist'] < 0:
+            return 'PUT', 8
+    return None, 0
 
 def estrategia_3_bb_rsi(df):
     """Bollinger + RSI extremo"""
     last = df.iloc[-1]
     if last['close'] <= last['bb_lower'] and last['rsi'] < 30:
-        return 'CALL'
+        return 'CALL', 9
     if last['close'] >= last['bb_upper'] and last['rsi'] > 70:
-        return 'PUT'
-    return None
+        return 'PUT', 9
+    return None, 0
 
 def estrategia_4_sar_ema(df):
-    """Precio cruza EMA50 (simula SAR)"""
+    """Precio cruza EMA50"""
     if len(df) < 2:
-        return None
+        return None, 0
     last = df.iloc[-1]
     prev = df.iloc[-2]
     if prev['close'] <= prev['ema50'] and last['close'] > last['ema50']:
-        return 'CALL'
+        return 'CALL', 7
     if prev['close'] >= prev['ema50'] and last['close'] < last['ema50']:
-        return 'PUT'
-    return None
+        return 'PUT', 7
+    return None, 0
 
 def estrategia_5_stoch_adx(df):
-    """Stochastic + ADX > 20"""
+    """Stochastic oversold/overbought + ADX > 20"""
     if len(df) < 2:
-        return None
+        return None, 0
     last = df.iloc[-1]
     prev = df.iloc[-2]
-    if prev['stoch_k'] < 20 and last['stoch_k'] > last['stoch_d'] and last['adx'] > 20:
-        return 'CALL'
-    if prev['stoch_k'] > 80 and last['stoch_k'] < last['stoch_d'] and last['adx'] > 20:
-        return 'PUT'
-    return None
+    if last['adx'] > 20:
+        if prev['stoch_k'] < 20 and last['stoch_k'] > last['stoch_d']:
+            return 'CALL', 8
+        if prev['stoch_k'] > 80 and last['stoch_k'] < last['stoch_d']:
+            return 'PUT', 8
+    return None, 0
 
-def estrategia_6_supertrend_adx(df):
-    """EMA9/21 alineadas + ADX > 20 (simula Supertrend)"""
+def estrategia_6_supertrend_ema(df):
+    """Simulación de Supertrend con EMAs"""
     last = df.iloc[-1]
-    if last['ema9'] > last['ema21'] and last['adx'] > 20:
-        return 'CALL'
-    if last['ema9'] < last['ema21'] and last['adx'] > 20:
-        return 'PUT'
-    return None
+    if last['ema9'] > last['ema21'] and last['ema9'] > last['ema50']:
+        return 'CALL', 6
+    if last['ema9'] < last['ema21'] and last['ema9'] < last['ema50']:
+        return 'PUT', 6
+    return None, 0
 
 def estrategia_7_heiken_ashi_ema(df):
     """Heiken Ashi + EMA9"""
     if len(df) < 2:
-        return None
+        return None, 0
     last = df.iloc[-1]
     prev = df.iloc[-2]
     if prev['ha_close'] > prev['ha_open'] and last['ha_close'] > last['ha_open'] and last['close'] > last['ema9']:
-        return 'CALL'
+        return 'CALL', 7
     if prev['ha_close'] < prev['ha_open'] and last['ha_close'] < last['ha_open'] and last['close'] < last['ema9']:
-        return 'PUT'
-    return None
+        return 'PUT', 7
+    return None, 0
 
 def estrategia_8_cci_bb(df):
     """CCI + Bollinger"""
     last = df.iloc[-1]
     if last['cci'] > -100 and last['close'] <= last['bb_lower']:
-        return 'CALL'
+        return 'CALL', 8
     if last['cci'] < 100 and last['close'] >= last['bb_upper']:
-        return 'PUT'
-    return None
+        return 'PUT', 8
+    return None, 0
 
 def estrategia_9_alligator_momentum(df):
     """Alligator + Momentum"""
     last = df.iloc[-1]
     if last['lips'] > last['teeth'] > last['jaw'] and last['momentum'] > 0:
-        return 'CALL'
+        return 'CALL', 7
     if last['lips'] < last['teeth'] < last['jaw'] and last['momentum'] < 0:
-        return 'PUT'
-    return None
+        return 'PUT', 7
+    return None, 0
 
 def estrategia_10_pivot_stoch(df):
-    """Niveles de 20 velas + Stochastic"""
+    """Pivot points (soportes/resistencias) + Stochastic"""
+    niveles = detectar_soportes_resistencias(df, num_toques=1, tolerancia=0.001)
+    if not niveles:
+        return None, 0
+    precio_actual = df['close'].iloc[-1]
     last = df.iloc[-1]
-    max20 = df['high'].iloc[-20:].max()
-    min20 = df['low'].iloc[-20:].min()
-    if last['close'] < min20 * 1.002 and last['stoch_k'] < 20 and last['stoch_k'] > last['stoch_d']:
-        return 'CALL'
-    if last['close'] > max20 * 0.998 and last['stoch_k'] > 80 and last['stoch_k'] < last['stoch_d']:
-        return 'PUT'
-    return None
+    # Buscar el nivel más cercano
+    nivel_cercano, tipo = niveles[0]
+    distancia = abs(precio_actual - nivel_cercano) / precio_actual
+    if distancia < 0.002:  # 0.2% de distancia
+        if tipo == 'soporte' and last['stoch_k'] < 20 and last['stoch_k'] > last['stoch_d']:
+            return 'CALL', 9
+        if tipo == 'resistencia' and last['stoch_k'] > 80 and last['stoch_k'] < last['stoch_d']:
+            return 'PUT', 9
+    return None, 0
 
 # Lista de estrategias (nombre, función)
 ESTRATEGIAS = [
     ("EMA + ADX", estrategia_1_ema_adx),
-    ("MACD + ADX", estrategia_2_macd_adx),
+    ("MACD reversión", estrategia_2_macd_adx),
     ("BB + RSI", estrategia_3_bb_rsi),
-    ("SAR + EMA50", estrategia_4_sar_ema),
+    ("Cruce EMA50", estrategia_4_sar_ema),
     ("Stoch + ADX", estrategia_5_stoch_adx),
-    ("Supertrend + ADX", estrategia_6_supertrend_adx),
-    ("Heiken Ashi + EMA9", estrategia_7_heiken_ashi_ema),
+    ("Supertrend", estrategia_6_supertrend_ema),
+    ("Heiken Ashi", estrategia_7_heiken_ashi_ema),
     ("CCI + BB", estrategia_8_cci_bb),
-    ("Alligator + Momentum", estrategia_9_alligator_momentum),
+    ("Alligator", estrategia_9_alligator_momentum),
     ("Pivot + Stoch", estrategia_10_pivot_stoch)
 ]
 
 # =========================
 # EVALUAR ACTIVO PARA SELECCIÓN (consenso de estrategias)
 # =========================
-def evaluar_activo_seleccion(api, asset, min_consenso=2):
-    """
-    Evalúa un activo y retorna:
-        - consenso: número de estrategias que coinciden en la misma dirección
-        - direccion: la dirección mayoritaria ('CALL'/'PUT')
-        - fuerza: ADX
-        - estrategias_cumplidas: lista de nombres
-    """
+def evaluar_activo_seleccion(api, asset):
     try:
         candles = api.get_candles(asset, 300, 100, time.time())
         if not candles or len(candles) < 50:
@@ -249,38 +281,66 @@ def evaluar_activo_seleccion(api, asset, min_consenso=2):
             return None
 
         df = calcular_indicadores(df)
-        conteo = {'CALL': 0, 'PUT': 0}
-        estrategias_cumplidas = {'CALL': [], 'PUT': []}
+        votos_call = 0
+        votos_put = 0
+        peso_call = 0
+        peso_put = 0
+        estrategias_activas = []
 
         for nombre, funcion in ESTRATEGIAS:
             try:
-                direc = funcion(df)
-                if direc:
-                    conteo[direc] += 1
-                    estrategias_cumplidas[direc].append(nombre)
+                direccion, peso = funcion(df)
+                if direccion:
+                    estrategias_activas.append(nombre)
+                    if direccion == 'CALL':
+                        votos_call += 1
+                        peso_call += peso
+                    else:
+                        votos_put += 1
+                        peso_put += peso
             except Exception as e:
                 continue
 
-        if conteo['CALL'] >= min_consenso or conteo['PUT'] >= min_consenso:
-            direccion = 'CALL' if conteo['CALL'] > conteo['PUT'] else 'PUT'
-            consenso = conteo[direccion]
-            return {
-                'asset': asset,
-                'direccion': direccion,
-                'consenso': consenso,
-                'fuerza': df['adx'].iloc[-1],
-                'precio': df['close'].iloc[-1],
-                'estrategias': estrategias_cumplidas[direccion]
-            }
-        return None
+        # Determinar dirección por consenso (mayoría simple, o peso)
+        if votos_call + votos_put < 2:  # Necesitamos al menos 2 estrategias
+            return None
+
+        if votos_call > votos_put:
+            direccion = 'CALL'
+            fuerza = peso_call / votos_call if votos_call > 0 else 0
+        elif votos_put > votos_call:
+            direccion = 'PUT'
+            fuerza = peso_put / votos_put if votos_put > 0 else 0
+        else:
+            # Empate, decidir por peso
+            if peso_call > peso_put:
+                direccion = 'CALL'
+                fuerza = peso_call / votos_call if votos_call > 0 else 0
+            else:
+                direccion = 'PUT'
+                fuerza = peso_put / votos_put if votos_put > 0 else 0
+
+        # Puntuación basada en número de estrategias y peso
+        puntuacion = (votos_call + votos_put) * 10 + (peso_call + peso_put)
+
+        return {
+            'asset': asset,
+            'direccion': direccion,
+            'fuerza': fuerza,
+            'votos_call': votos_call,
+            'votos_put': votos_put,
+            'estrategias': estrategias_activas,
+            'puntuacion': puntuacion,
+            'precio': df['close'].iloc[-1]
+        }
     except Exception as e:
         logger.error(f"Error evaluando {asset}: {e}")
         return None
 
 # =========================
-# DETECCIÓN DE PULLBACK
+# DETECCIÓN DE PULLBACK (sensible)
 # =========================
-def detectar_pullback(df, direccion, umbral_pullback=0.3):
+def detectar_pullback(df, direccion, umbral_pullback=0.2):
     if len(df) < 5:
         return False
     ultimas = df.iloc[-5:]
@@ -298,9 +358,9 @@ def detectar_pullback(df, direccion, umbral_pullback=0.3):
     return False
 
 # =========================
-# CONFIRMACIÓN DE CRUCE DE EMA
+# CONFIRMACIÓN DE CRUCE DE EMA (ventana ampliada)
 # =========================
-def confirmar_cruce_ema(df, direccion, ventana=2):
+def confirmar_cruce_ema(df, direccion, ventana=3):
     if len(df) < ventana + 1:
         return False
     for i in range(1, ventana + 1):
@@ -315,30 +375,9 @@ def confirmar_cruce_ema(df, direccion, ventana=2):
     return False
 
 # =========================
-# DETECCIÓN DE RUPTURA DE PULLBACK
-# =========================
-def detectar_ruptura_pullback(df, direccion):
-    """
-    Detecta si el precio ha roto el nivel del pullback (máximo en CALL, mínimo en PUT).
-    """
-    if len(df) < 5:
-        return False
-    ultimas = df.iloc[-5:]
-    precio_actual = ultimas['close'].iloc[-1]
-    if direccion == 'CALL':
-        maximo_reciente = ultimas['high'].max()
-        return precio_actual > maximo_reciente
-    else:
-        minimo_reciente = ultimas['low'].min()
-        return precio_actual < minimo_reciente
-
-# =========================
 # EVALUAR ACTIVO EN SEGUIMIENTO (para señal)
 # =========================
-def evaluar_activo_seguimiento(api, asset, direccion_esperada, umbral_pullback=0.3, ventana_cruce=2):
-    """
-    Retorna (lista_para_entrar, direccion, fuerza, estrategia)
-    """
+def evaluar_activo_seguimiento(api, asset, direccion_esperada, umbral_pullback=0.2, ventana_cruce=3):
     try:
         candles = api.get_candles(asset, 300, 100, time.time())
         if not candles or len(candles) < 50:
@@ -351,34 +390,41 @@ def evaluar_activo_seguimiento(api, asset, direccion_esperada, umbral_pullback=0
             return False, None, 0, None
 
         df = calcular_indicadores(df)
-        # Verificar que la dirección sigue siendo la misma
-        conteo = {'CALL': 0, 'PUT': 0}
+        # Verificar que la dirección se mantiene (usando consenso rápido)
+        direccion_actual, _ = None, 0
+        votos_call = 0
+        votos_put = 0
         for _, funcion in ESTRATEGIAS:
             try:
-                direc = funcion(df)
-                if direc:
-                    conteo[direc] += 1
+                d, _ = funcion(df)
+                if d == 'CALL':
+                    votos_call += 1
+                elif d == 'PUT':
+                    votos_put += 1
             except:
                 continue
-        direccion_actual = 'CALL' if conteo['CALL'] > conteo['PUT'] else 'PUT' if conteo['PUT'] > conteo['CALL'] else None
+        if votos_call > votos_put:
+            direccion_actual = 'CALL'
+        elif votos_put > votos_call:
+            direccion_actual = 'PUT'
+        else:
+            direccion_actual = direccion_esperada  # si hay empate, mantener la esperada
+
         if direccion_actual != direccion_esperada:
             return False, None, 0, None
 
-        # Detectar condiciones
-        pullback = detectar_pullback(df, direccion_esperada, umbral_pullback)
-        cruce = confirmar_cruce_ema(df, direccion_esperada, ventana_cruce)
-        ruptura = detectar_ruptura_pullback(df, direccion_esperada)
+        pullback = detectar_pullback(df, direccion_actual, umbral_pullback)
+        cruce = confirmar_cruce_ema(df, direccion_actual, ventana_cruce)
 
-        # La señal es válida si hay pullback y (cruce o ruptura)
-        lista_para_entrar = pullback and (cruce or ruptura)
-        estrategia = f"Pullback + {'cruce EMA' if cruce else 'ruptura de nivel'}"
-        return lista_para_entrar, direccion_esperada, df['adx'].iloc[-1], estrategia
+        lista_para_entrar = pullback and cruce
+        estrategia = f"Pullback ({umbral_pullback} ATR) + cruce EMA (ventana {ventana_cruce})"
+        return lista_para_entrar, direccion_actual, 0, estrategia
     except Exception as e:
         logger.error(f"Error en seguimiento de {asset}: {e}")
         return False, None, 0, None
 
 # =========================
-# OBTENER ACTIVOS ABIERTOS
+# OBTENER ACTIVOS ABIERTOS (con fallback)
 # =========================
 def obtener_activos_abiertos(api, tipo_mercado="AMBOS"):
     try:
@@ -393,28 +439,37 @@ def obtener_activos_abiertos(api, tipo_mercado="AMBOS"):
                         activos.append(asset)
                     elif tipo_mercado == 'AMBOS':
                         activos.append(asset)
+        logger.info(f"Se obtuvieron {len(activos)} activos abiertos")
         if not activos:
-            return FALLBACK_ACTIVOS
+            logger.warning("Usando lista de activos predeterminada (fallback)")
+            if tipo_mercado == 'OTC':
+                return [a for a in FALLBACK_ACTIVOS if '-OTC' in a]
+            elif tipo_mercado == 'REAL':
+                return [a for a in FALLBACK_ACTIVOS if '-OTC' not in a]
+            else:
+                return FALLBACK_ACTIVOS
         return activos
     except Exception as e:
         logger.error(f"Error obteniendo activos: {e}")
         return FALLBACK_ACTIVOS
 
 # =========================
-# SELECCIONAR EL MEJOR ACTIVO
+# SELECCIONAR EL MEJOR ACTIVO DE UNA RONDA
 # =========================
-def seleccionar_mejor_activo(api, lista_activos, min_consenso=2):
+def seleccionar_mejor_activo(api, lista_activos, min_estrategias=2):
+    """
+    Elige el activo con mayor puntuación que tenga al menos min_estrategias votos en la dirección ganadora.
+    """
     mejores = []
     for asset in lista_activos:
         try:
-            res = evaluar_activo_seleccion(api, asset, min_consenso)
-            if res:
+            res = evaluar_activo_seleccion(api, asset)
+            if res and (res['votos_call'] + res['votos_put']) >= min_estrategias:
                 mejores.append(res)
             time.sleep(0.1)
         except:
             continue
     if not mejores:
         return None
-    # Ordenar por consenso descendente y luego por fuerza
-    mejores.sort(key=lambda x: (x['consenso'], x['fuerza']), reverse=True)
+    mejores.sort(key=lambda x: x['puntuacion'], reverse=True)
     return mejores[0]
