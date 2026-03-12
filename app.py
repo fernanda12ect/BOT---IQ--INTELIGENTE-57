@@ -12,13 +12,13 @@ from bot import (
 )
 
 st.set_page_config(
-    page_title="NEUROTRADER - SEGUIMIENTO CONTINUO",
+    page_title="NEUROTRADER - AVISO DE CAMBIO",
     page_icon="🧠",
     layout="wide",
     initial_sidebar_state="expanded"
 )
 
-# Estilos CSS
+# Estilos CSS (igual que antes)
 st.markdown("""
 <style>
     .stApp { background-color: #0b0f17; color: #e0e0e0; }
@@ -51,6 +51,13 @@ st.markdown("""
         margin-bottom: 10px;
         border-left: 4px solid #00a3ff;
     }
+    .warning-card {
+        background-color: #3a1e1e;
+        border-left: 4px solid #ff4b4b;
+        padding: 10px;
+        margin: 5px 0;
+        border-radius: 5px;
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -66,7 +73,11 @@ if 'saldo' not in st.session_state:
 if 'monitoreando' not in st.session_state:
     st.session_state.monitoreando = False
 if 'activo_actual' not in st.session_state:
-    st.session_state.activo_actual = None  # dict con info del activo
+    st.session_state.activo_actual = None  # dict con info del activo actual
+if 'activo_proximo' not in st.session_state:
+    st.session_state.activo_proximo = None  # dict con info del próximo activo (si hay cambio programado)
+if 'cambio_programado' not in st.session_state:
+    st.session_state.cambio_programado = None  # timestamp del cambio
 if 'ultima_senal' not in st.session_state:
     st.session_state.ultima_senal = None
 if 'log' not in st.session_state:
@@ -101,6 +112,8 @@ def desconectar():
     st.session_state.conectado = False
     st.session_state.monitoreando = False
     st.session_state.activo_actual = None
+    st.session_state.activo_proximo = None
+    st.session_state.cambio_programado = None
 
 # Sidebar
 with st.sidebar:
@@ -127,7 +140,9 @@ with st.sidebar:
     min_votos = st.slider("Mínimo de estrategias para seleccionar", 1, 5, 2, 1,
                           help="El activo debe tener al menos este número de estrategias en la misma dirección")
     umbral_fuerza = st.slider("Umbral de fuerza para mantener activo", 0, 100, 50, 5,
-                              help="Si la fuerza (promedio de pesos) baja de este valor, se busca otro activo")
+                              help="Si la fuerza baja de este valor, se buscará un reemplazo")
+    tiempo_aviso = st.slider("Tiempo de aviso para cambio (minutos)", 5, 60, 20, 5,
+                             help="Minutos antes del cambio para notificar el nuevo activo")
     anticipacion = st.slider("Anticipación de señal (segundos)", 0, 30, 20, 5,
                              help="Tiempo antes del cierre de la vela para mostrar la señal")
 
@@ -137,26 +152,16 @@ with st.sidebar:
             if st.button("▶️ INICIAR MONITOREO", use_container_width=True, type="primary"):
                 st.session_state.monitoreando = True
                 st.session_state.log.append("🚀 Monitoreo iniciado")
-                # Seleccionar el primer activo
                 with st.spinner("Buscando el mejor activo..."):
                     activos = obtener_activos_abiertos(st.session_state.api, tipo_mercado)
                     mejor = seleccionar_mejor_activo(st.session_state.api, activos, min_votos)
                     if mejor:
                         st.session_state.activo_actual = mejor
                         st.session_state.log.append(f"✅ Activo seleccionado: {mejor['asset']} (votos CALL/PUT: {mejor['votos_call']}/{mejor['votos_put']}, fuerza {mejor['fuerza']:.1f})")
-                        # Calcular próxima evaluación (cada 5 minutos, sincronizado con el cierre de vela)
                         now = datetime.now(ecuador)
-                        # Próximo cierre de vela de 5 minutos (redondear hacia arriba)
-                        minutos = now.minute
-                        resto = minutos % 5
-                        if resto == 0:
-                            # Estamos justo en el cierre, esperar 5 minutos
-                            prox = now + timedelta(minutes=5)
-                        else:
-                            prox = now + timedelta(minutes=(5 - resto))
+                        prox = now + timedelta(minutes=5)
                         prox = prox.replace(second=0, microsecond=0)
                         st.session_state.proxima_evaluacion = prox
-                        st.session_state.log.append(f"⏳ Próxima evaluación en {prox.strftime('%H:%M:%S')}")
                     else:
                         st.session_state.log.append("⚠️ No se encontró ningún activo con suficientes estrategias.")
                 st.rerun()
@@ -170,7 +175,6 @@ with st.sidebar:
 
 # Área principal
 if st.session_state.conectado:
-    # Métricas
     col1, col2, col3 = st.columns(3)
     with col1:
         st.metric("Saldo", f"${st.session_state.saldo:.2f}")
@@ -187,13 +191,25 @@ if st.session_state.conectado:
         a = st.session_state.activo_actual
         st.markdown(f"""
         <div class="asset-box">
-            <strong>🎯 ACTIVO EN SEGUIMIENTO:</strong> {a['asset']}<br>
+            <strong>🎯 ACTIVO ACTUAL:</strong> {a['asset']}<br>
             <strong>Dirección:</strong> {'🔵 COMPRA' if a['direccion'] == 'CALL' else '🔴 VENTA'}<br>
             <strong>Votos CALL/PUT:</strong> {a['votos_call']} / {a['votos_put']}<br>
             <strong>Fuerza:</strong> {a['fuerza']:.1f}<br>
             <strong>Estrategias:</strong> {', '.join(a['estrategias'][:5])}{'...' if len(a['estrategias'])>5 else ''}
         </div>
         """, unsafe_allow_html=True)
+
+    # Aviso de próximo cambio
+    if st.session_state.activo_proximo and st.session_state.cambio_programado:
+        tiempo_restante = (st.session_state.cambio_programado - datetime.now(ecuador)).total_seconds() / 60
+        if tiempo_restante > 0:
+            st.markdown(f"""
+            <div class="warning-card">
+                ⚠️ **PRÓXIMO CAMBIO PROGRAMADO**<br>
+                Nuevo activo: {st.session_state.activo_proximo['asset']} (votos: {st.session_state.activo_proximo['votos_call']}/{st.session_state.activo_proximo['votos_put']}, fuerza {st.session_state.activo_proximo['fuerza']:.1f})<br>
+                Cambio en: {int(tiempo_restante)} minutos.
+            </div>
+            """, unsafe_allow_html=True)
 
     # Señal generada
     if st.session_state.ultima_senal:
@@ -219,16 +235,26 @@ if st.session_state.conectado:
     if st.session_state.monitoreando and st.session_state.activo_actual:
         now = datetime.now(ecuador)
 
-        # Si hay próxima evaluación y ya es hora
+        # Si hay cambio programado y ya es hora, realizar el cambio
+        if st.session_state.cambio_programado and now >= st.session_state.cambio_programado:
+            if st.session_state.activo_proximo:
+                st.session_state.activo_actual = st.session_state.activo_proximo
+                st.session_state.log.append(f"🔄 Cambio realizado: Nuevo activo {st.session_state.activo_actual['asset']}")
+                st.session_state.activo_proximo = None
+                st.session_state.cambio_programado = None
+                st.rerun()
+            else:
+                st.session_state.cambio_programado = None
+
+        # Evaluación periódica (cada 5 minutos)
         if st.session_state.proxima_evaluacion and now >= st.session_state.proxima_evaluacion:
             # Evaluar el activo actual
             res = evaluar_activo(st.session_state.api, st.session_state.activo_actual['asset'])
             if res:
-                # Actualizar datos
                 st.session_state.activo_actual = res
                 # Verificar si sigue siendo rentable
                 if res['fuerza'] >= umbral_fuerza and (res['votos_call'] + res['votos_put']) >= min_votos:
-                    # Generar señal para la próxima vela
+                    # Generar señal
                     entrada = now + timedelta(seconds=anticipacion)
                     entrada_str = entrada.strftime("%H:%M:%S")
                     vencimiento = (entrada + timedelta(minutes=5)).strftime("%H:%M:%S")
@@ -243,28 +269,21 @@ if st.session_state.conectado:
                     }
                     st.session_state.log.append(f"🚀 SEÑAL GENERADA: {res['asset']} - {res['direccion']} a las {entrada_str}")
                 else:
-                    # El activo perdió fuerza, buscar otro
-                    st.session_state.log.append(f"⚠️ {res['asset']} perdió fuerza (fuerza {res['fuerza']:.1f}). Buscando otro...")
-                    activos = obtener_activos_abiertos(st.session_state.api, tipo_mercado)
-                    mejor = seleccionar_mejor_activo(st.session_state.api, activos, min_votos)
-                    if mejor:
-                        st.session_state.activo_actual = mejor
-                        st.session_state.log.append(f"✅ Nuevo activo seleccionado: {mejor['asset']}")
-                    else:
-                        st.session_state.activo_actual = None
-                        st.session_state.log.append("⚠️ No se encontró ningún activo.")
+                    # El activo perdió fuerza, buscar un reemplazo si no hay uno programado
+                    if st.session_state.activo_proximo is None:
+                        st.session_state.log.append(f"⚠️ {res['asset']} perdió fuerza (fuerza {res['fuerza']:.1f}). Buscando reemplazo...")
+                        activos = obtener_activos_abiertos(st.session_state.api, tipo_mercado)
+                        mejor = seleccionar_mejor_activo(st.session_state.api, activos, min_votos)
+                        if mejor:
+                            st.session_state.activo_proximo = mejor
+                            st.session_state.cambio_programado = now + timedelta(minutes=tiempo_aviso)
+                            st.session_state.log.append(f"📅 Cambio programado a {mejor['asset']} para {st.session_state.cambio_programado.strftime('%H:%M')}")
+                        else:
+                            st.session_state.log.append("⚠️ No se encontró ningún reemplazo. Continuando con el actual...")
             else:
-                # Error al evaluar, descartar activo
-                st.session_state.log.append(f"❌ Error evaluando {st.session_state.activo_actual['asset']}. Buscando otro...")
-                activos = obtener_activos_abiertos(st.session_state.api, tipo_mercado)
-                mejor = seleccionar_mejor_activo(st.session_state.api, activos, min_votos)
-                if mejor:
-                    st.session_state.activo_actual = mejor
-                    st.session_state.log.append(f"✅ Nuevo activo seleccionado: {mejor['asset']}")
-                else:
-                    st.session_state.activo_actual = None
+                st.session_state.log.append(f"❌ Error evaluando {st.session_state.activo_actual['asset']}")
 
-            # Calcular próxima evaluación (siguiente vela de 5 minutos)
+            # Programar próxima evaluación (siguiente vela de 5 minutos)
             prox = now + timedelta(minutes=5)
             prox = prox.replace(second=0, microsecond=0)
             st.session_state.proxima_evaluacion = prox
@@ -272,7 +291,7 @@ if st.session_state.conectado:
             time.sleep(1)
             st.rerun()
         else:
-            # Esperar hasta la próxima evaluación
+            # Mostrar tiempo restante para próxima evaluación
             if st.session_state.proxima_evaluacion:
                 segundos_restantes = (st.session_state.proxima_evaluacion - now).total_seconds()
                 if segundos_restantes > 0:
@@ -280,7 +299,6 @@ if st.session_state.conectado:
                     time.sleep(1)
                     st.rerun()
                 else:
-                    # Ya pasó la hora, forzar reevaluación
                     st.rerun()
             else:
                 # Si no hay próxima evaluación, calcularla
