@@ -18,7 +18,7 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# Estilos CSS
+# Estilos CSS (igual que antes)
 st.markdown("""
 <style>
     .stApp { background-color: #0b0f17; color: #e0e0e0; }
@@ -99,7 +99,9 @@ def conectar(email, password):
             saldo = api.get_balance()
             st.session_state.saldo = saldo if saldo is not None else 0.0
             st.session_state.log.append(f"✅ Conectado - Saldo: {st.session_state.saldo}")
-            st.session_state.activos_totales = obtener_activos_abiertos(api, "AMBOS", "binarias")
+            # Obtener activos al conectar
+            st.session_state.activos_totales = obtener_activos_abiertos(api, "AMBOS")
+            st.session_state.log.append(f"📊 Total activos disponibles: {len(st.session_state.activos_totales)}")
             return True
         else:
             st.error(f"Error: {reason}")
@@ -138,22 +140,16 @@ with st.sidebar:
     st.markdown("### ⚙️ Configuración de mercado")
 
     tipo_mercado = st.selectbox("Tipo de mercado", ["OTC", "REAL", "AMBOS"], index=2)
-    tipo_opcion = st.selectbox("Tipo de opción", ["binarias", "digitales", "blitz"], index=0,
-                               help="Selecciona el tipo de activo a analizar")
-
-    if tipo_opcion == "blitz":
-        st.info("Modo Blitz: analizando índices de volatilidad (simulado)")
-
     st.markdown("---")
     st.markdown("### ⚙️ Parámetros de estrategia")
-    umbral_adx = st.slider("Umbral ADX", 10, 30, 18, 1,
-                           help="ADX mínimo para considerar tendencia")
+    umbral_adx = st.slider("Umbral ADX mínimo", 5, 25, 12, 1,
+                           help="ADX mínimo para considerar tendencia (valores más bajos capturan más activos)")
+    min_puntuacion = st.slider("Puntuación mínima (ADX)", 5, 25, 12, 1,
+                               help="ADX mínimo para seleccionar un activo")
     umbral_pullback = st.slider("Umbral pullback (fracción de ATR)", 0.1, 1.0, 0.3, 0.05,
-                                help="Movimiento mínimo en contra de la tendencia para considerar pullback")
+                                help="Movimiento mínimo en contra de la tendencia")
     ventana_cruce = st.slider("Ventana para cruce de EMA (velas)", 1, 5, 2, 1,
                               help="Número de velas hacia atrás para buscar cruce")
-    min_puntuacion = st.slider("Puntuación mínima para selección", 10, 50, 20, 5,
-                               help="Valor más bajo = más activos candidatos")
     tamaño_ronda = st.slider("Activos por ronda", 5, 50, 15, 5)
     pausa_entre_rondas = st.slider("Pausa entre rondas (seg)", 5, 60, 15, 5)
     timeout_monitoreo = st.slider("Timeout de monitoreo (minutos)", 5, 30, 15, 1,
@@ -172,6 +168,9 @@ with st.sidebar:
                 st.session_state.señal = None
                 st.session_state.tiempo_inicio_monitoreo = None
                 st.session_state.log.append("🚀 Monitoreo iniciado")
+                # Actualizar activos antes de empezar
+                st.session_state.activos_totales = obtener_activos_abiertos(st.session_state.api, tipo_mercado)
+                st.session_state.log.append(f"📊 Activos disponibles para análisis: {len(st.session_state.activos_totales)}")
                 st.rerun()
         else:
             if st.button("⏹️ DETENER", use_container_width=True, type="secondary"):
@@ -195,10 +194,8 @@ if st.session_state.conectado:
     with col3:
         st.metric("Señales generadas", len([s for s in st.session_state.log if "SEÑAL" in s]))
 
-    # Alerta previa con cuenta regresiva
-    if st.session_state.alerta and 'tiempo_restante' in st.session_state:
-        st.markdown(f'<div class="alert-card">⏳ {st.session_state.alerta} - Tiempo restante: <span class="countdown">{st.session_state.tiempo_restante}s</span></div>', unsafe_allow_html=True)
-    elif st.session_state.alerta:
+    # Alerta previa
+    if st.session_state.alerta:
         st.markdown(f'<div class="alert-card">{st.session_state.alerta}</div>', unsafe_allow_html=True)
 
     # Señal definitiva
@@ -223,9 +220,9 @@ if st.session_state.conectado:
     if st.session_state.monitoreando:
         now = datetime.now(ecuador)
 
-        # Si ya tenemos un activo seleccionado y es un diccionario válido
+        # Si ya tenemos un activo seleccionado
         if st.session_state.activo_seleccionado and isinstance(st.session_state.activo_seleccionado, dict):
-            # Verificar si ya pasó el tiempo de la señal (para reiniciar después de 5 min)
+            # Verificar si ya pasó el tiempo de la señal
             if st.session_state.señal:
                 tiempo_transcurrido = (now - st.session_state.señal['timestamp']).total_seconds()
                 if tiempo_transcurrido > 300:  # 5 minutos
@@ -253,17 +250,12 @@ if st.session_state.conectado:
                         time.sleep(2)
                         st.rerun()
 
-                # Obtener la tendencia esperada del activo seleccionado
                 tendencia_esperada = st.session_state.activo_seleccionado.get('tendencia')
                 if tendencia_esperada is None:
-                    # Si no hay tendencia, descartar el activo
-                    st.session_state.log.append(f"❌ Activo {st.session_state.activo_seleccionado.get('asset')} sin tendencia definida. Buscando otro...")
                     st.session_state.activo_seleccionado = None
                     st.session_state.tiempo_inicio_monitoreo = None
-                    time.sleep(2)
                     st.rerun()
 
-                # Monitorear el activo seleccionado
                 lista_para_entrar, direccion, fuerza, estrategia = evaluar_activo_seguimiento(
                     st.session_state.api,
                     st.session_state.activo_seleccionado['asset'],
@@ -286,19 +278,20 @@ if st.session_state.conectado:
                     st.session_state.log.append(f"🚀 SEÑAL GENERADA: {st.session_state.activo_seleccionado['asset']} - {direccion} a las {entrada_str}")
                     st.rerun()
                 else:
-                    # Alerta de espera
-                    st.session_state.alerta = f"Esperando pullback y cruce para {st.session_state.activo_seleccionado['asset']} (tendencia {tendencia_esperada})..."
+                    st.session_state.alerta = f"Esperando pullback y cruce para {st.session_state.activo_seleccionado['asset']} (ADX {fuerza:.1f})..."
                     time.sleep(2)
                     st.rerun()
         else:
-            # No tenemos activo, buscamos uno nuevo
-            # Actualizar lista de activos según configuración
-            st.session_state.activos_totales = obtener_activos_abiertos(st.session_state.api, tipo_mercado, tipo_opcion)
+            # No hay activo seleccionado, buscar uno nuevo
+            # Actualizar activos según el tipo de mercado
             activos_totales = st.session_state.activos_totales
             if not activos_totales:
-                st.warning("No hay activos disponibles")
-                time.sleep(pausa_entre_rondas)
-                st.rerun()
+                st.session_state.activos_totales = obtener_activos_abiertos(st.session_state.api, tipo_mercado)
+                activos_totales = st.session_state.activos_totales
+                if not activos_totales:
+                    st.warning("No hay activos disponibles")
+                    time.sleep(pausa_entre_rondas)
+                    st.rerun()
 
             # Dividir en rondas
             inicio = st.session_state.indice_ronda * tamaño_ronda
@@ -323,7 +316,7 @@ if st.session_state.conectado:
                 st.session_state.tiempo_inicio_monitoreo = datetime.now(ecuador)
                 st.session_state.log.append(f"✅ Activo seleccionado: {mejor['asset']} ({mejor['tendencia']}, ADX {mejor['fuerza']:.1f})")
             else:
-                st.session_state.log.append("⚠️ No se encontraron activos con tendencia clara.")
+                st.session_state.log.append("⚠️ No se encontraron activos con tendencia clara en esta ronda.")
 
             st.session_state.indice_ronda += 1
             time.sleep(pausa_entre_rondas)
