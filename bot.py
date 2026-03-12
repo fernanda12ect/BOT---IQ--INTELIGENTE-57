@@ -58,12 +58,6 @@ def calcular_indicadores(df):
 # DETECCIÓN DE TENDENCIA (más flexible)
 # =========================
 def detectar_tendencia(df):
-    """
-    Detecta tendencia usando:
-    - Estructura de máximos y mínimos (ideal)
-    - Si no se cumple, usa ADX y alineación de EMAs
-    Retorna dirección y fuerza.
-    """
     if len(df) < 20:
         return None, 0
     ultimas = df.iloc[-20:]
@@ -82,10 +76,10 @@ def detectar_tendencia(df):
         fuerza = last['adx'] + (last['vol_ratio'] * 10)
         return 'PUT', fuerza
 
-    # Si no hay estructura perfecta, pero ADX > 25 y EMAs alineadas, consideramos tendencia
+    # Si no hay estructura perfecta, pero ADX > 25 y EMAs alineadas
     if last['adx'] > 25:
         if last['ema9'] > last['ema21']:
-            fuerza = last['adx'] + (last['vol_ratio'] * 5)  # fuerza menor
+            fuerza = last['adx'] + (last['vol_ratio'] * 5)
             return 'CALL', fuerza
         elif last['ema9'] < last['ema21']:
             fuerza = last['adx'] + (last['vol_ratio'] * 5)
@@ -198,15 +192,14 @@ def seleccionar_mejores_activos(api, tipo_mercado, num_activos):
     if not activos:
         return []
 
-    # Analizamos un número razonable (hasta 60 para tener más oportunidades)
     candidatos = activos[:60]
     resultados = []
     for asset in candidatos:
         try:
             direccion, fuerza, _, _, precio = evaluar_activo(api, asset, check_agotamiento=False)
-            if direccion and fuerza > 5:  # umbral más bajo (antes 10)
+            if direccion and fuerza > 5:
                 resultados.append((fuerza, asset, direccion))
-            time.sleep(0.1)  # pausa reducida
+            time.sleep(0.1)
         except:
             continue
 
