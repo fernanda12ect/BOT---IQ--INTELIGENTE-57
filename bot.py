@@ -12,20 +12,6 @@ logger = logging.getLogger(__name__)
 # Zona horaria de Ecuador
 ecuador = pytz.timezone("America/Guayaquil")
 
-# Lista de activos OTC por defecto (fallback)
-DEFAULT_OTC_ASSETS = [
-    "EURUSD-OTC", "GBPUSD-OTC", "AUDUSD-OTC", "USDJPY-OTC",
-    "USDCHF-OTC", "NZDUSD-OTC", "USDCAD-OTC", "GBPJPY-OTC",
-    "EURJPY-OTC", "AUDCAD-OTC", "AUDJPY-OTC", "EURGBP-OTC"
-]
-
-# Lista de activos REAL comunes (puede ampliarse)
-DEFAULT_REAL_ASSETS = [
-    "EURUSD", "GBPUSD", "AUDUSD", "USDJPY",
-    "USDCHF", "NZDUSD", "USDCAD", "GBPJPY",
-    "EURJPY", "AUDCAD", "AUDJPY", "EURGBP"
-]
-
 # =========================
 # INDICADORES COMUNES
 # =========================
@@ -52,7 +38,7 @@ def calcular_indicadores(df):
     tr = pd.concat([high - low, abs(high - close.shift()), abs(low - close.shift())], axis=1).max(axis=1)
     df['atr'] = tr.rolling(14).mean()
 
-    # ADX (simplificado)
+    # ADX
     df['tr'] = tr
     df['plus_dm'] = np.where((high - high.shift()) > (low.shift() - low), np.maximum(high - high.shift(), 0), 0)
     df['minus_dm'] = np.where((low.shift() - low) > (high - high.shift()), np.maximum(low.shift() - low, 0), 0)
@@ -72,24 +58,16 @@ def calcular_indicadores(df):
 # DETECCIÓN DE TENDENCIA POR MÁXIMOS Y MÍNIMOS
 # =========================
 def detectar_tendencia(df):
-    """
-    Analiza las últimas 20 velas para determinar tendencia alcista o bajista.
-    Retorna 'CALL', 'PUT' o None, junto con la fuerza de la tendencia.
-    """
     if len(df) < 20:
         return None, 0
     ultimas = df.iloc[-20:]
     highs = ultimas['high'].values
     lows = ultimas['low'].values
-    closes = ultimas['close'].values
 
-    # Tendencia alcista: máximos crecientes y mínimos crecientes
     alcista = all(highs[i] <= highs[i+1] for i in range(len(highs)-1)) and all(lows[i] <= lows[i+1] for i in range(len(lows)-1))
-    # Tendencia bajista: máximos decrecientes y mínimos decrecientes
     bajista = all(highs[i] >= highs[i+1] for i in range(len(highs)-1)) and all(lows[i] >= lows[i+1] for i in range(len(lows)-1))
 
     if alcista:
-        # Fuerza basada en ADX y volumen
         fuerza = df['adx'].iloc[-1] + (df['vol_ratio'].iloc[-1] * 10)
         return 'CALL', fuerza
     elif bajista:
@@ -101,9 +79,6 @@ def detectar_tendencia(df):
 # CONFIRMACIÓN DE CRUCE DE EMAs
 # =========================
 def confirmar_cruce_ema(df, direccion):
-    """
-    Verifica si hay cruce de EMAs en la dirección esperada en la última vela.
-    """
     if len(df) < 2:
         return False
     prev = df.iloc[-2]
@@ -117,27 +92,19 @@ def confirmar_cruce_ema(df, direccion):
 # DETECCIÓN DE AGOTAMIENTO DE LA FUERZA CONTRARIA
 # =========================
 def agotamiento_fuerza_contraria(df, direccion):
-    """
-    Analiza las últimas 3 velas para detectar si la fuerza contraria se ha debilitado.
-    Para CALL (tendencia alcista), queremos ver que las velas bajistas (si las hay) son pequeñas y con bajo volumen.
-    Para PUT, análogo.
-    """
     if len(df) < 3:
         return False
     ultimas = df.iloc[-3:]
     if direccion == 'CALL':
-        # Buscar velas bajistas en las últimas 3
         velas_bajistas = ultimas[ultimas['close'] < ultimas['open']]
         if len(velas_bajistas) > 0:
-            # Verificar que tengan cuerpo pequeño y volumen bajo
             for _, vela in velas_bajistas.iterrows():
                 cuerpo = vela['open'] - vela['close']
                 rango = vela['high'] - vela['low']
-                if cuerpo > rango * 0.3:  # cuerpo significativo
+                if cuerpo > rango * 0.3:
                     return False
-                if vela['vol_ratio'] > 1.2:  # volumen alto
+                if vela['vol_ratio'] > 1.2:
                     return False
-        # Además, la última vela debería ser alcista
         return ultimas.iloc[-1]['close'] > ultimas.iloc[-1]['open']
     else:
         velas_alcistas = ultimas[ultimas['close'] > ultimas['open']]
@@ -152,18 +119,9 @@ def agotamiento_fuerza_contraria(df, direccion):
         return ultimas.iloc[-1]['close'] < ultimas.iloc[-1]['open']
 
 # =========================
-# EVALUAR ACTIVO (para selección y seguimiento)
+# EVALUAR UN ACTIVO (para selección y seguimiento)
 # =========================
 def evaluar_activo(api, asset, check_agotamiento=False):
-    """
-    Obtiene datos, calcula tendencia, fuerza y si está listo para entrar.
-    Retorna:
-        - direccion (CALL/PUT/None)
-        - fuerza (float)
-        - lista_para_entrar (bool)
-        - estrategia (str) o None
-        - precio_actual (float)
-    """
     try:
         candles = api.get_candles(asset, 300, 100, time.time())
         if not candles or len(candles) < 50:
@@ -180,14 +138,9 @@ def evaluar_activo(api, asset, check_agotamiento=False):
         if direccion is None:
             return None, 0, False, None, df['close'].iloc[-1]
 
-        # Verificar cruce de EMA para confirmar entrada
         cruce = confirmar_cruce_ema(df, direccion)
         agotamiento = agotamiento_fuerza_contraria(df, direccion) if check_agotamiento else False
 
-        # Condiciones para señal:
-        # - Tendencia clara (fuerza mínima 15)
-        # - Cruce de EMA confirmado
-        # - Agotamiento de fuerza contraria (si se pide)
         lista_para_entrar = (fuerza > 15) and cruce
         if check_agotamiento:
             lista_para_entrar = lista_para_entrar and agotamiento
@@ -199,23 +152,53 @@ def evaluar_activo(api, asset, check_agotamiento=False):
         return None, 0, False, None, 0
 
 # =========================
-# SELECCIONAR LOS N MEJORES ACTIVOS
+# OBTENER ACTIVOS ABIERTOS DESDE IQ OPTION
 # =========================
-def seleccionar_mejores_activos(api, lista_activos, num_activos=3):
+def obtener_activos_abiertos(api, tipo_mercado):
     """
-    Analiza una lista de activos y retorna los num_activos con mayor fuerza de tendencia.
-    Devuelve una lista de tuplas (asset, direccion, fuerza).
+    tipo_mercado: 'OTC', 'REAL', 'AMBOS'
+    Retorna lista de activos abiertos en ese momento.
     """
-    if not lista_activos:
+    try:
+        open_time = api.get_all_open_time()
+        activos = []
+        if 'binary' in open_time:
+            for asset, data in open_time['binary'].items():
+                if data.get('open', False):
+                    if tipo_mercado == 'OTC' and '-OTC' in asset:
+                        activos.append(asset)
+                    elif tipo_mercado == 'REAL' and '-OTC' not in asset:
+                        activos.append(asset)
+                    elif tipo_mercado == 'AMBOS':
+                        activos.append(asset)
+        return activos
+    except Exception as e:
+        logger.error(f"Error obteniendo activos: {e}")
         return []
+
+# =========================
+# SELECCIONAR LOS MEJORES ACTIVOS EN TIEMPO REAL
+# =========================
+def seleccionar_mejores_activos(api, tipo_mercado, num_activos):
+    """
+    Analiza los activos abiertos en tiempo real y retorna los num_activos con mayor fuerza.
+    """
+    activos = obtener_activos_abiertos(api, tipo_mercado)
+    if not activos:
+        return []
+
+    # Analizamos un número razonable (por ejemplo, hasta 40)
+    candidatos = activos[:40]  # limitamos para no saturar
     resultados = []
-    for asset in lista_activos:
+    for asset in candidatos:
         try:
-            direccion, fuerza, _, _, _ = evaluar_activo(api, asset, check_agotamiento=False)
-            if direccion and fuerza > 10:
+            direccion, fuerza, _, _, precio = evaluar_activo(api, asset, check_agotamiento=False)
+            if direccion and fuerza > 10:  # umbral bajo para capturar
                 resultados.append((fuerza, asset, direccion))
-        except Exception as e:
-            logger.error(f"Error evaluando {asset} en selección: {e}")
-        time.sleep(0.2)
+            time.sleep(0.15)  # pausa para no saturar la API
+        except:
+            continue
+
     resultados.sort(reverse=True)
-    return [(asset, direc, fuerza) for fuerza, asset, direc in resultados[:num_activos]]
+    mejores = resultados[:num_activos]
+    return [(asset, direc, fuerza) for fuerza, asset, direc in mejores]
