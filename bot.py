@@ -12,6 +12,13 @@ logger = logging.getLogger(__name__)
 # Zona horaria de Ecuador
 ecuador = pytz.timezone("America/Guayaquil")
 
+# Lista de activos OTC por defecto (fallback)
+DEFAULT_OTC_ASSETS = [
+    "EURUSD-OTC", "GBPUSD-OTC", "AUDUSD-OTC", "USDJPY-OTC",
+    "USDCHF-OTC", "NZDUSD-OTC", "USDCAD-OTC", "GBPJPY-OTC",
+    "EURJPY-OTC", "AUDCAD-OTC", "AUDJPY-OTC", "EURGBP-OTC"
+]
+
 # =========================
 # INDICADORES COMUNES
 # =========================
@@ -138,7 +145,7 @@ def agotamiento_fuerza_contraria(df, direccion):
         return ultimas.iloc[-1]['close'] < ultimas.iloc[-1]['open']
 
 # =========================
-# EVALUAR ACTIVO PRINCIPAL (para selección y seguimiento)
+# EVALUAR ACTIVO (para selección y seguimiento)
 # =========================
 def evaluar_activo_principal(api, asset, check_agotamiento=False):
     """
@@ -171,10 +178,10 @@ def evaluar_activo_principal(api, asset, check_agotamiento=False):
         agotamiento = agotamiento_fuerza_contraria(df, direccion) if check_agotamiento else False
 
         # Condiciones para señal:
-        # - Tendencia clara (fuerza mínima)
+        # - Tendencia clara (fuerza mínima 15)
         # - Cruce de EMA confirmado
         # - Agotamiento de fuerza contraria (si se pide)
-        lista_para_entrar = (fuerza > 30) and cruce
+        lista_para_entrar = (fuerza > 15) and cruce
         if check_agotamiento:
             lista_para_entrar = lista_para_entrar and agotamiento
 
@@ -185,19 +192,36 @@ def evaluar_activo_principal(api, asset, check_agotamiento=False):
         return None, 0, False, None, 0
 
 # =========================
-# SELECCIONAR EL ACTIVO MÁS CONFIABLE
+# SELECCIONAR LOS N MEJORES ACTIVOS
 # =========================
-def seleccionar_mejor_activo(api, lista_activos, num_candidatos=10):
+def seleccionar_mejores_activos(api, lista_activos=None, num_activos=3, num_candidatos=30):
     """
-    Analiza una lista de activos y retorna el que tenga mayor fuerza de tendencia.
+    Analiza una lista de activos y retorna una lista con los num_activos mejores,
+    ordenados por fuerza descendente. Cada elemento es (asset, direccion, fuerza).
+    Si no hay suficientes, completa con activos OTC por defecto.
     """
-    mejores = []
+    if lista_activos is None or len(lista_activos) == 0:
+        lista_activos = DEFAULT_OTC_ASSETS
+
+    puntuados = []
     for asset in lista_activos[:num_candidatos]:
-        direccion, fuerza, _, _, precio = evaluar_activo_principal(api, asset, check_agotamiento=False)
-        if direccion and fuerza > 20:
-            mejores.append((fuerza, asset, direccion))
+        try:
+            direccion, fuerza, _, _, precio = evaluar_activo_principal(api, asset, check_agotamiento=False)
+            if direccion and fuerza > 10:
+                puntuados.append((fuerza, asset, direccion))
+        except Exception as e:
+            logger.error(f"Error en seleccionar_mejores_activos para {asset}: {e}")
         time.sleep(0.2)
-    if not mejores:
-        return None, None, 0
-    mejores.sort(reverse=True)
-    return mejores[0][1], mejores[0][2], mejores[0][0]  # asset, direccion, fuerza
+
+    puntuados.sort(reverse=True)
+    resultado = []
+    for i in range(min(num_activos, len(puntuados))):
+        fuerza, asset, direccion = puntuados[i]
+        resultado.append((asset, direccion, fuerza))
+
+    # Si no hay suficientes, completar con OTC por defecto (sin dirección)
+    while len(resultado) < num_activos:
+        fallback_asset = DEFAULT_OTC_ASSETS[len(resultado) % len(DEFAULT_OTC_ASSETS)]
+        resultado.append((fallback_asset, None, 0))
+
+    return resultado
