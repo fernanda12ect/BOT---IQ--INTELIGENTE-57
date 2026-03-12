@@ -19,6 +19,13 @@ DEFAULT_OTC_ASSETS = [
     "EURJPY-OTC", "AUDCAD-OTC", "AUDJPY-OTC", "EURGBP-OTC"
 ]
 
+# Lista de activos REAL comunes (puede ampliarse)
+DEFAULT_REAL_ASSETS = [
+    "EURUSD", "GBPUSD", "AUDUSD", "USDJPY",
+    "USDCHF", "NZDUSD", "USDCAD", "GBPJPY",
+    "EURJPY", "AUDCAD", "AUDJPY", "EURGBP"
+]
+
 # =========================
 # INDICADORES COMUNES
 # =========================
@@ -147,7 +154,7 @@ def agotamiento_fuerza_contraria(df, direccion):
 # =========================
 # EVALUAR ACTIVO (para selección y seguimiento)
 # =========================
-def evaluar_activo_principal(api, asset, check_agotamiento=False):
+def evaluar_activo(api, asset, check_agotamiento=False):
     """
     Obtiene datos, calcula tendencia, fuerza y si está listo para entrar.
     Retorna:
@@ -194,34 +201,21 @@ def evaluar_activo_principal(api, asset, check_agotamiento=False):
 # =========================
 # SELECCIONAR LOS N MEJORES ACTIVOS
 # =========================
-def seleccionar_mejores_activos(api, lista_activos=None, num_activos=3, num_candidatos=30):
+def seleccionar_mejores_activos(api, lista_activos, num_activos=3):
     """
-    Analiza una lista de activos y retorna una lista con los num_activos mejores,
-    ordenados por fuerza descendente. Cada elemento es (asset, direccion, fuerza).
-    Si no hay suficientes, completa con activos OTC por defecto.
+    Analiza una lista de activos y retorna los num_activos con mayor fuerza de tendencia.
+    Devuelve una lista de tuplas (asset, direccion, fuerza).
     """
-    if lista_activos is None or len(lista_activos) == 0:
-        lista_activos = DEFAULT_OTC_ASSETS
-
-    puntuados = []
-    for asset in lista_activos[:num_candidatos]:
+    if not lista_activos:
+        return []
+    resultados = []
+    for asset in lista_activos:
         try:
-            direccion, fuerza, _, _, precio = evaluar_activo_principal(api, asset, check_agotamiento=False)
+            direccion, fuerza, _, _, _ = evaluar_activo(api, asset, check_agotamiento=False)
             if direccion and fuerza > 10:
-                puntuados.append((fuerza, asset, direccion))
+                resultados.append((fuerza, asset, direccion))
         except Exception as e:
-            logger.error(f"Error en seleccionar_mejores_activos para {asset}: {e}")
+            logger.error(f"Error evaluando {asset} en selección: {e}")
         time.sleep(0.2)
-
-    puntuados.sort(reverse=True)
-    resultado = []
-    for i in range(min(num_activos, len(puntuados))):
-        fuerza, asset, direccion = puntuados[i]
-        resultado.append((asset, direccion, fuerza))
-
-    # Si no hay suficientes, completar con OTC por defecto (sin dirección)
-    while len(resultado) < num_activos:
-        fallback_asset = DEFAULT_OTC_ASSETS[len(resultado) % len(DEFAULT_OTC_ASSETS)]
-        resultado.append((fallback_asset, None, 0))
-
-    return resultado
+    resultados.sort(reverse=True)
+    return [(asset, direc, fuerza) for fuerza, asset, direc in resultados[:num_activos]]
