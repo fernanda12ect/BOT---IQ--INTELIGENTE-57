@@ -55,59 +55,72 @@ def calcular_indicadores(df):
     return df
 
 # =========================
-# DETECCIÓN DE TENDENCIA (usando EMAs y ADX)
+# DETECCIÓN DE TENDENCIA (flexible)
 # =========================
 def detectar_tendencia(df):
+    """
+    Retorna la dirección de la tendencia ('CALL'/'PUT') y su fuerza (ADX)
+    si se cumplen: ADX > 20 y EMAs alineadas (ema9 > ema21 para CALL, inverso para PUT)
+    """
     if len(df) < 50:
         return None, 0
     last = df.iloc[-1]
-    # Tendencia alcista: EMA9 > EMA21 y ADX > 25
-    if last['ema9'] > last['ema21'] and last['adx'] > 25:
-        return 'CALL', last['adx'] + (last['vol_ratio'] * 5)
-    # Tendencia bajista: EMA9 < EMA21 y ADX > 25
-    elif last['ema9'] < last['ema21'] and last['adx'] > 25:
-        return 'PUT', last['adx'] + (last['vol_ratio'] * 5)
-    else:
-        return None, 0
+    if last['adx'] > 20:
+        if last['ema9'] > last['ema21']:
+            return 'CALL', last['adx']
+        elif last['ema9'] < last['ema21']:
+            return 'PUT', last['adx']
+    return None, 0
 
 # =========================
-# DETECCIÓN DE RETROCESO (precio moviéndose en contra de la tendencia)
+# DETECCIÓN DE RETROCESO
 # =========================
 def detectar_retroceso(df, tendencia):
     """
-    Detecta si el precio se está moviendo en contra de la tendencia principal.
-    Retorna True si está en retroceso.
+    Analiza las últimas 5 velas para ver si ha ocurrido un retroceso contra la tendencia.
+    Retorna True si el precio se ha movido en contra al menos un 0.5 * ATR y luego se ha estabilizado.
     """
     if len(df) < 5:
         return False
     ultimas = df.iloc[-5:]
+    precio_actual = ultimas['close'].iloc[-1]
+    atr_medio = df['atr'].iloc[-1]
+
     if tendencia == 'CALL':
-        # En tendencia alcista, retroceso es cuando el precio baja
-        return all(ultimas['close'].iloc[i] >= ultimas['close'].iloc[i+1] for i in range(4))
-    else:
-        # En tendencia bajista, retroceso es cuando el precio sube
-        return all(ultimas['close'].iloc[i] <= ultimas['close'].iloc[i+1] for i in range(4))
+        # Retroceso bajista: precio baja respecto al máximo reciente
+        maximo_reciente = ultimas['high'].max()
+        if maximo_reciente - precio_actual > 0.5 * atr_medio:
+            return True
+    else:  # PUT
+        # Retroceso alcista: precio sube respecto al mínimo reciente
+        minimo_reciente = ultimas['low'].min()
+        if precio_actual - minimo_reciente > 0.5 * atr_medio:
+            return True
+    return False
 
 # =========================
-# CONFIRMACIÓN DE CRUCE DE EMAs
+# CONFIRMACIÓN DE CRUCE DE EMA
 # =========================
 def confirmar_cruce_ema(df, tendencia):
     """
-    Verifica si en la última vela se ha producido un cruce de EMA9 y EMA21 en la dirección de la tendencia.
+    Verifica si ha ocurrido un cruce de EMAs en la dirección de la tendencia en la última vela.
     """
     if len(df) < 2:
         return False
-    prev = df.iloc[-2]
     last = df.iloc[-1]
+    prev = df.iloc[-2]
     if tendencia == 'CALL':
         return prev['ema9'] <= prev['ema21'] and last['ema9'] > last['ema21']
     else:
         return prev['ema9'] >= prev['ema21'] and last['ema9'] < last['ema21']
 
 # =========================
-# EVALUAR ACTIVO PARA SELECCIÓN (solo tendencia)
+# EVALUAR UN ACTIVO PARA SELECCIÓN
 # =========================
 def evaluar_activo_seleccion(api, asset):
+    """
+    Versión ligera para selección inicial: solo verifica tendencia y devuelve puntuación.
+    """
     try:
         candles = api.get_candles(asset, 300, 100, time.time())
         if not candles or len(candles) < 50:
@@ -121,48 +134,56 @@ def evaluar_activo_seleccion(api, asset):
 
         df = calcular_indicadores(df)
         tendencia, fuerza = detectar_tendencia(df)
-
         if tendencia is None:
             return None
 
+        # Puntuación simple: fuerza (ADX) + bonus por volumen
+        puntuacion = fuerza + (df['vol_ratio'].iloc[-1] * 10)
         return {
             'asset': asset,
             'tendencia': tendencia,
             'fuerza': fuerza,
-            'precio': df['close'].iloc[-1],
-            'df': df  # guardamos para usar en seguimiento
+            'puntuacion': puntuacion,
+            'precio': df['close'].iloc[-1]
         }
     except Exception as e:
         logger.error(f"Error evaluando {asset}: {e}")
         return None
 
 # =========================
-# EVALUAR ACTIVO EN SEGUIMIENTO (retroceso y cruce)
+# EVALUAR UN ACTIVO EN SEGUIMIENTO (con retroceso y cruce)
 # =========================
-def evaluar_activo_seguimiento(api, asset, tendencia_principal):
+def evaluar_activo_seguimiento(api, asset, tendencia_esperada):
     """
-    Evalúa si el activo está en retroceso y si se ha producido un cruce de EMAs.
-    Retorna (en_retroceso, cruce_confirmado, precio_actual)
+    Para un activo ya seleccionado, verifica si hay retroceso y cruce de EMA.
+    Retorna: (lista_para_entrar, direccion, fuerza, estrategia) o (False, None, 0, None)
     """
     try:
-        candles = api.get_candles(asset, 300, 50, time.time())  # menos velas para rapidez
-        if not candles or len(candles) < 20:
-            return False, False, 0
+        candles = api.get_candles(asset, 300, 100, time.time())
+        if not candles or len(candles) < 50:
+            return False, None, 0, None
         df = pd.DataFrame(candles)
         for col in ['open', 'max', 'min', 'close', 'volume']:
             df[col] = pd.to_numeric(df[col], errors='coerce')
         df.dropna(inplace=True)
-        if len(df) < 20:
-            return False, False, 0
+        if len(df) < 50:
+            return False, None, 0, None
 
         df = calcular_indicadores(df)
-        en_retroceso = detectar_retroceso(df, tendencia_principal)
-        cruce = confirmar_cruce_ema(df, tendencia_principal)
-        precio = df['close'].iloc[-1]
-        return en_retroceso, cruce, precio
+        tendencia_actual, fuerza = detectar_tendencia(df)
+        if tendencia_actual != tendencia_esperada:
+            # La tendencia cambió, ya no es válido
+            return False, None, 0, None
+
+        retroceso = detectar_retroceso(df, tendencia_actual)
+        cruce = confirmar_cruce_ema(df, tendencia_actual)
+
+        lista_para_entrar = retroceso and cruce
+        estrategia = f"Retroceso + cruce EMA en tendencia {'alcista' if tendencia_actual == 'CALL' else 'bajista'}"
+        return lista_para_entrar, tendencia_actual, fuerza, estrategia
     except Exception as e:
         logger.error(f"Error en seguimiento de {asset}: {e}")
-        return False, False, 0
+        return False, None, 0, None
 
 # =========================
 # OBTENER ACTIVOS ABIERTOS
@@ -186,19 +207,22 @@ def obtener_activos_abiertos(api, tipo_mercado):
         return []
 
 # =========================
-# SELECCIONAR EL MEJOR ACTIVO (por fuerza de tendencia)
+# SELECCIONAR EL MEJOR ACTIVO DE UNA RONDA
 # =========================
-def seleccionar_mejor_activo(api, lista_activos, min_fuerza=30):
+def seleccionar_mejor_activo(api, lista_activos, min_puntuacion=20):
+    """
+    Elige el activo con mayor puntuación (ADX + volumen) que supere el mínimo.
+    """
     mejores = []
     for asset in lista_activos:
         try:
             res = evaluar_activo_seleccion(api, asset)
-            if res and res['fuerza'] >= min_fuerza:
+            if res and res['puntuacion'] >= min_puntuacion:
                 mejores.append(res)
             time.sleep(0.1)
         except:
             continue
     if not mejores:
         return None
-    mejores.sort(key=lambda x: x['fuerza'], reverse=True)
+    mejores.sort(key=lambda x: x['puntuacion'], reverse=True)
     return mejores[0]
