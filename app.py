@@ -8,7 +8,7 @@ from plotly.subplots import make_subplots
 from iqoptionapi.stable_api import IQ_Option
 from bot import (
     evaluar_activo,
-    seleccionar_mejores_activos,   # nombre correcto
+    seleccionar_mejores_activos,
     obtener_activos_abiertos,
     calcular_indicadores
 )
@@ -21,7 +21,7 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# Estilos CSS (igual que antes)
+# Estilos CSS
 st.markdown("""
 <style>
     .stApp { background-color: #0b0f17; color: #e0e0e0; }
@@ -274,17 +274,11 @@ if st.session_state.conectado:
     with st.expander("📋 Historial de señales", expanded=True):
         if st.session_state.señales:
             df_hist = pd.DataFrame(st.session_state.señales)
-            st.dataframe(df_hist[['fecha', 'activo', 'direccion', 'entrada', 'vencimiento']],
-                         use_container_width=True, hide_index=True)
-        else:
-            st.info("No hay señales en el historial.")
-
-    with st.expander("📋 Log de eventos", expanded=False):
-        for linea in st.session_state.log[-20:]:
-            st.text(linea)
-
-    # Lógica de monitoreo
-_container_width=True, hide_index=True)
+            st.dataframe(
+                df_hist[['fecha', 'activo', 'direccion', 'entrada', 'vencimiento']],
+                use_container_width=True,
+                hide_index=True
+            )
         else:
             st.info("No hay señales en el historial.")
 
@@ -294,12 +288,6 @@ _container_width=True, hide_index=True)
 
     # Lógica de monitoreo
     if st.session_state.monitoreando and st.session_state.activos_seleccionados:
-        now = datetime.now(ecuador)
-
-        for asset in st.session_state.activos_seleccionados:
-            estado = st.session_state.estados.get(asset, {})
-            if estado.get('estado') == 'OPERACION_EN_CURSO':
-                vencimiento = datetime.strptime(estado['hora_vencimiento'], "%H:%M    if st.session_state.monitoreando and st.session_state.activos_seleccionados:
         now = datetime.now(ecuador)
 
         for asset in st.session_state.activos_seleccionados:
