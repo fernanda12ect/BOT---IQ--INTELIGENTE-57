@@ -2,6 +2,7 @@ import pandas as pd
 import numpy as np
 import time
 import logging
+import random
 from datetime import datetime
 import pytz
 
@@ -55,117 +56,73 @@ def calcular_indicadores(df):
     return df
 
 # =========================
-# DETECCIÓN DE TENDENCIA (menos estricta)
+# DETECCIÓN DE TENDENCIA POR MÁXIMOS Y MÍNIMOS
 # =========================
-def detectar_tendencia_suave(df):
-    """
-    Detecta tendencia permitiendo pequeñas correcciones.
-    Retorna 'CALL', 'PUT' o None, junto con fuerza.
-    """
+def detectar_tendencia(df):
     if len(df) < 20:
         return None, 0
     ultimas = df.iloc[-20:]
     highs = ultimas['high'].values
     lows = ultimas['low'].values
-    closes = ultimas['close'].values
 
-    # Tendencia alcista: la mayoría de los máximos y mínimos son crecientes
-    count_high_creciente = sum(highs[i] <= highs[i+1] for i in range(len(highs)-1))
-    count_low_creciente = sum(lows[i] <= lows[i+1] for i in range(len(lows)-1))
-    if count_high_creciente >= 12 and count_low_creciente >= 12:
+    alcista = all(highs[i] <= highs[i+1] for i in range(len(highs)-1)) and all(lows[i] <= lows[i+1] for i in range(len(lows)-1))
+    bajista = all(highs[i] >= highs[i+1] for i in range(len(highs)-1)) and all(lows[i] >= lows[i+1] for i in range(len(lows)-1))
+
+    if alcista:
         fuerza = df['adx'].iloc[-1] + (df['vol_ratio'].iloc[-1] * 10)
         return 'CALL', fuerza
-
-    # Tendencia bajista
-    count_high_decreciente = sum(highs[i] >= highs[i+1] for i in range(len(highs)-1))
-    count_low_decreciente = sum(lows[i] >= lows[i+1] for i in range(len(lows)-1))
-    if count_high_decreciente >= 12 and count_low_decreciente >= 12:
+    elif bajista:
         fuerza = df['adx'].iloc[-1] + (df['vol_ratio'].iloc[-1] * 10)
         return 'PUT', fuerza
-
     return None, 0
 
 # =========================
-# ESTRATEGIA 1: CRUCE DE EMAs
+# CONFIRMACIÓN DE CRUCE DE EMAs
 # =========================
-def estrategia_ema_crossover(df):
+def confirmar_cruce_ema(df, direccion):
     if len(df) < 2:
-        return None
+        return False
     prev = df.iloc[-2]
     last = df.iloc[-1]
-    if prev['ema9'] <= prev['ema21'] and last['ema9'] > last['ema21'] and last['vol_ratio'] > 1.2:
-        return 'CALL', 60 + last['vol_ratio']*5
-    if prev['ema9'] >= prev['ema21'] and last['ema9'] < last['ema21'] and last['vol_ratio'] > 1.2:
-        return 'PUT', 60 + last['vol_ratio']*5
-    return None
+    if direccion == 'CALL':
+        return prev['ema9'] <= prev['ema21'] and last['ema9'] > last['ema21']
+    else:
+        return prev['ema9'] >= prev['ema21'] and last['ema9'] < last['ema21']
 
 # =========================
-# ESTRATEGIA 2: RSI EXTREMO
+# DETECCIÓN DE AGOTAMIENTO DE LA FUERZA CONTRARIA
 # =========================
-def estrategia_rsi_extremo(df):
-    last = df.iloc[-1]
-    if last['rsi'] < 30 and last['vol_ratio'] > 1.5:
-        return 'CALL', 70
-    if last['rsi'] > 70 and last['vol_ratio'] > 1.5:
-        return 'PUT', 70
-    return None
+def agotamiento_fuerza_contraria(df, direccion):
+    if len(df) < 3:
+        return False
+    ultimas = df.iloc[-3:]
+    if direccion == 'CALL':
+        velas_bajistas = ultimas[ultimas['close'] < ultimas['open']]
+        if len(velas_bajistas) > 0:
+            for _, vela in velas_bajistas.iterrows():
+                cuerpo = vela['open'] - vela['close']
+                rango = vela['high'] - vela['low']
+                if cuerpo > rango * 0.3:
+                    return False
+                if vela['vol_ratio'] > 1.2:
+                    return False
+        return ultimas.iloc[-1]['close'] > ultimas.iloc[-1]['open']
+    else:
+        velas_alcistas = ultimas[ultimas['close'] > ultimas['open']]
+        if len(velas_alcistas) > 0:
+            for _, vela in velas_alcistas.iterrows():
+                cuerpo = vela['close'] - vela['open']
+                rango = vela['high'] - vela['low']
+                if cuerpo > rango * 0.3:
+                    return False
+                if vela['vol_ratio'] > 1.2:
+                    return False
+        return ultimas.iloc[-1]['close'] < ultimas.iloc[-1]['open']
 
 # =========================
-# ESTRATEGIA 3: TENDENCIA SUAVE + VOLUMEN
+# EVALUAR UN ACTIVO (para selección y seguimiento)
 # =========================
-def estrategia_tendencia_suave(df):
-    direccion, fuerza = detectar_tendencia_suave(df)
-    if direccion and fuerza > 15:
-        return direccion, fuerza
-    return None
-
-# =========================
-# ESTRATEGIA 4: BREAKOUT DE MÁXIMO/MÍNIMO RECIENTE
-# =========================
-def estrategia_breakout(df):
-    if len(df) < 10:
-        return None
-    ultimas10 = df.iloc[-10:]
-    maximo10 = ultimas10['high'].max()
-    minimo10 = ultimas10['low'].min()
-    last = df.iloc[-1]
-    if last['close'] > maximo10 and last['vol_ratio'] > 1.5:
-        return 'CALL', 65
-    if last['close'] < minimo10 and last['vol_ratio'] > 1.5:
-        return 'PUT', 65
-    return None
-
-# =========================
-# ESTRATEGIA 5: SOPORTE/RESISTENCIA CON VELA
-# =========================
-def estrategia_sr_vela(df):
-    if len(df) < 20:
-        return None
-    ultimas20 = df.iloc[-20:]
-    soporte = ultimas20['low'].min()
-    resistencia = ultimas20['high'].max()
-    last = df.iloc[-1]
-    # Cerca de soporte y vela alcista
-    if last['close'] <= soporte * 1.001 and last['close'] > last['open'] and last['vol_ratio'] > 1.3:
-        return 'CALL', 60
-    # Cerca de resistencia y vela bajista
-    if last['close'] >= resistencia * 0.999 and last['close'] < last['open'] and last['vol_ratio'] > 1.3:
-        return 'PUT', 60
-    return None
-
-# Lista de todas las estrategias
-ESTRATEGIAS = [
-    estrategia_ema_crossover,
-    estrategia_rsi_extremo,
-    estrategia_tendencia_suave,
-    estrategia_breakout,
-    estrategia_sr_vela
-]
-
-# =========================
-# EVALUAR UN ACTIVO CON MÚLTIPLES ESTRATEGIAS
-# =========================
-def evaluar_activo(api, asset):
+def evaluar_activo(api, asset, check_agotamiento=False):
     try:
         candles = api.get_candles(asset, 300, 100, time.time())
         if not candles or len(candles) < 50:
@@ -178,34 +135,31 @@ def evaluar_activo(api, asset):
             return None, 0, False, None, 0
 
         df = calcular_indicadores(df)
+        direccion, fuerza = detectar_tendencia(df)
 
-        mejor_senal = None
-        mejor_fuerza = 0
-        mejor_estrategia = ""
-        for estrategia in ESTRATEGIAS:
-            try:
-                res = estrategia(df)
-                if res:
-                    direccion, fuerza = res
-                    if fuerza > mejor_fuerza:
-                        mejor_fuerza = fuerza
-                        mejor_senal = direccion
-                        mejor_estrategia = estrategia.__name__
-            except:
-                continue
+        cruce = confirmar_cruce_ema(df, direccion) if direccion else False
+        agotamiento = agotamiento_fuerza_contraria(df, direccion) if direccion and check_agotamiento else False
 
-        if mejor_senal:
-            return mejor_senal, mejor_fuerza, True, mejor_estrategia, df['close'].iloc[-1]
-        else:
-            return None, 0, False, None, df['close'].iloc[-1]
+        lista_para_entrar = False
+        if direccion:
+            lista_para_entrar = (fuerza > 10) and cruce
+            if check_agotamiento:
+                lista_para_entrar = lista_para_entrar and agotamiento
+
+        estrategia = f"Tendencia {'alcista' if direccion == 'CALL' else 'bajista'}" if direccion else "Sin tendencia"
+        return direccion, fuerza, lista_para_entrar, estrategia, df['close'].iloc[-1]
     except Exception as e:
         logger.error(f"Error evaluando {asset}: {e}")
         return None, 0, False, None, 0
 
 # =========================
-# OBTENER ACTIVOS ABIERTOS (con reintentos)
+# OBTENER ACTIVOS ABIERTOS DESDE IQ OPTION
 # =========================
 def obtener_activos_abiertos(api, tipo_mercado):
+    """
+    tipo_mercado: 'OTC', 'REAL', 'AMBOS'
+    Retorna lista de activos abiertos en ese momento.
+    """
     try:
         open_time = api.get_all_open_time()
         activos = []
@@ -224,31 +178,39 @@ def obtener_activos_abiertos(api, tipo_mercado):
         return []
 
 # =========================
-# SELECCIONAR MEJORES ACTIVOS POR RONDAS
+# SELECCIONAR ACTIVOS (siempre devuelve algo, aunque sea aleatorio)
 # =========================
-def seleccionar_mejores_activos_por_rondas(api, tipo_mercado, num_activos, max_por_ronda=10):
+def seleccionar_activos(api, tipo_mercado, num_activos):
     """
-    Analiza los activos en rondas de max_por_ronda para no saturar la API.
-    Retorna lista de (asset, direccion, fuerza) de los mejores.
+    Intenta obtener los mejores activos por fuerza, si no, devuelve una muestra aleatoria.
     """
-    todos = obtener_activos_abiertos(api, tipo_mercado)
-    if not todos:
+    activos = obtener_activos_abiertos(api, tipo_mercado)
+    if not activos:
         return []
 
-    # Mezclamos para no sesgar
-    import random
-    random.shuffle(todos)
-
+    # Analizamos hasta 40 para puntuar
+    candidatos = activos[:40]
     resultados = []
-    for i in range(0, len(todos), max_por_ronda):
-        ronda = todos[i:i+max_por_ronda]
-        for asset in ronda:
-            direccion, fuerza, _, _, _ = evaluar_activo(api, asset)
-            if direccion and fuerza > 5:  # umbral bajo
-                resultados.append((fuerza, asset, direccion))
-            time.sleep(0.2)  # pausa entre activos
-        # Pequeña pausa entre rondas
-        time.sleep(1)
+    for asset in candidatos:
+        try:
+            direccion, fuerza, _, _, precio = evaluar_activo(api, asset, check_agotamiento=False)
+            # Incluimos aunque no tenga tendencia (direccion None), con fuerza 0
+            resultados.append((fuerza if direccion else 0, asset, direccion))
+            time.sleep(0.1)
+        except:
+            resultados.append((0, asset, None))
+            continue
 
-    resultados.sort(reverse=True)
-    return [(asset, direc, fuerza) for fuerza, asset, direc in resultados[:num_activos]]
+    # Ordenar por fuerza descendente
+    resultados.sort(reverse=True, key=lambda x: x[0])
+    # Tomar los primeros num_activos
+    seleccionados = resultados[:num_activos]
+    # Si hay menos de los solicitados, completar con activos aleatorios de los no analizados
+    if len(seleccionados) < num_activos and len(activos) > len(candidatos):
+        restantes = [a for a in activos if a not in [r[1] for r in seleccionados]]
+        random.shuffle(restantes)
+        for a in restantes[:num_activos - len(seleccionados)]:
+            seleccionados.append((0, a, None))
+
+    # Devolver lista de tuplas (asset, direccion, fuerza)
+    return [(asset, direc, fuerza) for fuerza, asset, direc in seleccionados]
