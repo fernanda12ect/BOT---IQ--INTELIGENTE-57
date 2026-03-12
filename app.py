@@ -66,7 +66,7 @@ if 'saldo' not in st.session_state:
 if 'monitoreando' not in st.session_state:
     st.session_state.monitoreando = False
 if 'activo_seleccionado' not in st.session_state:
-    st.session_state.activo_seleccionado = None  # el activo que estamos siguiendo
+    st.session_state.activo_seleccionado = None
 if 'alerta' not in st.session_state:
     st.session_state.alerta = None
 if 'señal' not in st.session_state:
@@ -78,7 +78,7 @@ if 'indice_ronda' not in st.session_state:
 if 'activos_totales' not in st.session_state:
     st.session_state.activos_totales = []
 if 'estrategias_activas' not in st.session_state:
-    st.session_state.estrategias_activas = [nombre for nombre, _ in ESTRATEGIAS]  # todas activas por defecto
+    st.session_state.estrategias_activas = [nombre for nombre, _ in ESTRATEGIAS]
 
 # Zona horaria
 ecuador = pytz.timezone("America/Guayaquil")
@@ -203,11 +203,10 @@ if st.session_state.conectado:
     if st.session_state.monitoreando:
         now = datetime.now(ecuador)
 
-        # Si ya tenemos un activo seleccionado, lo monitoreamos
+        # Si ya tenemos un activo seleccionado
         if st.session_state.activo_seleccionado:
             # Verificar si ya pasó el tiempo de la señal (para reiniciar después de 5 min)
             if st.session_state.señal:
-                # Esperar 5 minutos desde la señal
                 tiempo_transcurrido = (now - st.session_state.señal['timestamp']).total_seconds()
                 if tiempo_transcurrido > 300:  # 5 minutos
                     st.session_state.activo_seleccionado = None
@@ -217,7 +216,6 @@ if st.session_state.conectado:
                     time.sleep(2)
                     st.rerun()
                 else:
-                    # Aún en periodo de espera
                     time.sleep(5)
                     st.rerun()
             else:
@@ -227,22 +225,20 @@ if st.session_state.conectado:
                     st.session_state.activo_seleccionado['asset'],
                     st.session_state.estrategias_activas
                 )
-                if resultado and resultado['lista_para_entrar']:
-                    # Generar señal definitiva
+                if resultado and resultado['lista_para_entrar'] and resultado['direccion']:
                     entrada = now.strftime("%H:%M:%S")
                     vencimiento = (now + timedelta(minutes=5)).strftime("%H:%M:%S")
                     st.session_state.señal = {
                         'asset': resultado['asset'],
-                        'direccion': "CALL",  # habría que determinar dirección real
+                        'direccion': resultado['direccion'],
                         'entrada': entrada,
                         'vencimiento': vencimiento,
                         'estrategias': resultado['estrategias'],
                         'timestamp': now
                     }
-                    st.session_state.log.append(f"🚀 SEÑAL GENERADA: {resultado['asset']} a las {entrada}")
+                    st.session_state.log.append(f"🚀 SEÑAL GENERADA: {resultado['asset']} - {resultado['direccion']} a las {entrada}")
                     st.rerun()
                 else:
-                    # Seguir esperando
                     time.sleep(2)
                     st.rerun()
         else:
@@ -275,17 +271,16 @@ if st.session_state.conectado:
                 st.session_state.api,
                 ronda_actual,
                 st.session_state.estrategias_activas,
-                min_puntuacion=200  # al menos 2 estrategias
+                min_puntuacion=200
             )
 
             if mejor:
                 st.session_state.activo_seleccionado = mejor
-                st.session_state.alerta = f"🔔 {mejor['asset']} - Preparándose: cumple {len(mejor['estrategias'])} estrategias. Señal inminente en breve."
+                st.session_state.alerta = f"🔔 {mejor['asset']} - Preparándose: cumple {len(mejor['estrategias'])} estrategias. Señal inminente."
                 st.session_state.log.append(f"✅ Activo seleccionado: {mejor['asset']} (puntuación {mejor['puntuacion']})")
             else:
                 st.session_state.log.append("⚠️ No se encontraron activos con suficientes estrategias.")
 
-            # Avanzar a la siguiente ronda
             st.session_state.indice_ronda += 1
             time.sleep(pausa_entre_rondas)
             st.rerun()
