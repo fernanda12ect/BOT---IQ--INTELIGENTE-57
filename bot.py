@@ -65,7 +65,6 @@ def detectar_tendencia(df):
     lows = ultimas['low'].values
     last = df.iloc[-1]
 
-    # Estructura perfecta
     alcista_perfecta = all(highs[i] <= highs[i+1] for i in range(len(highs)-1)) and all(lows[i] <= lows[i+1] for i in range(len(lows)-1))
     bajista_perfecta = all(highs[i] >= highs[i+1] for i in range(len(highs)-1)) and all(lows[i] >= lows[i+1] for i in range(len(lows)-1))
 
@@ -76,7 +75,6 @@ def detectar_tendencia(df):
         fuerza = last['adx'] + (last['vol_ratio'] * 10)
         return 'PUT', fuerza
 
-    # Si no hay estructura perfecta, pero ADX > 25 y EMAs alineadas
     if last['adx'] > 25:
         if last['ema9'] > last['ema21']:
             fuerza = last['adx'] + (last['vol_ratio'] * 5)
@@ -131,7 +129,7 @@ def agotamiento_fuerza_contraria(df, direccion):
         return ultimas.iloc[-1]['close'] < ultimas.iloc[-1]['open']
 
 # =========================
-# EVALUAR UN ACTIVO (para selección y seguimiento)
+# EVALUAR UN ACTIVO
 # =========================
 def evaluar_activo(api, asset, check_agotamiento=False):
     try:
@@ -164,7 +162,7 @@ def evaluar_activo(api, asset, check_agotamiento=False):
         return None, 0, False, None, 0
 
 # =========================
-# OBTENER ACTIVOS ABIERTOS DESDE IQ OPTION
+# OBTENER ACTIVOS ABIERTOS
 # =========================
 def obtener_activos_abiertos(api, tipo_mercado):
     try:
@@ -185,7 +183,7 @@ def obtener_activos_abiertos(api, tipo_mercado):
         return []
 
 # =========================
-# SELECCIONAR LOS MEJORES ACTIVOS EN TIEMPO REAL
+# SELECCIONAR MEJORES ACTIVOS
 # =========================
 def seleccionar_mejores_activos(api, tipo_mercado, num_activos):
     activos = obtener_activos_abiertos(api, tipo_mercado)
