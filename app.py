@@ -1,6 +1,7 @@
 import streamlit as st
 import pandas as pd
 import time
+import random
 from datetime import datetime, timedelta
 import pytz
 import plotly.graph_objects as go
@@ -8,20 +9,20 @@ from plotly.subplots import make_subplots
 from iqoptionapi.stable_api import IQ_Option
 from bot import (
     evaluar_activo,
-    seleccionar_mejores_activos,
+    seleccionar_mejores_activos_por_rondas,
     obtener_activos_abiertos,
     calcular_indicadores
 )
 
 # Configuración de página
 st.set_page_config(
-    page_title="NEUROTRADER MULTI",
+    page_title="NEUROTRADER PRO",
     page_icon="🧠",
     layout="wide",
     initial_sidebar_state="expanded"
 )
 
-# Estilos CSS
+# Estilos CSS (igual que antes)
 st.markdown("""
 <style>
     .stApp { background-color: #0b0f17; color: #e0e0e0; }
@@ -66,11 +67,11 @@ if 'saldo' not in st.session_state:
 if 'monitoreando' not in st.session_state:
     st.session_state.monitoreando = False
 if 'activos_seleccionados' not in st.session_state:
-    st.session_state.activos_seleccionados = []  # lista de activos en seguimiento
+    st.session_state.activos_seleccionados = []
 if 'estados' not in st.session_state:
-    st.session_state.estados = {}  # dict {asset: {estado, direccion, fuerza, hora_entrada, hora_vencimiento, ultima_actualizacion}}
+    st.session_state.estados = {}
 if 'señales' not in st.session_state:
-    st.session_state.señales = []  # historial de señales
+    st.session_state.señales = []
 if 'log' not in st.session_state:
     st.session_state.log = []
 if 'datos_grafico' not in st.session_state:
@@ -135,7 +136,7 @@ def crear_grafico_velas(df, activo):
 # BARRA LATERAL
 # =========================
 with st.sidebar:
-    st.markdown("## 🧠 NEUROTRADER MULTI")
+    st.markdown("## 🧠 NEUROTRADER PRO")
     st.markdown("---")
 
     st.markdown("### 🔌 Conexión IQ Option")
@@ -181,10 +182,9 @@ with st.sidebar:
             if st.button("▶️ INICIAR MONITOREO", use_container_width=True, type="primary"):
                 st.session_state.monitoreando = True
                 st.session_state.log.append("🚀 Monitoreo iniciado")
-                # Seleccionar los mejores activos dinámicamente
-                with st.spinner(f"Analizando activos {mercado} en tiempo real..."):
-                    seleccionados = seleccionar_mejores_activos(
-                        st.session_state.api, mercado, num_activos
+                with st.spinner(f"Analizando activos {mercado} en rondas..."):
+                    seleccionados = seleccionar_mejores_activos_por_rondas(
+                        st.session_state.api, mercado, num_activos, max_por_ronda=8
                     )
                     if seleccionados:
                         st.session_state.activos_seleccionados = [asset for asset, _, _ in seleccionados]
@@ -199,8 +199,7 @@ with st.sidebar:
                             }
                         st.session_state.log.append(f"✅ Activos seleccionados: {', '.join(st.session_state.activos_seleccionados)}")
                     else:
-                        st.session_state.log.append("⚠️ No se encontraron activos confiables en este momento.")
-                        st.session_state.activos_seleccionados = []
+                        st.session_state.log.append("⚠️ No se encontraron activos en esta ronda. Se reintentará automáticamente.")
                 st.rerun()
         else:
             if st.button("⏹️ DETENER MONITOREO", use_container_width=True, type="secondary"):
@@ -227,7 +226,7 @@ if st.session_state.conectado:
     with col3:
         st.metric("Señales generadas", len(st.session_state.señales))
 
-    # Mostrar activos en seguimiento y sus tarjetas de señal
+    # Mostrar activos en seguimiento y sus tarjetas
     if st.session_state.activos_seleccionados:
         st.subheader("📊 ACTIVOS EN SEGUIMIENTO")
         for asset in st.session_state.activos_seleccionados:
@@ -289,43 +288,36 @@ if st.session_state.conectado:
             st.text(linea)
 
     # =========================
-    # LÓGICA DE MONITOREO
+    # LÓGICA DE MONITOREO (similar a antes, pero usando evaluar_activo que ahora usa múltiples estrategias)
     # =========================
     if st.session_state.monitoreando and st.session_state.activos_seleccionados:
         now = datetime.now(ecuador)
-
-        # Revisar cada activo en seguimiento
         for asset in st.session_state.activos_seleccionados:
             estado = st.session_state.estados.get(asset, {})
             if estado.get('estado') == 'OPERACION_EN_CURSO':
-                # Verificar si ya venció
                 vencimiento = datetime.strptime(estado['hora_vencimiento'], "%H:%M:%S").time()
                 vencimiento_dt = datetime.combine(now.date(), vencimiento)
                 if vencimiento_dt < now:
                     vencimiento_dt += timedelta(days=1)
                 if now >= vencimiento_dt:
-                    # Operación vencida, volver a ESPERANDO
                     estado['estado'] = 'ESPERANDO'
                     estado['hora_entrada'] = None
                     estado['hora_vencimiento'] = None
                     st.session_state.log.append(f"✅ Operación finalizada para {asset}")
             else:
-                # Evaluar el activo
                 direccion, fuerza, lista_para_entrar, estrategia, precio = evaluar_activo(
-                    st.session_state.api, asset, check_agotamiento=True
+                    st.session_state.api, asset
                 )
                 if direccion is None:
-                    # El activo perdió tendencia, lo marcaremos para reemplazo después
-                    st.session_state.log.append(f"⚠️ {asset} perdió tendencia. Será reemplazado.")
+                    # El activo perdió toda señal, lo marcamos para reemplazo
+                    st.session_state.log.append(f"⚠️ {asset} perdió señal. Será reemplazado.")
                     continue
                 else:
-                    # Actualizar datos
                     estado['direccion'] = direccion
                     estado['fuerza'] = fuerza
                     estado['ultima_actualizacion'] = now
 
                     if lista_para_entrar and estado['estado'] == 'ESPERANDO':
-                        # Generar señal
                         hora_entrada = now.strftime("%H:%M:%S")
                         hora_venc = (now + timedelta(minutes=5)).strftime("%H:%M:%S")
                         estado['estado'] = 'LISTO'
@@ -341,22 +333,21 @@ if st.session_state.conectado:
                         })
                         st.session_state.log.append(f"📢 SEÑAL GENERADA: {asset} - {direccion} a las {hora_entrada}")
 
-        # Después de evaluar, podemos verificar si hay que reemplazar algún activo
+        # Reemplazar activos perdidos
         nuevos_activos = []
         for asset in st.session_state.activos_seleccionados:
             estado = st.session_state.estados.get(asset)
             if estado and estado.get('direccion') is not None:
                 nuevos_activos.append(asset)
             else:
-                # Este activo debe ser reemplazado
                 st.session_state.log.append(f"🔄 Buscando reemplazo para {asset}...")
-                # Buscamos un nuevo activo del mismo mercado
-                seleccionados = seleccionar_mejores_activos(
-                    st.session_state.api, mercado, 1  # solo uno de reemplazo
+                # Buscar un nuevo activo (rápido, solo uno)
+                reemplazo = seleccionar_mejores_activos_por_rondas(
+                    st.session_state.api, mercado, 1, max_por_ronda=5
                 )
-                if seleccionados:
-                    nuevo_asset, nueva_dir, nueva_fuerza = seleccionados[0]
-                    if nuevo_asset not in st.session_state.activos_seleccionados:
+                if reemplazo:
+                    nuevo_asset, nueva_dir, nueva_fuerza = reemplazo[0]
+                    if nuevo_asset not in nuevos_activos:
                         nuevos_activos.append(nuevo_asset)
                         st.session_state.estados[nuevo_asset] = {
                             'direccion': nueva_dir,
@@ -367,18 +358,16 @@ if st.session_state.conectado:
                             'ultima_actualizacion': now
                         }
                         st.session_state.log.append(f"✅ Nuevo activo añadido: {nuevo_asset}")
-                # Eliminar el viejo del dict de estados
                 if asset in st.session_state.estados:
                     del st.session_state.estados[asset]
 
         st.session_state.activos_seleccionados = nuevos_activos
-        time.sleep(5)  # pausa entre ciclos
+        time.sleep(5)
         st.rerun()
 
     elif st.session_state.monitoreando and not st.session_state.activos_seleccionados:
-        # No hay activos, intentar seleccionar de nuevo
         st.session_state.log.append("🔄 No hay activos, buscando nuevamente...")
-        seleccionados = seleccionar_mejores_activos(st.session_state.api, mercado, num_activos)
+        seleccionados = seleccionar_mejores_activos_por_rondas(st.session_state.api, mercado, num_activos, max_por_ronda=8)
         if seleccionados:
             st.session_state.activos_seleccionados = [asset for asset, _, _ in seleccionados]
             for asset, direc, fuerza in seleccionados:
