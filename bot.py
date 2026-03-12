@@ -48,6 +48,48 @@ def calcular_indicadores(df):
     df['dx'] = 100 * (abs(df['plus_di'] - df['minus_di']) / (df['plus_di'] + df['minus_di']))
     df['adx'] = df['dx'].rolling(14).mean()
 
+    # MACD
+    df['ema12'] = df['close'].ewm(span=12, adjust=False).mean()
+    df['ema26'] = df['close'].ewm(span=26, adjust=False).mean()
+    df['macd'] = df['ema12'] - df['ema26']
+    df['signal'] = df['macd'].ewm(span=9, adjust=False).mean()
+    df['hist'] = df['macd'] - df['signal']
+
+    # Bollinger Bands
+    df['bb_ma'] = df['close'].rolling(20).mean()
+    df['bb_std'] = df['close'].rolling(20).std()
+    df['bb_upper'] = df['bb_ma'] + 2 * df['bb_std']
+    df['bb_lower'] = df['bb_ma'] - 2 * df['bb_std']
+
+    # Stochastic
+    low14 = df['low'].rolling(14).min()
+    high14 = df['high'].rolling(14).max()
+    df['stoch_k'] = 100 * (df['close'] - low14) / (high14 - low14)
+    df['stoch_d'] = df['stoch_k'].rolling(3).mean()
+
+    # CCI
+    tp = (df['high'] + df['low'] + df['close']) / 3
+    sma_tp = tp.rolling(20).mean()
+    mad = tp.rolling(20).apply(lambda x: np.abs(x - x.mean()).mean())
+    df['cci'] = (tp - sma_tp) / (0.015 * mad)
+
+    # Parabolic SAR (aproximación simple)
+    df['sar'] = df['close'].shift(1)  # placeholder, necesitaríamos implementación completa
+
+    # Heiken Ashi
+    df['ha_close'] = (df['open'] + df['high'] + df['low'] + df['close']) / 4
+    df['ha_open'] = (df['open'].shift(1) + df['close'].shift(1)) / 2
+    df['ha_high'] = df[['high', 'ha_open', 'ha_close']].max(axis=1)
+    df['ha_low'] = df[['low', 'ha_open', 'ha_close']].min(axis=1)
+
+    # Alligator (simplificado)
+    df['jaw'] = df['close'].rolling(13).mean().shift(8)
+    df['teeth'] = df['close'].rolling(8).mean().shift(5)
+    df['lips'] = df['close'].rolling(5).mean().shift(3)
+
+    # Momentum
+    df['momentum'] = df['close'] - df['close'].shift(14)
+
     # Volumen promedio
     df['vol_avg'] = df['volume'].rolling(20).mean()
     df['vol_ratio'] = df['volume'] / df['vol_avg']
@@ -55,113 +97,174 @@ def calcular_indicadores(df):
     return df
 
 # =========================
-# DETECCIÓN DE TENDENCIA (aún más flexible)
+# 10 ESTRATEGIAS (cada una retorna un score entre 0 y 100)
 # =========================
-def detectar_tendencia(df):
-    if len(df) < 20:
-        return None, 0
-    ultimas = df.iloc[-20:]
-    highs = ultimas['high'].values
-    lows = ultimas['low'].values
-    last = df.iloc[-1]
-
-    # Estructura perfecta
-    alcista_perfecta = all(highs[i] <= highs[i+1] for i in range(len(highs)-1)) and all(lows[i] <= lows[i+1] for i in range(len(lows)-1))
-    bajista_perfecta = all(highs[i] >= highs[i+1] for i in range(len(highs)-1)) and all(lows[i] >= lows[i+1] for i in range(len(lows)-1))
-
-    if alcista_perfecta:
-        fuerza = last['adx'] + (last['vol_ratio'] * 10)
-        return 'CALL', fuerza
-    if bajista_perfecta:
-        fuerza = last['adx'] + (last['vol_ratio'] * 10)
-        return 'PUT', fuerza
-
-    # Si ADX > 20 y EMAs alineadas
-    if last['adx'] > 20:
-        if last['ema9'] > last['ema21']:
-            fuerza = last['adx'] + (last['vol_ratio'] * 5)
-            return 'CALL', fuerza
-        elif last['ema9'] < last['ema21']:
-            fuerza = last['adx'] + (last['vol_ratio'] * 5)
-            return 'PUT', fuerza
-
-    return None, 0
-
-# =========================
-# CONFIRMACIÓN DE CRUCE DE EMAs
-# =========================
-def confirmar_cruce_ema(df, direccion):
+def estrategia_1_ema_adx(df):
+    """Cruce de EMAs + ADX > 25"""
     if len(df) < 2:
-        return False
-    prev = df.iloc[-2]
+        return 0
     last = df.iloc[-1]
-    if direccion == 'CALL':
-        return prev['ema9'] <= prev['ema21'] and last['ema9'] > last['ema21']
-    else:
-        return prev['ema9'] >= prev['ema21'] and last['ema9'] < last['ema21']
+    prev = df.iloc[-2]
+    if prev['ema9'] <= prev['ema21'] and last['ema9'] > last['ema21'] and last['adx'] > 25:
+        return 100
+    if prev['ema9'] >= prev['ema21'] and last['ema9'] < last['ema21'] and last['adx'] > 25:
+        return 100
+    return 0
+
+def estrategia_2_macd_adx(df):
+    """MACD crossover + ADX < 25 o bajando"""
+    if len(df) < 2:
+        return 0
+    last = df.iloc[-1]
+    prev = df.iloc[-2]
+    if prev['macd'] <= prev['signal'] and last['macd'] > last['signal'] and last['hist'] > 0 and last['adx'] < 25:
+        return 100
+    if prev['macd'] >= prev['signal'] and last['macd'] < last['signal'] and last['hist'] < 0 and last['adx'] < 25:
+        return 100
+    return 0
+
+def estrategia_3_bb_rsi(df):
+    """Bollinger + RSI extremo"""
+    last = df.iloc[-1]
+    if last['close'] <= last['bb_lower'] and last['rsi'] < 30:
+        return 100
+    if last['close'] >= last['bb_upper'] and last['rsi'] > 70:
+        return 100
+    return 0
+
+def estrategia_4_sar_ema(df):
+    """Parabolic SAR + EMA 50 (simulado)"""
+    # Simplificación: usamos cruce de precio con una media
+    last = df.iloc[-1]
+    prev = df.iloc[-2]
+    if prev['close'] <= prev['ema50'] and last['close'] > last['ema50']:
+        return 100
+    if prev['close'] >= prev['ema50'] and last['close'] < last['ema50']:
+        return 100
+    return 0
+
+def estrategia_5_stoch_adx(df):
+    """Stochastic + ADX"""
+    if len(df) < 2:
+        return 0
+    last = df.iloc[-1]
+    prev = df.iloc[-2]
+    if prev['stoch_k'] < 20 and last['stoch_k'] > last['stoch_d'] and last['adx'] > 25:
+        return 100
+    if prev['stoch_k'] > 80 and last['stoch_k'] < last['stoch_d'] and last['adx'] > 25:
+        return 100
+    return 0
+
+def estrategia_6_supertrend_adx(df):
+    """Supertrend + ADX (simulado con EMAs)"""
+    last = df.iloc[-1]
+    if last['ema9'] > last['ema21'] and last['adx'] > 25:
+        return 100
+    if last['ema9'] < last['ema21'] and last['adx'] > 25:
+        return 100
+    return 0
+
+def estrategia_7_heiken_ashi_ema(df):
+    """Heiken Ashi + EMA 9"""
+    if len(df) < 2:
+        return 0
+    last = df.iloc[-1]
+    prev = df.iloc[-2]
+    if prev['ha_close'] > prev['ha_open'] and last['ha_close'] > last['ha_open'] and last['close'] > last['ema9']:
+        return 100
+    if prev['ha_close'] < prev['ha_open'] and last['ha_close'] < last['ha_open'] and last['close'] < last['ema9']:
+        return 100
+    return 0
+
+def estrategia_8_cci_bb(df):
+    """CCI + Bollinger"""
+    last = df.iloc[-1]
+    if last['cci'] > -100 and last['close'] <= last['bb_lower']:
+        return 100
+    if last['cci'] < 100 and last['close'] >= last['bb_upper']:
+        return 100
+    return 0
+
+def estrategia_9_alligator_momentum(df):
+    """Alligator + Momentum"""
+    last = df.iloc[-1]
+    if last['lips'] > last['teeth'] > last['jaw'] and last['momentum'] > 0:
+        return 100
+    if last['lips'] < last['teeth'] < last['jaw'] and last['momentum'] < 0:
+        return 100
+    return 0
+
+def estrategia_10_pivot_stoch(df):
+    """Pivot Points + Stochastic (simulado con niveles)"""
+    # No tenemos pivotes, usamos máximo/mínimo de 20 velas
+    last = df.iloc[-1]
+    max20 = df['high'].iloc[-20:].max()
+    min20 = df['low'].iloc[-20:].min()
+    if last['close'] < min20 * 1.002 and last['stoch_k'] < 20 and last['stoch_k'] > last['stoch_d']:
+        return 100
+    if last['close'] > max20 * 0.998 and last['stoch_k'] > 80 and last['stoch_k'] < last['stoch_d']:
+        return 100
+    return 0
+
+# Lista de estrategias (nombre, función)
+ESTRATEGIAS = [
+    ("EMA + ADX", estrategia_1_ema_adx),
+    ("MACD + ADX", estrategia_2_macd_adx),
+    ("BB + RSI", estrategia_3_bb_rsi),
+    ("SAR + EMA50", estrategia_4_sar_ema),
+    ("Stoch + ADX", estrategia_5_stoch_adx),
+    ("Supertrend + ADX", estrategia_6_supertrend_adx),
+    ("Heiken Ashi + EMA9", estrategia_7_heiken_ashi_ema),
+    ("CCI + BB", estrategia_8_cci_bb),
+    ("Alligator + Momentum", estrategia_9_alligator_momentum),
+    ("Pivot + Stoch", estrategia_10_pivot_stoch)
+]
 
 # =========================
-# DETECCIÓN DE AGOTAMIENTO DE LA FUERZA CONTRARIA
+# EVALUAR UN ACTIVO (retorna puntuación total y lista de estrategias cumplidas)
 # =========================
-def agotamiento_fuerza_contraria(df, direccion):
-    if len(df) < 3:
-        return False
-    ultimas = df.iloc[-3:]
-    if direccion == 'CALL':
-        velas_bajistas = ultimas[ultimas['close'] < ultimas['open']]
-        if len(velas_bajistas) > 0:
-            for _, vela in velas_bajistas.iterrows():
-                cuerpo = vela['open'] - vela['close']
-                rango = vela['high'] - vela['low']
-                if cuerpo > rango * 0.3:
-                    return False
-                if vela['vol_ratio'] > 1.2:
-                    return False
-        return ultimas.iloc[-1]['close'] > ultimas.iloc[-1]['open']
-    else:
-        velas_alcistas = ultimas[ultimas['close'] > ultimas['open']]
-        if len(velas_alcistas) > 0:
-            for _, vela in velas_alcistas.iterrows():
-                cuerpo = vela['close'] - vela['open']
-                rango = vela['high'] - vela['low']
-                if cuerpo > rango * 0.3:
-                    return False
-                if vela['vol_ratio'] > 1.2:
-                    return False
-        return ultimas.iloc[-1]['close'] < ultimas.iloc[-1]['open']
-
-# =========================
-# EVALUAR UN ACTIVO
-# =========================
-def evaluar_activo(api, asset, check_agotamiento=False):
+def evaluar_activo(api, asset):
     try:
         candles = api.get_candles(asset, 300, 100, time.time())
         if not candles or len(candles) < 50:
-            return None, 0, False, None, 0
+            return None
         df = pd.DataFrame(candles)
         for col in ['open', 'max', 'min', 'close', 'volume']:
             df[col] = pd.to_numeric(df[col], errors='coerce')
         df.dropna(inplace=True)
         if len(df) < 50:
-            return None, 0, False, None, 0
+            return None
 
         df = calcular_indicadores(df)
-        direccion, fuerza = detectar_tendencia(df)
-        if direccion is None:
-            return None, 0, False, None, df['close'].iloc[-1]
+        ultimo_precio = df['close'].iloc[-1]
 
-        cruce = confirmar_cruce_ema(df, direccion)
-        agotamiento = agotamiento_fuerza_contraria(df, direccion) if check_agotamiento else False
+        # Evaluar cada estrategia
+        puntuacion_total = 0
+        estrategias_cumplidas = []
+        for nombre, funcion in ESTRATEGIAS:
+            try:
+                score = funcion(df)
+                if score > 0:
+                    puntuacion_total += score
+                    estrategias_cumplidas.append(nombre)
+            except Exception as e:
+                continue
 
-        lista_para_entrar = (fuerza > 15) and cruce
-        if check_agotamiento:
-            lista_para_entrar = lista_para_entrar and agotamiento
+        # Calcular estabilidad (baja volatilidad)
+        volatilidad = (df['high'].iloc[-20:].max() - df['low'].iloc[-20:].min()) / df['close'].iloc[-1]
+        estable = volatilidad < 0.015  # 1.5% en 20 velas
 
-        estrategia = f"Tendencia {'alcista' if direccion == 'CALL' else 'bajista'}"
-        return direccion, fuerza, lista_para_entrar, estrategia, df['close'].iloc[-1]
+        return {
+            'asset': asset,
+            'puntuacion': puntuacion_total,
+            'estrategias': estrategias_cumplidas,
+            'estable': estable,
+            'precio': ultimo_precio,
+            'volatilidad': volatilidad
+        }
     except Exception as e:
         logger.error(f"Error evaluando {asset}: {e}")
-        return None, 0, False, None, 0
+        return None
 
 # =========================
 # OBTENER ACTIVOS ABIERTOS
@@ -185,24 +288,28 @@ def obtener_activos_abiertos(api, tipo_mercado):
         return []
 
 # =========================
-# SELECCIONAR MEJORES ACTIVOS
+# SELECCIONAR LOS MEJORES ACTIVOS DE UNA RONDA (hasta 2)
 # =========================
-def seleccionar_mejores_activos(api, tipo_mercado, num_activos):
-    activos = obtener_activos_abiertos(api, tipo_mercado)
-    if not activos:
-        return []
-
-    candidatos = activos[:80]  # más candidatos
+def seleccionar_mejores_de_ronda(api, lista_activos, max_activos=2):
+    """
+    Evalúa una lista de activos y retorna los mejores (hasta max_activos) basado en puntuación y estabilidad.
+    """
     resultados = []
-    for asset in candidatos:
+    for asset in lista_activos:
         try:
-            direccion, fuerza, _, _, precio = evaluar_activo(api, asset, check_agotamiento=False)
-            if direccion and fuerza > 3:  # umbral más bajo
-                resultados.append((fuerza, asset, direccion))
-            time.sleep(0.1)
+            res = evaluar_activo(api, asset)
+            if res and res['estable'] and res['puntuacion'] > 0:
+                resultados.append(res)
+            time.sleep(0.1)  # pausa entre llamadas
         except:
             continue
+    # Ordenar por puntuación descendente
+    resultados.sort(key=lambda x: x['puntuacion'], reverse=True)
+    return resultados[:max_activos]
 
-    resultados.sort(reverse=True)
-    mejores = resultados[:num_activos]
-    return [(asset, direc, fuerza) for fuerza, asset, direc in mejores]
+# =========================
+# GENERAR ALERTA PREVIA (simulada)
+# =========================
+def generar_alerta_previa(activo, estrategias):
+    """Genera un texto de alerta con tiempo estimado (aquí se podría calcular distancia a niveles)"""
+    return f"🔔 {activo} - Preparándose: cumple {len(estrategias)} estrategias. Señal inminente en ~2-3 min."
