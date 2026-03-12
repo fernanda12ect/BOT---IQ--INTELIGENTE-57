@@ -3,19 +3,16 @@ import pandas as pd
 import time
 from datetime import datetime, timedelta
 import pytz
-import plotly.graph_objects as go
-from plotly.subplots import make_subplots
 from iqoptionapi.stable_api import IQ_Option
 from bot import (
     evaluar_activo,
-    seleccionar_mejores_de_ronda,
+    seleccionar_mejor_activo,
     obtener_activos_abiertos,
-    generar_alerta_previa,
     ESTRATEGIAS
 )
 
 st.set_page_config(
-    page_title="NEUROTRADER RONDAS",
+    page_title="NEUROTRADER PRO",
     page_icon="🧠",
     layout="wide",
     initial_sidebar_state="expanded"
@@ -54,9 +51,6 @@ st.markdown("""
         margin-bottom: 10px;
         border-left: 4px solid #00a3ff;
     }
-    .strategy-checkbox {
-        color: white;
-    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -71,12 +65,12 @@ if 'saldo' not in st.session_state:
     st.session_state.saldo = 0.0
 if 'monitoreando' not in st.session_state:
     st.session_state.monitoreando = False
-if 'activos_seguimiento' not in st.session_state:
-    st.session_state.activos_seguimiento = []  # lista de activos seleccionados (máx 2)
-if 'alertas' not in st.session_state:
-    st.session_state.alertas = []
-if 'señales' not in st.session_state:
-    st.session_state.señales = []  # señales definitivas
+if 'activo_seleccionado' not in st.session_state:
+    st.session_state.activo_seleccionado = None  # el activo que estamos siguiendo
+if 'alerta' not in st.session_state:
+    st.session_state.alerta = None
+if 'señal' not in st.session_state:
+    st.session_state.señal = None
 if 'log' not in st.session_state:
     st.session_state.log = []
 if 'indice_ronda' not in st.session_state:
@@ -100,7 +94,6 @@ def conectar(email, password):
             saldo = api.get_balance()
             st.session_state.saldo = saldo if saldo is not None else 0.0
             st.session_state.log.append(f"✅ Conectado - Saldo: {st.session_state.saldo}")
-            # Obtener lista completa de activos
             st.session_state.activos_totales = obtener_activos_abiertos(api, "AMBOS")
             return True
         else:
@@ -114,14 +107,13 @@ def desconectar():
     st.session_state.api = None
     st.session_state.conectado = False
     st.session_state.monitoreando = False
-    st.session_state.activos_seguimiento = []
-    st.session_state.alertas = []
-    st.session_state.señales = []
-    st.session_state.log = []
+    st.session_state.activo_seleccionado = None
+    st.session_state.alerta = None
+    st.session_state.señal = None
 
 # Sidebar
 with st.sidebar:
-    st.markdown("## 🧠 NEUROTRADER RONDAS")
+    st.markdown("## 🧠 NEUROTRADER PRO")
     st.markdown("---")
     email = st.text_input("Correo electrónico")
     password = st.text_input("Contraseña", type="password")
@@ -140,10 +132,8 @@ with st.sidebar:
     st.markdown("---")
     st.markdown("### ⚙️ Configuración")
     mercado = st.selectbox("Mercado", ["OTC", "REAL", "AMBOS"], index=2)
-    tamaño_ronda = st.slider("Activos por ronda", 10, 30, 20, 5)
-    pausa_entre_rondas = st.slider("Pausa entre rondas (seg)", 10, 120, 30, 10)
-    intervalo_monitoreo = st.slider("Intervalo de monitoreo (seg)", 1, 10, 5, 1,
-                                    help="Cada cuántos segundos se reevalúan los activos en seguimiento")
+    tamaño_ronda = st.slider("Activos por ronda", 10, 50, 20, 5)
+    pausa_entre_rondas = st.slider("Pausa entre rondas (seg)", 5, 60, 15, 5)
 
     st.markdown("---")
     st.markdown("### 🎯 Estrategias activas")
@@ -157,12 +147,12 @@ with st.sidebar:
     st.markdown("---")
     if st.session_state.conectado:
         if not st.session_state.monitoreando:
-            if st.button("▶️ INICIAR MONITOREO", use_container_width=True, type="primary"):
+            if st.button("▶️ INICIAR", use_container_width=True, type="primary"):
                 st.session_state.monitoreando = True
                 st.session_state.indice_ronda = 0
-                st.session_state.activos_seguimiento = []
-                st.session_state.alertas = []
-                st.session_state.señales = []
+                st.session_state.activo_seleccionado = None
+                st.session_state.alerta = None
+                st.session_state.señal = None
                 st.session_state.log.append("🚀 Monitoreo iniciado")
                 st.rerun()
         else:
@@ -180,89 +170,83 @@ if st.session_state.conectado:
     with col1:
         st.metric("Saldo", f"${st.session_state.saldo:.2f}")
     with col2:
-        st.metric("Ronda actual", f"{st.session_state.indice_ronda + 1}")
+        if st.session_state.activo_seleccionado:
+            st.metric("Activo en seguimiento", st.session_state.activo_seleccionado['asset'])
+        else:
+            st.metric("Activo en seguimiento", "Ninguno")
     with col3:
-        st.metric("Señales generadas", len(st.session_state.señales))
+        st.metric("Señales generadas", len([s for s in st.session_state.log if "SEÑAL" in s]))
 
-    # Activos en seguimiento
-    if st.session_state.activos_seguimiento:
-        st.subheader("🎯 ACTIVOS EN SEGUIMIENTO (MÁX 2)")
-        for activo in st.session_state.activos_seguimiento:
-            st.markdown(f"""
-            <div class="asset-box">
-                <strong>{activo['asset']}</strong> | Puntuación: {activo['puntuacion']} | Estrategias: {', '.join(activo['estrategias'])}
-            </div>
-            """, unsafe_allow_html=True)
+    # Alerta previa
+    if st.session_state.alerta:
+        st.markdown(f'<div class="alert-card">{st.session_state.alerta}</div>', unsafe_allow_html=True)
 
-    # Alertas previas
-    if st.session_state.alertas:
-        st.subheader("🔔 ALERTAS PREVIAS")
-        for alerta in st.session_state.alertas[-5:]:
-            st.markdown(f'<div class="alert-card">{alerta}</div>', unsafe_allow_html=True)
+    # Señal definitiva
+    if st.session_state.señal:
+        card_class = "call-card" if st.session_state.señal['direccion'] == "CALL" else "put-card"
+        st.markdown(f"""
+        <div class="signal-card {card_class}">
+            <div class="signal-title">{'🔵 COMPRA' if st.session_state.señal['direccion'] == 'CALL' else '🔴 VENTA'}</div>
+            <div class="signal-detail"><strong>Activo:</strong> {st.session_state.señal['asset']}</div>
+            <div class="signal-detail"><strong>Entrada:</strong> {st.session_state.señal['entrada']}</div>
+            <div class="signal-detail"><strong>Vencimiento:</strong> {st.session_state.señal['vencimiento']}</div>
+            <div class="signal-detail"><strong>Estrategias:</strong> {', '.join(st.session_state.señal['estrategias'])}</div>
+        </div>
+        """, unsafe_allow_html=True)
 
-    # Señales definitivas
-    if st.session_state.señales:
-        st.subheader("🚀 SEÑALES LISTAS")
-        for señal in st.session_state.señales[-5:]:
-            card_class = "call-card" if señal['direccion'] == "CALL" else "put-card"
-            st.markdown(f"""
-            <div class="signal-card {card_class}">
-                <div class="signal-title">{'🔵 COMPRA' if señal['direccion'] == 'CALL' else '🔴 VENTA'}</div>
-                <div class="signal-detail"><strong>Activo:</strong> {señal['asset']}</div>
-                <div class="signal-detail"><strong>Entrada:</strong> {señal['entrada']}</div>
-                <div class="signal-detail"><strong>Vencimiento:</strong> {señal['vencimiento']}</div>
-                <div class="signal-detail"><strong>Estrategias:</strong> {', '.join(señal['estrategias'])}</div>
-            </div>
-            """, unsafe_allow_html=True)
-
-    # Log
+    # Log de eventos
     with st.expander("📋 Log de eventos"):
-        for linea in st.session_state.log[-20:]:
+        for linea in st.session_state.log[-30:]:
             st.text(linea)
 
-    # Lógica de rondas y monitoreo
+    # Lógica de monitoreo
     if st.session_state.monitoreando:
         now = datetime.now(ecuador)
 
-        # Si ya tenemos 2 activos en seguimiento, monitorearlos continuamente
-        if len(st.session_state.activos_seguimiento) >= 2:
-            st.info("Monitoreando activos seleccionados...")
-            for activo in st.session_state.activos_seguimiento:
-                # Reevaluar el activo
-                res = evaluar_activo(st.session_state.api, activo['asset'], st.session_state.estrategias_activas)
-                if res:
-                    # Si sigue cumpliendo, actualizamos puntuación (opcional)
-                    activo['puntuacion'] = res['puntuacion']
-                    activo['estrategias'] = res['estrategias']
-                    # Si la dirección es consistente y tiene alta puntuación, generar señal
-                    if res['puntuacion'] >= 100:  # Umbral, puede ajustarse
-                        # Verificar si ya se generó una señal para este activo recientemente
-                        ya_generada = any(s['asset'] == res['asset'] for s in st.session_state.señales)
-                        if not ya_generada:
-                            entrada = now.strftime("%H:%M:%S")
-                            vencimiento = (now + timedelta(minutes=5)).strftime("%H:%M:%S")
-                            señal = {
-                                'asset': res['asset'],
-                                'direccion': res['direccion'],
-                                'entrada': entrada,
-                                'vencimiento': vencimiento,
-                                'estrategias': res['estrategias']
-                            }
-                            st.session_state.señales.append(señal)
-                            st.session_state.log.append(f"📢 SEÑAL GENERADA: {res['asset']} - {res['direccion']} a las {entrada}")
-                            # Eliminar este activo del seguimiento para que pueda ser reemplazado
-                            st.session_state.activos_seguimiento.remove(activo)
+        # Si ya tenemos un activo seleccionado, lo monitoreamos
+        if st.session_state.activo_seleccionado:
+            # Verificar si ya pasó el tiempo de la señal (para reiniciar después de 5 min)
+            if st.session_state.señal:
+                # Esperar 5 minutos desde la señal
+                tiempo_transcurrido = (now - st.session_state.señal['timestamp']).total_seconds()
+                if tiempo_transcurrido > 300:  # 5 minutos
+                    st.session_state.activo_seleccionado = None
+                    st.session_state.alerta = None
+                    st.session_state.señal = None
+                    st.session_state.log.append("🔄 Reiniciando búsqueda...")
+                    time.sleep(2)
+                    st.rerun()
                 else:
-                    # El activo ya no cumple, eliminarlo del seguimiento
-                    st.session_state.log.append(f"❌ {activo['asset']} dejó de cumplir criterios")
-                    st.session_state.activos_seguimiento.remove(activo)
-
-            # Esperar intervalo de monitoreo
-            time.sleep(intervalo_monitoreo)
-            st.rerun()
-
+                    # Aún en periodo de espera
+                    time.sleep(5)
+                    st.rerun()
+            else:
+                # Monitorear el activo seleccionado
+                resultado = evaluar_activo(
+                    st.session_state.api,
+                    st.session_state.activo_seleccionado['asset'],
+                    st.session_state.estrategias_activas
+                )
+                if resultado and resultado['lista_para_entrar']:
+                    # Generar señal definitiva
+                    entrada = now.strftime("%H:%M:%S")
+                    vencimiento = (now + timedelta(minutes=5)).strftime("%H:%M:%S")
+                    st.session_state.señal = {
+                        'asset': resultado['asset'],
+                        'direccion': "CALL",  # habría que determinar dirección real
+                        'entrada': entrada,
+                        'vencimiento': vencimiento,
+                        'estrategias': resultado['estrategias'],
+                        'timestamp': now
+                    }
+                    st.session_state.log.append(f"🚀 SEÑAL GENERADA: {resultado['asset']} a las {entrada}")
+                    st.rerun()
+                else:
+                    # Seguir esperando
+                    time.sleep(2)
+                    st.rerun()
         else:
-            # Necesitamos más activos, continuar con rondas
+            # No tenemos activo, buscamos uno nuevo
             activos_totales = st.session_state.activos_totales
             if not activos_totales:
                 st.warning("No hay activos disponibles")
@@ -283,27 +267,23 @@ if st.session_state.conectado:
             ronda_actual = activos_filtrados[inicio:fin]
 
             if not ronda_actual:
-                # Fin de la lista, reiniciar
                 st.session_state.indice_ronda = 0
                 st.rerun()
 
-            st.info(f"Analizando ronda {st.session_state.indice_ronda + 1} ({len(ronda_actual)} activos)...")
-            mejores = seleccionar_mejores_de_ronda(
+            st.session_state.log.append(f"Analizando ronda {st.session_state.indice_ronda + 1} ({len(ronda_actual)} activos)...")
+            mejor = seleccionar_mejor_activo(
                 st.session_state.api,
                 ronda_actual,
                 st.session_state.estrategias_activas,
-                max_activos=2
+                min_puntuacion=200  # al menos 2 estrategias
             )
 
-            if mejores:
-                for activo in mejores:
-                    if len(st.session_state.activos_seguimiento) < 2:
-                        st.session_state.activos_seguimiento.append(activo)
-                        alerta = generar_alerta_previa(activo)
-                        st.session_state.alertas.append(alerta)
-                        st.session_state.log.append(f"✅ Activo añadido: {activo['asset']} (puntuación {activo['puntuacion']})")
+            if mejor:
+                st.session_state.activo_seleccionado = mejor
+                st.session_state.alerta = f"🔔 {mejor['asset']} - Preparándose: cumple {len(mejor['estrategias'])} estrategias. Señal inminente en breve."
+                st.session_state.log.append(f"✅ Activo seleccionado: {mejor['asset']} (puntuación {mejor['puntuacion']})")
             else:
-                st.session_state.log.append("⚠️ No se encontraron activos confiables en esta ronda.")
+                st.session_state.log.append("⚠️ No se encontraron activos con suficientes estrategias.")
 
             # Avanzar a la siguiente ronda
             st.session_state.indice_ronda += 1
