@@ -9,14 +9,13 @@ from iqoptionapi.stable_api import IQ_Option
 from bot import (
     evaluar_activo,
     seleccionar_mejores_activos,
-    calcular_indicadores,
-    DEFAULT_OTC_ASSETS,
-    DEFAULT_REAL_ASSETS
+    obtener_activos_abiertos,
+    calcular_indicadores
 )
 
 # Configuración de página
 st.set_page_config(
-    page_title="NEUROTRADER PRO",
+    page_title="NEUROTRADER MULTI",
     page_icon="🧠",
     layout="wide",
     initial_sidebar_state="expanded"
@@ -43,19 +42,13 @@ st.markdown("""
     .waiting-card { border-color: #ffaa00; }
     .signal-title { font-size: 1.5rem; font-weight: bold; margin-bottom: 10px; }
     .signal-detail { font-size: 1rem; color: #ccc; margin: 5px 0; }
+    .signal-time { color: #888; font-size: 0.9rem; }
     hr { border-color: #2a2f3a; }
-    .assets-container {
-        display: flex;
-        gap: 20px;
-        flex-wrap: wrap;
-        margin: 20px 0;
-    }
-    .asset-card {
-        background-color: #1e2a3a;
-        border-radius: 8px;
+    .asset-box {
+        background-color: #1a2a3a;
         padding: 15px;
-        flex: 1;
-        min-width: 200px;
+        border-radius: 8px;
+        margin-bottom: 10px;
         border-left: 4px solid #00a3ff;
     }
 </style>
@@ -72,16 +65,16 @@ if 'saldo' not in st.session_state:
     st.session_state.saldo = 0.0
 if 'monitoreando' not in st.session_state:
     st.session_state.monitoreando = False
-if 'activos_seguimiento' not in st.session_state:
-    st.session_state.activos_seguimiento = []  # lista de dicts con info de cada activo
+if 'activos_seleccionados' not in st.session_state:
+    st.session_state.activos_seleccionados = []  # lista de activos en seguimiento
+if 'estados' not in st.session_state:
+    st.session_state.estados = {}  # dict {asset: {estado, direccion, fuerza, hora_entrada, hora_vencimiento, ultima_actualizacion}}
 if 'señales' not in st.session_state:
-    st.session_state.señales = []
+    st.session_state.señales = []  # historial de señales
 if 'log' not in st.session_state:
     st.session_state.log = []
 if 'datos_grafico' not in st.session_state:
-    st.session_state.datos_grafico = {}
-if 'tiempo_inicio_espera' not in st.session_state:
-    st.session_state.tiempo_inicio_espera = datetime.now()
+    st.session_state.datos_grafico = None
 
 # Zona horaria
 ecuador = pytz.timezone("America/Guayaquil")
@@ -112,42 +105,7 @@ def desconectar():
     st.session_state.api = None
     st.session_state.conectado = False
     st.session_state.monitoreando = False
-    st.session_state.activos_seguimiento = []
     st.session_state.log.append("🔌 Desconectado")
-
-def obtener_activos_por_tipo(tipo_mercado):
-    """Obtiene lista de activos según el tipo seleccionado"""
-    if not st.session_state.api:
-        if tipo_mercado == "OTC":
-            return DEFAULT_OTC_ASSETS
-        elif tipo_mercado == "REAL":
-            return DEFAULT_REAL_ASSETS
-        else:
-            return DEFAULT_OTC_ASSETS + DEFAULT_REAL_ASSETS
-    try:
-        open_time = st.session_state.api.get_all_open_time()
-        real = []
-        otc = []
-        if 'binary' in open_time:
-            for asset, data in open_time['binary'].items():
-                if data.get('open', False):
-                    if '-OTC' in asset:
-                        otc.append(asset)
-                    else:
-                        real.append(asset)
-        if tipo_mercado == "OTC":
-            return otc if otc else DEFAULT_OTC_ASSETS
-        elif tipo_mercado == "REAL":
-            return real if real else DEFAULT_REAL_ASSETS
-        else:
-            return (otc + real) if (otc or real) else DEFAULT_OTC_ASSETS + DEFAULT_REAL_ASSETS
-    except:
-        if tipo_mercado == "OTC":
-            return DEFAULT_OTC_ASSETS
-        elif tipo_mercado == "REAL":
-            return DEFAULT_REAL_ASSETS
-        else:
-            return DEFAULT_OTC_ASSETS + DEFAULT_REAL_ASSETS
 
 def crear_grafico_velas(df, activo):
     fig = make_subplots(rows=2, cols=1, shared_xaxes=True,
@@ -167,7 +125,7 @@ def crear_grafico_velas(df, activo):
     fig.add_trace(go.Scatter(x=df.index, y=df['rsi'], line=dict(color='#aa88ff', width=1), name='RSI'), row=2, col=1)
     fig.add_hline(y=70, line_dash="dash", line_color="#ff4b4b", row=2, col=1)
     fig.add_hline(y=30, line_dash="dash", line_color="#00ff88", row=2, col=1)
-    fig.update_layout(title=f"{activo} - Análisis en tiempo real",
+    fig.update_layout(title=f"{activo} - Análisis",
                       xaxis_rangeslider_visible=False,
                       template='plotly_dark',
                       height=500)
@@ -177,7 +135,7 @@ def crear_grafico_velas(df, activo):
 # BARRA LATERAL
 # =========================
 with st.sidebar:
-    st.markdown("## 🧠 NEUROTRADER PRO")
+    st.markdown("## 🧠 NEUROTRADER MULTI")
     st.markdown("---")
 
     st.markdown("### 🔌 Conexión IQ Option")
@@ -209,11 +167,11 @@ with st.sidebar:
     st.markdown("---")
 
     st.markdown("### ⚙️ Configuración")
-    tipo_mercado = st.selectbox("Mercado a analizar", ["OTC", "REAL", "AMBOS"], index=0)
-    num_activos = st.slider("Número de activos a seguir", 1, 5, 3, 1,
-                            help="Cantidad de activos que se monitorearán simultáneamente")
+    mercado = st.selectbox("Mercado a analizar", ["OTC", "REAL", "AMBOS"], index=0)
+    num_activos = st.slider("Número de activos a monitorear", 1, 5, 3, 1,
+                             help="Cantidad de activos que el bot seguirá simultáneamente")
     tiempo_max_espera = st.slider("Tiempo máximo de espera (minutos)", 5, 30, 15, 5,
-                                   help="Si un activo no da señal en este tiempo, se reemplazará")
+                                   help="Si un activo no da señal en este tiempo, se buscará otro.")
 
     st.markdown("---")
 
@@ -223,46 +181,32 @@ with st.sidebar:
             if st.button("▶️ INICIAR MONITOREO", use_container_width=True, type="primary"):
                 st.session_state.monitoreando = True
                 st.session_state.log.append("🚀 Monitoreo iniciado")
-                # Seleccionar los mejores activos
-                with st.spinner("Seleccionando activos confiables..."):
-                    activos_lista = obtener_activos_por_tipo(tipo_mercado)
-                    if activos_lista:
-                        mejores = seleccionar_mejores_activos(st.session_state.api, activos_lista, num_activos)
-                        if mejores:
-                            st.session_state.activos_seguimiento = []
-                            for asset, direc, fuerza in mejores:
-                                st.session_state.activos_seguimiento.append({
-                                    'activo': asset,
-                                    'direccion': direc,
-                                    'fuerza': fuerza,
-                                    'estado': 'ESPERANDO',
-                                    'hora_entrada': None,
-                                    'hora_vencimiento': None,
-                                    'tiempo_inicio': datetime.now(ecuador)
-                                })
-                            st.session_state.log.append(f"✅ Seleccionados {len(mejores)} activos: {', '.join([a[0] for a in mejores])}")
-                        else:
-                            # Fallback: primeros activos de la lista
-                            fallback = activos_lista[:num_activos]
-                            st.session_state.activos_seguimiento = []
-                            for asset in fallback:
-                                st.session_state.activos_seguimiento.append({
-                                    'activo': asset,
-                                    'direccion': None,
-                                    'fuerza': 0,
-                                    'estado': 'ESPERANDO',
-                                    'hora_entrada': None,
-                                    'hora_vencimiento': None,
-                                    'tiempo_inicio': datetime.now(ecuador)
-                                })
-                            st.session_state.log.append(f"⚠️ Usando activos por defecto: {', '.join(fallback)}")
+                # Seleccionar los mejores activos dinámicamente
+                with st.spinner(f"Analizando activos {mercado} en tiempo real..."):
+                    seleccionados = seleccionar_mejores_activos(
+                        st.session_state.api, mercado, num_activos
+                    )
+                    if seleccionados:
+                        st.session_state.activos_seleccionados = [asset for asset, _, _ in seleccionados]
+                        for asset, direc, fuerza in seleccionados:
+                            st.session_state.estados[asset] = {
+                                'direccion': direc,
+                                'fuerza': fuerza,
+                                'estado': 'ESPERANDO',
+                                'hora_entrada': None,
+                                'hora_vencimiento': None,
+                                'ultima_actualizacion': datetime.now(ecuador)
+                            }
+                        st.session_state.log.append(f"✅ Activos seleccionados: {', '.join(st.session_state.activos_seleccionados)}")
                     else:
-                        st.session_state.log.append("⚠️ No hay activos disponibles.")
+                        st.session_state.log.append("⚠️ No se encontraron activos confiables en este momento.")
+                        st.session_state.activos_seleccionados = []
                 st.rerun()
         else:
             if st.button("⏹️ DETENER MONITOREO", use_container_width=True, type="secondary"):
                 st.session_state.monitoreando = False
-                st.session_state.activos_seguimiento = []
+                st.session_state.activos_seleccionados = []
+                st.session_state.estados = {}
                 st.session_state.log.append("🛑 Monitoreo detenido")
                 st.rerun()
 
@@ -279,64 +223,56 @@ if st.session_state.conectado:
     with col1:
         st.metric("Saldo", f"${st.session_state.saldo:.2f}")
     with col2:
-        st.metric("Activos en seguimiento", len(st.session_state.activos_seguimiento))
+        st.metric("Activos en seguimiento", len(st.session_state.activos_seleccionados))
     with col3:
-        en_espera = sum(1 for a in st.session_state.activos_seguimiento if a['estado'] == 'ESPERANDO')
-        listos = sum(1 for a in st.session_state.activos_seguimiento if a['estado'] == 'LISTO')
-        en_curso = sum(1 for a in st.session_state.activos_seguimiento if a['estado'] == 'OPERACION_EN_CURSO')
-        st.metric("Estados", f"Espera:{en_espera} Listo:{listos} Curso:{en_curso}")
+        st.metric("Señales generadas", len(st.session_state.señales))
 
-    # Mostrar tarjetas de activos en seguimiento
-    if st.session_state.activos_seguimiento:
+    # Mostrar activos en seguimiento y sus tarjetas de señal
+    if st.session_state.activos_seleccionados:
         st.subheader("📊 ACTIVOS EN SEGUIMIENTO")
-        cols = st.columns(min(len(st.session_state.activos_seguimiento), 3))
-        for idx, activo in enumerate(st.session_state.activos_seguimiento):
-            with cols[idx % 3]:
-                if activo['estado'] == 'LISTO' and activo['hora_entrada']:
-                    card_class = "call-card" if activo['direccion'] == 'CALL' else "put-card"
-                    st.markdown(f"""
-                    <div class="signal-card {card_class}">
-                        <div class="signal-title">{activo['activo']}</div>
-                        <div><strong>{'🔵 COMPRA' if activo['direccion'] == 'CALL' else '🔴 VENTA'}</strong></div>
-                        <div>Entrada: {activo['hora_entrada']}</div>
-                        <div>Vencimiento: {activo['hora_vencimiento']}</div>
-                        <div>Estrategia: Tendencia + EMA</div>
-                        <div class="signal-time">✅ LISTO PARA OPERAR</div>
-                    </div>
-                    """, unsafe_allow_html=True)
-                elif activo['estado'] == 'OPERACION_EN_CURSO' and activo['hora_entrada']:
-                    now = datetime.now(ecuador)
-                    venc = datetime.strptime(activo['hora_vencimiento'], "%H:%M:%S").time()
-                    venc_dt = datetime.combine(now.date(), venc)
-                    if venc_dt < now:
-                        venc_dt += timedelta(days=1)
-                    resto = (venc_dt - now).total_seconds()
-                    mins, segs = divmod(int(resto), 60)
-                    st.markdown(f"""
-                    <div class="signal-card waiting-card">
-                        <div class="signal-title">{activo['activo']}</div>
-                        <div><strong>{'⏳ ' + activo['direccion']}</strong></div>
-                        <div>Entrada: {activo['hora_entrada']}</div>
-                        <div>Vence: {activo['hora_vencimiento']}</div>
-                        <div>Tiempo: {mins:02d}:{segs:02d}</div>
-                    </div>
-                    """, unsafe_allow_html=True)
-                else:
-                    st.markdown(f"""
-                    <div class="asset-card">
-                        <div><strong>{activo['activo']}</strong></div>
-                        <div>Dirección: {activo['direccion'] or 'Sin tendencia'}</div>
-                        <div>Fuerza: {activo['fuerza']:.1f}</div>
-                        <div>Estado: {activo['estado']}</div>
-                    </div>
-                    """, unsafe_allow_html=True)
+        for asset in st.session_state.activos_seleccionados:
+            estado = st.session_state.estados.get(asset, {})
+            direccion = estado.get('direccion', '?')
+            fuerza = estado.get('fuerza', 0)
+            estado_actual = estado.get('estado', 'ESPERANDO')
+            hora_entrada = estado.get('hora_entrada')
+            hora_vencimiento = estado.get('hora_vencimiento')
 
-        # Gráficos (opcional: mostrar el primer activo)
-        if st.session_state.activos_seguimiento and st.session_state.datos_grafico:
-            primer_activo = st.session_state.activos_seguimiento[0]['activo']
-            if primer_activo in st.session_state.datos_grafico:
-                fig = crear_grafico_velas(st.session_state.datos_grafico[primer_activo], primer_activo)
-                st.plotly_chart(fig, use_container_width=True)
+            if estado_actual == "LISTO" and hora_entrada:
+                card_class = "call-card" if direccion == "CALL" else "put-card"
+                st.markdown(f"""
+                <div class="signal-card {card_class}">
+                    <div class="signal-title">{'🔵 COMPRA (CALL)' if direccion == 'CALL' else '🔴 VENTA (PUT)'}</div>
+                    <div class="signal-detail"><strong>Activo:</strong> {asset}</div>
+                    <div class="signal-detail"><strong>Entrada:</strong> {hora_entrada}</div>
+                    <div class="signal-detail"><strong>Vencimiento:</strong> {hora_vencimiento} (5 minutos)</div>
+                    <div class="signal-detail"><strong>Fuerza:</strong> {fuerza:.1f}</div>
+                    <div class="signal-time">✅ LISTO PARA OPERAR</div>
+                </div>
+                """, unsafe_allow_html=True)
+            elif estado_actual == "OPERACION_EN_CURSO" and hora_entrada:
+                now = datetime.now(ecuador)
+                vencimiento = datetime.strptime(hora_vencimiento, "%H:%M:%S").time()
+                vencimiento_dt = datetime.combine(now.date(), vencimiento)
+                if vencimiento_dt < now:
+                    vencimiento_dt += timedelta(days=1)
+                resto = (vencimiento_dt - now).total_seconds()
+                mins, segs = divmod(int(resto), 60)
+                st.markdown(f"""
+                <div class="signal-card waiting-card">
+                    <div class="signal-title">⏳ OPERACIÓN EN CURSO</div>
+                    <div class="signal-detail"><strong>Activo:</strong> {asset}</div>
+                    <div class="signal-detail"><strong>Entrada:</strong> {hora_entrada}</div>
+                    <div class="signal-detail"><strong>Vencimiento:</strong> {hora_vencimiento}</div>
+                    <div class="signal-detail"><strong>Tiempo restante:</strong> {mins:02d}:{segs:02d}</div>
+                </div>
+                """, unsafe_allow_html=True)
+            else:
+                st.markdown(f"""
+                <div class="asset-box">
+                    <strong>{asset}</strong> | Dirección: {direccion} | Fuerza: {fuerza:.1f} | Estado: {estado_actual}
+                </div>
+                """, unsafe_allow_html=True)
 
     # Historial de señales
     with st.expander("📋 Historial de señales", expanded=True):
@@ -353,136 +289,108 @@ if st.session_state.conectado:
             st.text(linea)
 
     # =========================
-    # LÓGICA DE MONITOREO (por cada activo)
+    # LÓGICA DE MONITOREO
     # =========================
-    if st.session_state.monitoreando and st.session_state.activos_seguimiento:
+    if st.session_state.monitoreando and st.session_state.activos_seleccionados:
         now = datetime.now(ecuador)
-        nuevos_seguimiento = []
-        for activo in st.session_state.activos_seguimiento:
-            asset = activo['activo']
 
-            # Si está en OPERACION_EN_CURSO, verificar vencimiento
-            if activo['estado'] == 'OPERACION_EN_CURSO' and activo['hora_vencimiento']:
-                venc = datetime.strptime(activo['hora_vencimiento'], "%H:%M:%S").time()
-                venc_dt = datetime.combine(now.date(), venc)
-                if venc_dt < now:
-                    venc_dt += timedelta(days=1)
-                if now >= venc_dt:
+        # Revisar cada activo en seguimiento
+        for asset in st.session_state.activos_seleccionados:
+            estado = st.session_state.estados.get(asset, {})
+            if estado.get('estado') == 'OPERACION_EN_CURSO':
+                # Verificar si ya venció
+                vencimiento = datetime.strptime(estado['hora_vencimiento'], "%H:%M:%S").time()
+                vencimiento_dt = datetime.combine(now.date(), vencimiento)
+                if vencimiento_dt < now:
+                    vencimiento_dt += timedelta(days=1)
+                if now >= vencimiento_dt:
                     # Operación vencida, volver a ESPERANDO
-                    activo['estado'] = 'ESPERANDO'
-                    activo['hora_entrada'] = None
-                    activo['hora_vencimiento'] = None
-                    activo['tiempo_inicio'] = now
-                    st.session_state.log.append(f"✅ Operación en {asset} finalizada. Volviendo a esperar.")
-                else:
-                    # Aún no vence, mantener estado
-                    nuevos_seguimiento.append(activo)
-                continue
-
-            # Verificar tiempo máximo de espera
-            if activo['estado'] == 'ESPERANDO' and activo['tiempo_inicio']:
-                tiempo_trans = (now - activo['tiempo_inicio']).total_seconds() / 60
-                if tiempo_trans > tiempo_max_espera:
-                    st.session_state.log.append(f"⏰ {asset} alcanzó tiempo máximo de espera. Buscando reemplazo...")
-                    # Se reemplazará al final del ciclo
+                    estado['estado'] = 'ESPERANDO'
+                    estado['hora_entrada'] = None
+                    estado['hora_vencimiento'] = None
+                    st.session_state.log.append(f"✅ Operación finalizada para {asset}")
+            else:
+                # Evaluar el activo
+                direccion, fuerza, lista_para_entrar, estrategia, precio = evaluar_activo(
+                    st.session_state.api, asset, check_agotamiento=True
+                )
+                if direccion is None:
+                    # El activo perdió tendencia, lo marcaremos para reemplazo después
+                    st.session_state.log.append(f"⚠️ {asset} perdió tendencia. Será reemplazado.")
                     continue
+                else:
+                    # Actualizar datos
+                    estado['direccion'] = direccion
+                    estado['fuerza'] = fuerza
+                    estado['ultima_actualizacion'] = now
 
-            # Evaluar el activo
-            direccion, fuerza, lista_para_entrar, estrategia, precio = evaluar_activo(
-                st.session_state.api, asset, check_agotamiento=True
-            )
-            if direccion is None:
-                # Perdió tendencia, buscar reemplazo
-                st.session_state.log.append(f"⚠️ {asset} perdió tendencia. Será reemplazado.")
-                continue
+                    if lista_para_entrar and estado['estado'] == 'ESPERANDO':
+                        # Generar señal
+                        hora_entrada = now.strftime("%H:%M:%S")
+                        hora_venc = (now + timedelta(minutes=5)).strftime("%H:%M:%S")
+                        estado['estado'] = 'LISTO'
+                        estado['hora_entrada'] = hora_entrada
+                        estado['hora_vencimiento'] = hora_venc
+                        st.session_state.señales.insert(0, {
+                            'fecha': now.strftime("%Y-%m-%d %H:%M:%S"),
+                            'activo': asset,
+                            'direccion': direccion,
+                            'entrada': hora_entrada,
+                            'vencimiento': hora_venc,
+                            'estrategia': estrategia
+                        })
+                        st.session_state.log.append(f"📢 SEÑAL GENERADA: {asset} - {direccion} a las {hora_entrada}")
 
-            # Actualizar datos
-            activo['direccion'] = direccion
-            activo['fuerza'] = fuerza
-
-            if lista_para_entrar and activo['estado'] == 'ESPERANDO':
-                # Generar señal
-                hora_entrada = now.strftime("%H:%M:%S")
-                hora_venc = (now + timedelta(minutes=5)).strftime("%H:%M:%S")
-                activo['estado'] = 'LISTO'
-                activo['hora_entrada'] = hora_entrada
-                activo['hora_vencimiento'] = hora_venc
-                st.session_state.señales.insert(0, {
-                    'fecha': now.strftime("%Y-%m-%d %H:%M:%S"),
-                    'activo': asset,
-                    'direccion': direccion,
-                    'entrada': hora_entrada,
-                    'vencimiento': hora_venc,
-                    'estrategia': estrategia
-                })
-                st.session_state.log.append(f"📢 SEÑAL GENERADA: {asset} - {direccion} a las {hora_entrada}")
+        # Después de evaluar, podemos verificar si hay que reemplazar algún activo
+        nuevos_activos = []
+        for asset in st.session_state.activos_seleccionados:
+            estado = st.session_state.estados.get(asset)
+            if estado and estado.get('direccion') is not None:
+                nuevos_activos.append(asset)
             else:
-                # Si no hay señal, seguir esperando
-                pass
+                # Este activo debe ser reemplazado
+                st.session_state.log.append(f"🔄 Buscando reemplazo para {asset}...")
+                # Buscamos un nuevo activo del mismo mercado
+                seleccionados = seleccionar_mejores_activos(
+                    st.session_state.api, mercado, 1  # solo uno de reemplazo
+                )
+                if seleccionados:
+                    nuevo_asset, nueva_dir, nueva_fuerza = seleccionados[0]
+                    if nuevo_asset not in st.session_state.activos_seleccionados:
+                        nuevos_activos.append(nuevo_asset)
+                        st.session_state.estados[nuevo_asset] = {
+                            'direccion': nueva_dir,
+                            'fuerza': nueva_fuerza,
+                            'estado': 'ESPERANDO',
+                            'hora_entrada': None,
+                            'hora_vencimiento': None,
+                            'ultima_actualizacion': now
+                        }
+                        st.session_state.log.append(f"✅ Nuevo activo añadido: {nuevo_asset}")
+                # Eliminar el viejo del dict de estados
+                if asset in st.session_state.estados:
+                    del st.session_state.estados[asset]
 
-            # Actualizar gráfico (opcional)
-            try:
-                candles = st.session_state.api.get_candles(asset, 300, 50, time.time())
-                if candles:
-                    df = pd.DataFrame(candles)
-                    for col in ['open', 'max', 'min', 'close', 'volume']:
-                        df[col] = pd.to_numeric(df[col], errors='coerce')
-                    df.dropna(inplace=True)
-                    if len(df) > 30:
-                        df = calcular_indicadores(df)
-                        st.session_state.datos_grafico[asset] = df
-            except:
-                pass
-
-            nuevos_seguimiento.append(activo)
-
-        # Reemplazar activos perdidos
-        if len(nuevos_seguimiento) < len(st.session_state.activos_seguimiento):
-            cuantos_faltan = len(st.session_state.activos_seguimiento) - len(nuevos_seguimiento)
-            st.session_state.log.append(f"🔍 Buscando {cuantos_faltan} reemplazo(s)...")
-            activos_lista = obtener_activos_por_tipo(tipo_mercado)
-            # Excluir los que ya están en seguimiento
-            existentes = [a['activo'] for a in nuevos_seguimiento]
-            disponibles = [a for a in activos_lista if a not in existentes]
-            if disponibles:
-                mejores = seleccionar_mejores_activos(st.session_state.api, disponibles, cuantos_faltan)
-                for asset, direc, fuerza in mejores:
-                    nuevos_seguimiento.append({
-                        'activo': asset,
-                        'direccion': direc,
-                        'fuerza': fuerza,
-                        'estado': 'ESPERANDO',
-                        'hora_entrada': None,
-                        'hora_vencimiento': None,
-                        'tiempo_inicio': now
-                    })
-                    st.session_state.log.append(f"➕ Nuevo activo añadido: {asset}")
-            else:
-                st.session_state.log.append("⚠️ No hay disponibles para reemplazo.")
-
-        st.session_state.activos_seguimiento = nuevos_seguimiento
-        time.sleep(5)  # Pausa entre ciclos
+        st.session_state.activos_seleccionados = nuevos_activos
+        time.sleep(5)  # pausa entre ciclos
         st.rerun()
-    elif st.session_state.monitoreando and not st.session_state.activos_seguimiento:
-        # No hay activos, intentar seleccionar
-        activos_lista = obtener_activos_por_tipo(tipo_mercado)
-        if activos_lista:
-            mejores = seleccionar_mejores_activos(st.session_state.api, activos_lista, num_activos)
-            if mejores:
-                st.session_state.activos_seguimiento = []
-                for asset, direc, fuerza in mejores:
-                    st.session_state.activos_seguimiento.append({
-                        'activo': asset,
-                        'direccion': direc,
-                        'fuerza': fuerza,
-                        'estado': 'ESPERANDO',
-                        'hora_entrada': None,
-                        'hora_vencimiento': None,
-                        'tiempo_inicio': datetime.now(ecuador)
-                    })
-                st.session_state.log.append(f"✅ Seleccionados {len(mejores)} activos")
-            else:
-                st.session_state.log.append("⚠️ No se encontraron activos confiables.")
+
+    elif st.session_state.monitoreando and not st.session_state.activos_seleccionados:
+        # No hay activos, intentar seleccionar de nuevo
+        st.session_state.log.append("🔄 No hay activos, buscando nuevamente...")
+        seleccionados = seleccionar_mejores_activos(st.session_state.api, mercado, num_activos)
+        if seleccionados:
+            st.session_state.activos_seleccionados = [asset for asset, _, _ in seleccionados]
+            for asset, direc, fuerza in seleccionados:
+                st.session_state.estados[asset] = {
+                    'direccion': direc,
+                    'fuerza': fuerza,
+                    'estado': 'ESPERANDO',
+                    'hora_entrada': None,
+                    'hora_vencimiento': None,
+                    'ultima_actualizacion': datetime.now(ecuador)
+                }
+            st.session_state.log.append(f"✅ Nuevos activos seleccionados: {', '.join(st.session_state.activos_seleccionados)}")
         time.sleep(5)
         st.rerun()
 
