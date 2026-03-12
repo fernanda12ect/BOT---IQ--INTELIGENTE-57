@@ -18,7 +18,7 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# Estilos CSS
+# Estilos CSS (igual que antes)
 st.markdown("""
 <style>
     .stApp { background-color: #0b0f17; color: #e0e0e0; }
@@ -79,6 +79,8 @@ if 'activos_totales' not in st.session_state:
     st.session_state.activos_totales = []
 if 'estrategias_activas' not in st.session_state:
     st.session_state.estrategias_activas = [nombre for nombre, _ in ESTRATEGIAS]
+if 'tiempo_inicio_espera' not in st.session_state:
+    st.session_state.tiempo_inicio_espera = None  # para controlar el timeout
 
 # Zona horaria
 ecuador = pytz.timezone("America/Guayaquil")
@@ -134,6 +136,8 @@ with st.sidebar:
     mercado = st.selectbox("Mercado", ["OTC", "REAL", "AMBOS"], index=2)
     tamaño_ronda = st.slider("Activos por ronda", 10, 50, 20, 5)
     pausa_entre_rondas = st.slider("Pausa entre rondas (seg)", 5, 60, 15, 5)
+    timeout_espera = st.slider("Tiempo máximo de espera (minutos)", 5, 60, 30, 5,
+                               help="Si un activo no da señal en este tiempo, se descarta y se busca otro.")
 
     st.markdown("---")
     st.markdown("### 🎯 Estrategias activas")
@@ -153,6 +157,7 @@ with st.sidebar:
                 st.session_state.activo_seleccionado = None
                 st.session_state.alerta = None
                 st.session_state.señal = None
+                st.session_state.tiempo_inicio_espera = None
                 st.session_state.log.append("🚀 Monitoreo iniciado")
                 st.rerun()
         else:
@@ -212,6 +217,7 @@ if st.session_state.conectado:
                     st.session_state.activo_seleccionado = None
                     st.session_state.alerta = None
                     st.session_state.señal = None
+                    st.session_state.tiempo_inicio_espera = None
                     st.session_state.log.append("🔄 Reiniciando búsqueda...")
                     time.sleep(2)
                     st.rerun()
@@ -219,28 +225,44 @@ if st.session_state.conectado:
                     time.sleep(5)
                     st.rerun()
             else:
+                # Verificar timeout de espera
+                if st.session_state.tiempo_inicio_espera:
+                    tiempo_espera = (now - st.session_state.tiempo_inicio_espera).total_seconds() / 60
+                    if tiempo_espera > timeout_espera:
+                        st.session_state.log.append(f"⏰ Tiempo máximo de espera alcanzado para {st.session_state.activo_seleccionado['asset']}. Buscando otro...")
+                        st.session_state.activo_seleccionado = None
+                        st.session_state.alerta = None
+                        st.session_state.tiempo_inicio_espera = None
+                        time.sleep(2)
+                        st.rerun()
+
                 # Monitorear el activo seleccionado
                 resultado = evaluar_activo(
                     st.session_state.api,
                     st.session_state.activo_seleccionado['asset'],
                     st.session_state.estrategias_activas
                 )
-                if resultado and resultado['lista_para_entrar'] and resultado['direccion']:
-                    entrada = now.strftime("%H:%M:%S")
-                    vencimiento = (now + timedelta(minutes=5)).strftime("%H:%M:%S")
-                    st.session_state.señal = {
-                        'asset': resultado['asset'],
-                        'direccion': resultado['direccion'],
-                        'entrada': entrada,
-                        'vencimiento': vencimiento,
-                        'estrategias': resultado['estrategias'],
-                        'timestamp': now
-                    }
-                    st.session_state.log.append(f"🚀 SEÑAL GENERADA: {resultado['asset']} - {resultado['direccion']} a las {entrada}")
-                    st.rerun()
-                else:
-                    time.sleep(2)
-                    st.rerun()
+                if resultado:
+                    # Registrar en log si hay estrategias pero no lista
+                    if resultado['estrategias'] and not resultado['lista_para_entrar']:
+                        st.session_state.log.append(f"⏳ {resultado['asset']}: {len(resultado['estrategias'])} estrategias activas, esperando confirmación...")
+                    if resultado['lista_para_entrar'] and resultado['direccion']:
+                        entrada = now.strftime("%H:%M:%S")
+                        vencimiento = (now + timedelta(minutes=5)).strftime("%H:%M:%S")
+                        st.session_state.señal = {
+                            'asset': resultado['asset'],
+                            'direccion': resultado['direccion'],
+                            'entrada': entrada,
+                            'vencimiento': vencimiento,
+                            'estrategias': resultado['estrategias'],
+                            'timestamp': now
+                        }
+                        st.session_state.log.append(f"🚀 SEÑAL GENERADA: {resultado['asset']} - {resultado['direccion']} a las {entrada}")
+                        st.rerun()
+                    elif resultado['lista_para_entrar'] and not resultado['direccion']:
+                        st.session_state.log.append(f"⚠️ {resultado['asset']}: Estrategias listas pero direcciones inconsistentes.")
+                time.sleep(2)
+                st.rerun()
         else:
             # No tenemos activo, buscamos uno nuevo
             activos_totales = st.session_state.activos_totales
@@ -277,6 +299,7 @@ if st.session_state.conectado:
             if mejor:
                 st.session_state.activo_seleccionado = mejor
                 st.session_state.alerta = f"🔔 {mejor['asset']} - Preparándose: cumple {len(mejor['estrategias'])} estrategias. Señal inminente."
+                st.session_state.tiempo_inicio_espera = now
                 st.session_state.log.append(f"✅ Activo seleccionado: {mejor['asset']} (puntuación {mejor['puntuacion']})")
             else:
                 st.session_state.log.append("⚠️ No se encontraron activos con suficientes estrategias.")
