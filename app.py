@@ -141,7 +141,6 @@ with st.sidebar:
     tipo_opcion = st.selectbox("Tipo de opción", ["binarias", "digitales", "blitz"], index=0,
                                help="Selecciona el tipo de activo a analizar")
 
-    # Si se selecciona blitz, podemos añadir activos específicos (por ahora solo mostramos mensaje)
     if tipo_opcion == "blitz":
         st.info("Modo Blitz: analizando índices de volatilidad (simulado)")
 
@@ -155,10 +154,12 @@ with st.sidebar:
                               help="Número de velas hacia atrás para buscar cruce")
     min_puntuacion = st.slider("Puntuación mínima para selección", 10, 50, 20, 5,
                                help="Valor más bajo = más activos candidatos")
+    tamaño_ronda = st.slider("Activos por ronda", 5, 50, 15, 5)
+    pausa_entre_rondas = st.slider("Pausa entre rondas (seg)", 5, 60, 15, 5)
     timeout_monitoreo = st.slider("Timeout de monitoreo (minutos)", 5, 30, 15, 1,
                                    help="Si el activo no da señal en este tiempo, se descarta.")
     anticipacion = st.slider("Anticipación de señal (segundos)", 0, 60, 20, 5,
-                             help="Tiempo antes de la entrada para mostrar alerta (simulado)")
+                             help="Tiempo antes de la entrada para mostrar alerta")
 
     st.markdown("---")
     if st.session_state.conectado:
@@ -188,7 +189,7 @@ if st.session_state.conectado:
         st.metric("Saldo", f"${st.session_state.saldo:.2f}")
     with col2:
         if st.session_state.activo_seleccionado:
-            st.metric("Activo en seguimiento", st.session_state.activo_seleccionado['asset'])
+            st.metric("Activo en seguimiento", st.session_state.activo_seleccionado.get('asset', 'Ninguno'))
         else:
             st.metric("Activo en seguimiento", "Ninguno")
     with col3:
@@ -222,8 +223,8 @@ if st.session_state.conectado:
     if st.session_state.monitoreando:
         now = datetime.now(ecuador)
 
-        # Si ya tenemos un activo seleccionado
-        if st.session_state.activo_seleccionado:
+        # Si ya tenemos un activo seleccionado y es un diccionario válido
+        if st.session_state.activo_seleccionado and isinstance(st.session_state.activo_seleccionado, dict):
             # Verificar si ya pasó el tiempo de la señal (para reiniciar después de 5 min)
             if st.session_state.señal:
                 tiempo_transcurrido = (now - st.session_state.señal['timestamp']).total_seconds()
@@ -245,18 +246,28 @@ if st.session_state.conectado:
                 else:
                     tiempo_espera = (now - st.session_state.tiempo_inicio_monitoreo).total_seconds() / 60
                     if tiempo_espera > timeout_monitoreo:
-                        st.session_state.log.append(f"⏰ Timeout alcanzado para {st.session_state.activo_seleccionado['asset']}. Buscando otro...")
+                        st.session_state.log.append(f"⏰ Timeout alcanzado para {st.session_state.activo_seleccionado.get('asset', 'desconocido')}. Buscando otro...")
                         st.session_state.activo_seleccionado = None
                         st.session_state.alerta = None
                         st.session_state.tiempo_inicio_monitoreo = None
                         time.sleep(2)
                         st.rerun()
 
+                # Obtener la tendencia esperada del activo seleccionado
+                tendencia_esperada = st.session_state.activo_seleccionado.get('tendencia')
+                if tendencia_esperada is None:
+                    # Si no hay tendencia, descartar el activo
+                    st.session_state.log.append(f"❌ Activo {st.session_state.activo_seleccionado.get('asset')} sin tendencia definida. Buscando otro...")
+                    st.session_state.activo_seleccionado = None
+                    st.session_state.tiempo_inicio_monitoreo = None
+                    time.sleep(2)
+                    st.rerun()
+
                 # Monitorear el activo seleccionado
                 lista_para_entrar, direccion, fuerza, estrategia = evaluar_activo_seguimiento(
                     st.session_state.api,
                     st.session_state.activo_seleccionado['asset'],
-                    st.session_state.activo_seleccionado['tendencia'],
+                    tendencia_esperada,
                     umbral_pullback=umbral_pullback,
                     ventana_cruce=ventana_cruce
                 )
@@ -275,9 +286,8 @@ if st.session_state.conectado:
                     st.session_state.log.append(f"🚀 SEÑAL GENERADA: {st.session_state.activo_seleccionado['asset']} - {direccion} a las {entrada_str}")
                     st.rerun()
                 else:
-                    # Simular cuenta regresiva para la alerta (opcional)
-                    # Por simplicidad, solo mostramos alerta fija
-                    st.session_state.alerta = f"Esperando pullback y cruce para {st.session_state.activo_seleccionado['asset']}..."
+                    # Alerta de espera
+                    st.session_state.alerta = f"Esperando pullback y cruce para {st.session_state.activo_seleccionado['asset']} (tendencia {tendencia_esperada})..."
                     time.sleep(2)
                     st.rerun()
         else:
