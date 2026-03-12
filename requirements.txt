@@ -2,6 +2,6 @@ streamlit
 pandas
 numpy
 ta
-git+https://github.com/iqoptionapi/iqoptionapi.git
+iqoptionapi
 pytz
 plotly
