@@ -2,7 +2,6 @@ import pandas as pd
 import numpy as np
 import time
 import logging
-import random
 from datetime import datetime
 import pytz
 
@@ -56,24 +55,42 @@ def calcular_indicadores(df):
     return df
 
 # =========================
-# DETECCIÓN DE TENDENCIA POR MÁXIMOS Y MÍNIMOS
+# DETECCIÓN DE TENDENCIA (más flexible)
 # =========================
 def detectar_tendencia(df):
+    """
+    Detecta tendencia usando:
+    - Estructura de máximos y mínimos (ideal)
+    - Si no se cumple, usa ADX y alineación de EMAs
+    Retorna dirección y fuerza.
+    """
     if len(df) < 20:
         return None, 0
     ultimas = df.iloc[-20:]
     highs = ultimas['high'].values
     lows = ultimas['low'].values
+    last = df.iloc[-1]
 
-    alcista = all(highs[i] <= highs[i+1] for i in range(len(highs)-1)) and all(lows[i] <= lows[i+1] for i in range(len(lows)-1))
-    bajista = all(highs[i] >= highs[i+1] for i in range(len(highs)-1)) and all(lows[i] >= lows[i+1] for i in range(len(lows)-1))
+    # Estructura perfecta
+    alcista_perfecta = all(highs[i] <= highs[i+1] for i in range(len(highs)-1)) and all(lows[i] <= lows[i+1] for i in range(len(lows)-1))
+    bajista_perfecta = all(highs[i] >= highs[i+1] for i in range(len(highs)-1)) and all(lows[i] >= lows[i+1] for i in range(len(lows)-1))
 
-    if alcista:
-        fuerza = df['adx'].iloc[-1] + (df['vol_ratio'].iloc[-1] * 10)
+    if alcista_perfecta:
+        fuerza = last['adx'] + (last['vol_ratio'] * 10)
         return 'CALL', fuerza
-    elif bajista:
-        fuerza = df['adx'].iloc[-1] + (df['vol_ratio'].iloc[-1] * 10)
+    if bajista_perfecta:
+        fuerza = last['adx'] + (last['vol_ratio'] * 10)
         return 'PUT', fuerza
+
+    # Si no hay estructura perfecta, pero ADX > 25 y EMAs alineadas, consideramos tendencia
+    if last['adx'] > 25:
+        if last['ema9'] > last['ema21']:
+            fuerza = last['adx'] + (last['vol_ratio'] * 5)  # fuerza menor
+            return 'CALL', fuerza
+        elif last['ema9'] < last['ema21']:
+            fuerza = last['adx'] + (last['vol_ratio'] * 5)
+            return 'PUT', fuerza
+
     return None, 0
 
 # =========================
@@ -136,17 +153,17 @@ def evaluar_activo(api, asset, check_agotamiento=False):
 
         df = calcular_indicadores(df)
         direccion, fuerza = detectar_tendencia(df)
+        if direccion is None:
+            return None, 0, False, None, df['close'].iloc[-1]
 
-        cruce = confirmar_cruce_ema(df, direccion) if direccion else False
-        agotamiento = agotamiento_fuerza_contraria(df, direccion) if direccion and check_agotamiento else False
+        cruce = confirmar_cruce_ema(df, direccion)
+        agotamiento = agotamiento_fuerza_contraria(df, direccion) if check_agotamiento else False
 
-        lista_para_entrar = False
-        if direccion:
-            lista_para_entrar = (fuerza > 10) and cruce
-            if check_agotamiento:
-                lista_para_entrar = lista_para_entrar and agotamiento
+        lista_para_entrar = (fuerza > 15) and cruce
+        if check_agotamiento:
+            lista_para_entrar = lista_para_entrar and agotamiento
 
-        estrategia = f"Tendencia {'alcista' if direccion == 'CALL' else 'bajista'}" if direccion else "Sin tendencia"
+        estrategia = f"Tendencia {'alcista' if direccion == 'CALL' else 'bajista'}"
         return direccion, fuerza, lista_para_entrar, estrategia, df['close'].iloc[-1]
     except Exception as e:
         logger.error(f"Error evaluando {asset}: {e}")
@@ -156,10 +173,6 @@ def evaluar_activo(api, asset, check_agotamiento=False):
 # OBTENER ACTIVOS ABIERTOS DESDE IQ OPTION
 # =========================
 def obtener_activos_abiertos(api, tipo_mercado):
-    """
-    tipo_mercado: 'OTC', 'REAL', 'AMBOS'
-    Retorna lista de activos abiertos en ese momento.
-    """
     try:
         open_time = api.get_all_open_time()
         activos = []
@@ -178,39 +191,25 @@ def obtener_activos_abiertos(api, tipo_mercado):
         return []
 
 # =========================
-# SELECCIONAR ACTIVOS (siempre devuelve algo, aunque sea aleatorio)
+# SELECCIONAR LOS MEJORES ACTIVOS EN TIEMPO REAL
 # =========================
-def seleccionar_activos(api, tipo_mercado, num_activos):
-    """
-    Intenta obtener los mejores activos por fuerza, si no, devuelve una muestra aleatoria.
-    """
+def seleccionar_mejores_activos(api, tipo_mercado, num_activos):
     activos = obtener_activos_abiertos(api, tipo_mercado)
     if not activos:
         return []
 
-    # Analizamos hasta 40 para puntuar
-    candidatos = activos[:40]
+    # Analizamos un número razonable (hasta 60 para tener más oportunidades)
+    candidatos = activos[:60]
     resultados = []
     for asset in candidatos:
         try:
             direccion, fuerza, _, _, precio = evaluar_activo(api, asset, check_agotamiento=False)
-            # Incluimos aunque no tenga tendencia (direccion None), con fuerza 0
-            resultados.append((fuerza if direccion else 0, asset, direccion))
-            time.sleep(0.1)
+            if direccion and fuerza > 5:  # umbral más bajo (antes 10)
+                resultados.append((fuerza, asset, direccion))
+            time.sleep(0.1)  # pausa reducida
         except:
-            resultados.append((0, asset, None))
             continue
 
-    # Ordenar por fuerza descendente
-    resultados.sort(reverse=True, key=lambda x: x[0])
-    # Tomar los primeros num_activos
-    seleccionados = resultados[:num_activos]
-    # Si hay menos de los solicitados, completar con activos aleatorios de los no analizados
-    if len(seleccionados) < num_activos and len(activos) > len(candidatos):
-        restantes = [a for a in activos if a not in [r[1] for r in seleccionados]]
-        random.shuffle(restantes)
-        for a in restantes[:num_activos - len(seleccionados)]:
-            seleccionados.append((0, a, None))
-
-    # Devolver lista de tuplas (asset, direccion, fuerza)
-    return [(asset, direc, fuerza) for fuerza, asset, direc in seleccionados]
+    resultados.sort(reverse=True)
+    mejores = resultados[:num_activos]
+    return [(asset, direc, fuerza) for fuerza, asset, direc in mejores]
