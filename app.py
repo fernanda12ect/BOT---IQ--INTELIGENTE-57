@@ -136,7 +136,7 @@ with st.sidebar:
     mercado = st.selectbox("Mercado", ["OTC", "REAL", "AMBOS"], index=2)
     tamaño_ronda = st.slider("Activos por ronda", 10, 50, 20, 5)
     pausa_entre_rondas = st.slider("Pausa entre rondas (seg)", 5, 60, 15, 5)
-    timeout_monitoreo = st.slider("Timeout de monitoreo (minutos)", 1, 30, 10, 1,
+    timeout_monitoreo = st.slider("Timeout de monitoreo (minutos)", 1, 30, 5, 1,
                                    help="Si el activo no da señal en este tiempo, se descarta y se busca otro.")
 
     st.markdown("---")
@@ -244,7 +244,8 @@ if st.session_state.conectado:
                     st.session_state.activo_seleccionado['asset'],
                     st.session_state.estrategias_activas
                 )
-                if resultado and resultado['lista_para_entrar'] and resultado['direccion']:
+                # Condición de señal: debe ser válida según tendencia, y además estar lista o ser tendencia fuerte
+                if resultado and resultado['señal_valida'] and (resultado['lista_para_entrar'] or resultado['tendencia_fuerte']) and resultado['direccion']:
                     entrada = now.strftime("%H:%M:%S")
                     vencimiento = (now + timedelta(minutes=5)).strftime("%H:%M:%S")
                     st.session_state.señal = {
