@@ -12,13 +12,13 @@ from bot import (
 )
 
 st.set_page_config(
-    page_title="NEUROTRADER RETROCESO",
+    page_title="NEUROTRADER PRO",
     page_icon="🧠",
     layout="wide",
     initial_sidebar_state="expanded"
 )
 
-# Estilos CSS (igual que antes)
+# Estilos CSS
 st.markdown("""
 <style>
     .stApp { background-color: #0b0f17; color: #e0e0e0; }
@@ -66,7 +66,7 @@ if 'saldo' not in st.session_state:
 if 'monitoreando' not in st.session_state:
     st.session_state.monitoreando = False
 if 'activo_seleccionado' not in st.session_state:
-    st.session_state.activo_seleccionado = None  # dict con info del activo (asset, tendencia, fuerza)
+    st.session_state.activo_seleccionado = None  # dict con datos del activo
 if 'alerta' not in st.session_state:
     st.session_state.alerta = None
 if 'señal' not in st.session_state:
@@ -79,8 +79,6 @@ if 'activos_totales' not in st.session_state:
     st.session_state.activos_totales = []
 if 'tiempo_inicio_monitoreo' not in st.session_state:
     st.session_state.tiempo_inicio_monitoreo = None
-if 'estado_retroceso' not in st.session_state:
-    st.session_state.estado_retroceso = False  # indica si estamos en retroceso
 
 # Zona horaria
 ecuador = pytz.timezone("America/Guayaquil")
@@ -115,7 +113,7 @@ def desconectar():
 
 # Sidebar
 with st.sidebar:
-    st.markdown("## 🧠 NEUROTRADER RETROCESO")
+    st.markdown("## 🧠 NEUROTRADER PRO")
     st.markdown("---")
     email = st.text_input("Correo electrónico")
     password = st.text_input("Contraseña", type="password")
@@ -136,8 +134,10 @@ with st.sidebar:
     mercado = st.selectbox("Mercado", ["OTC", "REAL", "AMBOS"], index=2)
     tamaño_ronda = st.slider("Activos por ronda", 10, 50, 20, 5)
     pausa_entre_rondas = st.slider("Pausa entre rondas (seg)", 5, 60, 15, 5)
-    timeout_monitoreo = st.slider("Timeout de monitoreo (minutos)", 1, 30, 5, 1,
-                                   help="Si el activo no da señal en este tiempo, se descarta y se busca otro.")
+    min_puntuacion = st.slider("Puntuación mínima para selección", 10, 100, 20, 5,
+                                help="Valor más bajo = más activos candidatos")
+    timeout_monitoreo = st.slider("Timeout de monitoreo (minutos)", 1, 30, 10, 1,
+                                   help="Si el activo no da señal en este tiempo, se descarta.")
 
     st.markdown("---")
     if st.session_state.conectado:
@@ -149,7 +149,6 @@ with st.sidebar:
                 st.session_state.alerta = None
                 st.session_state.señal = None
                 st.session_state.tiempo_inicio_monitoreo = None
-                st.session_state.estado_retroceso = False
                 st.session_state.log.append("🚀 Monitoreo iniciado")
                 st.rerun()
         else:
@@ -187,7 +186,7 @@ if st.session_state.conectado:
             <div class="signal-detail"><strong>Activo:</strong> {st.session_state.señal['asset']}</div>
             <div class="signal-detail"><strong>Entrada:</strong> {st.session_state.señal['entrada']}</div>
             <div class="signal-detail"><strong>Vencimiento:</strong> {st.session_state.señal['vencimiento']}</div>
-            <div class="signal-detail"><strong>Tendencia:</strong> {st.session_state.señal['tendencia']}</div>
+            <div class="signal-detail"><strong>Estrategia:</strong> {st.session_state.señal['estrategia']}</div>
         </div>
         """, unsafe_allow_html=True)
 
@@ -210,7 +209,6 @@ if st.session_state.conectado:
                     st.session_state.alerta = None
                     st.session_state.señal = None
                     st.session_state.tiempo_inicio_monitoreo = None
-                    st.session_state.estado_retroceso = False
                     st.session_state.log.append("🔄 Reiniciando búsqueda...")
                     time.sleep(2)
                     st.rerun()
@@ -228,43 +226,31 @@ if st.session_state.conectado:
                         st.session_state.activo_seleccionado = None
                         st.session_state.alerta = None
                         st.session_state.tiempo_inicio_monitoreo = None
-                        st.session_state.estado_retroceso = False
                         time.sleep(2)
                         st.rerun()
 
-                # Evaluar el activo en seguimiento
-                en_retroceso, cruce, precio = evaluar_activo_seguimiento(
+                # Monitorear el activo seleccionado
+                lista_para_entrar, direccion, fuerza, estrategia = evaluar_activo_seguimiento(
                     st.session_state.api,
                     st.session_state.activo_seleccionado['asset'],
                     st.session_state.activo_seleccionado['tendencia']
                 )
-
-                # Actualizar estado de retroceso para la alerta
-                if en_retroceso and not st.session_state.estado_retroceso:
-                    st.session_state.estado_retroceso = True
-                    st.session_state.alerta = f"🔔 {st.session_state.activo_seleccionado['asset']} - Retroceso detectado. Esperando cruce de EMAs..."
-                    st.session_state.log.append(f"↩️ Retroceso detectado en {st.session_state.activo_seleccionado['asset']}")
-                elif not en_retroceso and st.session_state.estado_retroceso:
-                    st.session_state.estado_retroceso = False
-                    st.session_state.alerta = None
-
-                # Si hay cruce de EMAs y estamos en retroceso (o se acaba de producir), generar señal
-                if cruce:
+                if lista_para_entrar and direccion:
                     entrada = now.strftime("%H:%M:%S")
                     vencimiento = (now + timedelta(minutes=5)).strftime("%H:%M:%S")
                     st.session_state.señal = {
                         'asset': st.session_state.activo_seleccionado['asset'],
-                        'direccion': st.session_state.activo_seleccionado['tendencia'],
+                        'direccion': direccion,
                         'entrada': entrada,
                         'vencimiento': vencimiento,
-                        'tendencia': st.session_state.activo_seleccionado['tendencia'],
+                        'estrategia': estrategia,
                         'timestamp': now
                     }
-                    st.session_state.log.append(f"🚀 SEÑAL GENERADA: {st.session_state.activo_seleccionado['asset']} - {st.session_state.activo_seleccionado['tendencia']} a las {entrada} (cruce de EMAs)")
+                    st.session_state.log.append(f"🚀 SEÑAL GENERADA: {st.session_state.activo_seleccionado['asset']} - {direccion} a las {entrada}")
                     st.rerun()
-
-                time.sleep(2)
-                st.rerun()
+                else:
+                    time.sleep(2)
+                    st.rerun()
         else:
             # No tenemos activo, buscamos uno nuevo
             activos_totales = st.session_state.activos_totales
@@ -294,15 +280,14 @@ if st.session_state.conectado:
             mejor = seleccionar_mejor_activo(
                 st.session_state.api,
                 ronda_actual,
-                min_fuerza=30
+                min_puntuacion=min_puntuacion
             )
 
             if mejor:
                 st.session_state.activo_seleccionado = mejor
-                st.session_state.alerta = f"🔔 {mejor['asset']} - Tendencia {mejor['tendencia']} detectada. Esperando retroceso..."
+                st.session_state.alerta = f"🔔 {mejor['asset']} - Tendencia {mejor['tendencia']} (fuerza {mejor['fuerza']:.1f}). Esperando retroceso y cruce EMA."
                 st.session_state.tiempo_inicio_monitoreo = datetime.now(ecuador)
-                st.session_state.estado_retroceso = False
-                st.session_state.log.append(f"✅ Activo seleccionado: {mejor['asset']} (tendencia {mejor['tendencia']}, fuerza {mejor['fuerza']:.1f})")
+                st.session_state.log.append(f"✅ Activo seleccionado: {mejor['asset']} ({mejor['tendencia']}, fuerza {mejor['fuerza']:.1f})")
             else:
                 st.session_state.log.append("⚠️ No se encontraron activos con tendencia clara.")
 
