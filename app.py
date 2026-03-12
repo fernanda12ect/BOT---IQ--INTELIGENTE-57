@@ -5,20 +5,20 @@ from datetime import datetime, timedelta
 import pytz
 from iqoptionapi.stable_api import IQ_Option
 from bot import (
-    evaluar_activo,
+    evaluar_activo_seleccion,
+    evaluar_activo_seguimiento,
     seleccionar_mejor_activo,
-    obtener_activos_abiertos,
-    ESTRATEGIAS
+    obtener_activos_abiertos
 )
 
 st.set_page_config(
-    page_title="NEUROTRADER PRO",
+    page_title="NEUROTRADER RETROCESO",
     page_icon="🧠",
     layout="wide",
     initial_sidebar_state="expanded"
 )
 
-# Estilos CSS
+# Estilos CSS (igual que antes)
 st.markdown("""
 <style>
     .stApp { background-color: #0b0f17; color: #e0e0e0; }
@@ -66,7 +66,7 @@ if 'saldo' not in st.session_state:
 if 'monitoreando' not in st.session_state:
     st.session_state.monitoreando = False
 if 'activo_seleccionado' not in st.session_state:
-    st.session_state.activo_seleccionado = None
+    st.session_state.activo_seleccionado = None  # dict con info del activo (asset, tendencia, fuerza)
 if 'alerta' not in st.session_state:
     st.session_state.alerta = None
 if 'señal' not in st.session_state:
@@ -77,10 +77,10 @@ if 'indice_ronda' not in st.session_state:
     st.session_state.indice_ronda = 0
 if 'activos_totales' not in st.session_state:
     st.session_state.activos_totales = []
-if 'estrategias_activas' not in st.session_state:
-    st.session_state.estrategias_activas = [nombre for nombre, _ in ESTRATEGIAS]
 if 'tiempo_inicio_monitoreo' not in st.session_state:
     st.session_state.tiempo_inicio_monitoreo = None
+if 'estado_retroceso' not in st.session_state:
+    st.session_state.estado_retroceso = False  # indica si estamos en retroceso
 
 # Zona horaria
 ecuador = pytz.timezone("America/Guayaquil")
@@ -115,7 +115,7 @@ def desconectar():
 
 # Sidebar
 with st.sidebar:
-    st.markdown("## 🧠 NEUROTRADER PRO")
+    st.markdown("## 🧠 NEUROTRADER RETROCESO")
     st.markdown("---")
     email = st.text_input("Correo electrónico")
     password = st.text_input("Contraseña", type="password")
@@ -140,15 +140,6 @@ with st.sidebar:
                                    help="Si el activo no da señal en este tiempo, se descarta y se busca otro.")
 
     st.markdown("---")
-    st.markdown("### 🎯 Estrategias activas")
-    nuevas_estrategias = []
-    for nombre, _ in ESTRATEGIAS:
-        activa = st.checkbox(nombre, value=(nombre in st.session_state.estrategias_activas))
-        if activa:
-            nuevas_estrategias.append(nombre)
-    st.session_state.estrategias_activas = nuevas_estrategias
-
-    st.markdown("---")
     if st.session_state.conectado:
         if not st.session_state.monitoreando:
             if st.button("▶️ INICIAR", use_container_width=True, type="primary"):
@@ -158,6 +149,7 @@ with st.sidebar:
                 st.session_state.alerta = None
                 st.session_state.señal = None
                 st.session_state.tiempo_inicio_monitoreo = None
+                st.session_state.estado_retroceso = False
                 st.session_state.log.append("🚀 Monitoreo iniciado")
                 st.rerun()
         else:
@@ -195,7 +187,7 @@ if st.session_state.conectado:
             <div class="signal-detail"><strong>Activo:</strong> {st.session_state.señal['asset']}</div>
             <div class="signal-detail"><strong>Entrada:</strong> {st.session_state.señal['entrada']}</div>
             <div class="signal-detail"><strong>Vencimiento:</strong> {st.session_state.señal['vencimiento']}</div>
-            <div class="signal-detail"><strong>Estrategias:</strong> {', '.join(st.session_state.señal['estrategias'])}</div>
+            <div class="signal-detail"><strong>Tendencia:</strong> {st.session_state.señal['tendencia']}</div>
         </div>
         """, unsafe_allow_html=True)
 
@@ -218,6 +210,7 @@ if st.session_state.conectado:
                     st.session_state.alerta = None
                     st.session_state.señal = None
                     st.session_state.tiempo_inicio_monitoreo = None
+                    st.session_state.estado_retroceso = False
                     st.session_state.log.append("🔄 Reiniciando búsqueda...")
                     time.sleep(2)
                     st.rerun()
@@ -235,32 +228,43 @@ if st.session_state.conectado:
                         st.session_state.activo_seleccionado = None
                         st.session_state.alerta = None
                         st.session_state.tiempo_inicio_monitoreo = None
+                        st.session_state.estado_retroceso = False
                         time.sleep(2)
                         st.rerun()
 
-                # Monitorear el activo seleccionado
-                resultado = evaluar_activo(
+                # Evaluar el activo en seguimiento
+                en_retroceso, cruce, precio = evaluar_activo_seguimiento(
                     st.session_state.api,
                     st.session_state.activo_seleccionado['asset'],
-                    st.session_state.estrategias_activas
+                    st.session_state.activo_seleccionado['tendencia']
                 )
-                # Condición de señal: debe ser válida según tendencia, y además estar lista o ser tendencia fuerte
-                if resultado and resultado['señal_valida'] and (resultado['lista_para_entrar'] or resultado['tendencia_fuerte']) and resultado['direccion']:
+
+                # Actualizar estado de retroceso para la alerta
+                if en_retroceso and not st.session_state.estado_retroceso:
+                    st.session_state.estado_retroceso = True
+                    st.session_state.alerta = f"🔔 {st.session_state.activo_seleccionado['asset']} - Retroceso detectado. Esperando cruce de EMAs..."
+                    st.session_state.log.append(f"↩️ Retroceso detectado en {st.session_state.activo_seleccionado['asset']}")
+                elif not en_retroceso and st.session_state.estado_retroceso:
+                    st.session_state.estado_retroceso = False
+                    st.session_state.alerta = None
+
+                # Si hay cruce de EMAs y estamos en retroceso (o se acaba de producir), generar señal
+                if cruce:
                     entrada = now.strftime("%H:%M:%S")
                     vencimiento = (now + timedelta(minutes=5)).strftime("%H:%M:%S")
                     st.session_state.señal = {
-                        'asset': resultado['asset'],
-                        'direccion': resultado['direccion'],
+                        'asset': st.session_state.activo_seleccionado['asset'],
+                        'direccion': st.session_state.activo_seleccionado['tendencia'],
                         'entrada': entrada,
                         'vencimiento': vencimiento,
-                        'estrategias': resultado['estrategias'],
+                        'tendencia': st.session_state.activo_seleccionado['tendencia'],
                         'timestamp': now
                     }
-                    st.session_state.log.append(f"🚀 SEÑAL GENERADA: {resultado['asset']} - {resultado['direccion']} a las {entrada}")
+                    st.session_state.log.append(f"🚀 SEÑAL GENERADA: {st.session_state.activo_seleccionado['asset']} - {st.session_state.activo_seleccionado['tendencia']} a las {entrada} (cruce de EMAs)")
                     st.rerun()
-                else:
-                    time.sleep(2)
-                    st.rerun()
+
+                time.sleep(2)
+                st.rerun()
         else:
             # No tenemos activo, buscamos uno nuevo
             activos_totales = st.session_state.activos_totales
@@ -290,17 +294,17 @@ if st.session_state.conectado:
             mejor = seleccionar_mejor_activo(
                 st.session_state.api,
                 ronda_actual,
-                st.session_state.estrategias_activas,
-                min_puntuacion=200
+                min_fuerza=30
             )
 
             if mejor:
                 st.session_state.activo_seleccionado = mejor
-                st.session_state.alerta = f"🔔 {mejor['asset']} - Preparándose: cumple {len(mejor['estrategias'])} estrategias. Señal inminente."
+                st.session_state.alerta = f"🔔 {mejor['asset']} - Tendencia {mejor['tendencia']} detectada. Esperando retroceso..."
                 st.session_state.tiempo_inicio_monitoreo = datetime.now(ecuador)
-                st.session_state.log.append(f"✅ Activo seleccionado: {mejor['asset']} (puntuación {mejor['puntuacion']})")
+                st.session_state.estado_retroceso = False
+                st.session_state.log.append(f"✅ Activo seleccionado: {mejor['asset']} (tendencia {mejor['tendencia']}, fuerza {mejor['fuerza']:.1f})")
             else:
-                st.session_state.log.append("⚠️ No se encontraron activos con suficientes estrategias.")
+                st.session_state.log.append("⚠️ No se encontraron activos con tendencia clara.")
 
             st.session_state.indice_ronda += 1
             time.sleep(pausa_entre_rondas)
