@@ -5,21 +5,21 @@ from datetime import datetime, timedelta
 import pytz
 from iqoptionapi.stable_api import IQ_Option
 from bot import (
-    evaluar_activo,
+    evaluar_activo_seleccion,
+    evaluar_activo_seguimiento,
     seleccionar_mejor_activo,
-    verificar_cruce_ema,
     obtener_activos_abiertos,
     ESTRATEGIAS
 )
 
 st.set_page_config(
-    page_title="NEUROTRADER PRO - 10 ESTRATEGIAS",
+    page_title="NEUROTRADER PRO",
     page_icon="🧠",
     layout="wide",
     initial_sidebar_state="expanded"
 )
 
-# Estilos CSS profesionales
+# Estilos CSS (igual que antes)
 st.markdown("""
 <style>
     .stApp { background-color: #0b0f17; color: #e0e0e0; }
@@ -60,7 +60,7 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# Inicializar session_state
+# Inicializar session_state (igual que antes)
 if 'api' not in st.session_state:
     st.session_state.api = None
 if 'conectado' not in st.session_state:
@@ -101,7 +101,6 @@ def conectar(email, password):
             st.session_state.saldo = saldo if saldo is not None else 0.0
             st.session_state.log.append(f"✅ Conectado - Saldo: {st.session_state.saldo}")
             st.session_state.activos_totales = obtener_activos_abiertos(api, "AMBOS")
-            st.session_state.log.append(f"📊 Total activos disponibles: {len(st.session_state.activos_totales)}")
             return True
         else:
             st.error(f"Error: {reason}")
@@ -137,16 +136,21 @@ with st.sidebar:
             desconectar()
 
     st.markdown("---")
-    st.markdown("### ⚙️ Configuración")
-
-    tipo_mercado = st.selectbox("Mercado", ["OTC", "REAL", "AMBOS"], index=2)
-    min_estrategias = st.slider("Mínimo de estrategias coincidentes", 1, 5, 2, 1,
-                                help="Seleccionar activos con al menos este número de estrategias en la misma dirección")
+    st.markdown("### ⚙️ Configuración de mercado")
+    tipo_mercado = st.selectbox("Tipo de mercado", ["OTC", "REAL", "AMBOS"], index=2)
+    st.markdown("---")
+    st.markdown("### ⚙️ Parámetros de estrategia")
+    min_consenso = st.slider("Mínimo de estrategias en consenso", 1, 5, 2, 1,
+                              help="Número mínimo de estrategias que deben coincidir en la misma dirección")
+    umbral_pullback = st.slider("Umbral pullback (fracción de ATR)", 0.1, 1.0, 0.3, 0.05,
+                                help="Movimiento mínimo en contra de la tendencia para considerar pullback")
+    ventana_cruce = st.slider("Ventana para cruce de EMA (velas)", 1, 5, 2, 1,
+                              help="Número de velas hacia atrás para buscar cruce")
     tamaño_ronda = st.slider("Activos por ronda", 5, 50, 15, 5)
-    pausa_entre_rondas = st.slider("Pausa entre rondas (seg)", 5, 60, 10, 5)
-    timeout_monitoreo = st.slider("Timeout de monitoreo (minutos)", 5, 30, 10, 1,
+    pausa_entre_rondas = st.slider("Pausa entre rondas (seg)", 5, 60, 15, 5)
+    timeout_monitoreo = st.slider("Timeout de monitoreo (minutos)", 5, 30, 15, 1,
                                    help="Si el activo no da señal en este tiempo, se descarta.")
-    anticipacion = st.slider("Anticipación de señal (segundos)", 0, 60, 15, 5,
+    anticipacion = st.slider("Anticipación de señal (segundos)", 0, 60, 20, 5,
                              help="Tiempo antes de la entrada para mostrar alerta")
 
     st.markdown("---")
@@ -198,7 +202,8 @@ if st.session_state.conectado:
             <div class="signal-detail"><strong>Activo:</strong> {st.session_state.señal['asset']}</div>
             <div class="signal-detail"><strong>Entrada:</strong> {st.session_state.señal['entrada']}</div>
             <div class="signal-detail"><strong>Vencimiento:</strong> {st.session_state.señal['vencimiento']}</div>
-            <div class="signal-detail"><strong>Estrategias:</strong> {', '.join(st.session_state.señal['estrategias'])}</div>
+            <div class="signal-detail"><strong>Estrategia:</strong> {st.session_state.señal['estrategia']}</div>
+            <div class="signal-detail"><strong>Consenso:</strong> {st.session_state.señal.get('consenso', 'N/A')} estrategias</div>
         </div>
         """, unsafe_allow_html=True)
 
@@ -211,12 +216,11 @@ if st.session_state.conectado:
     if st.session_state.monitoreando:
         now = datetime.now(ecuador)
 
-        # Si ya tenemos un activo seleccionado
         if st.session_state.activo_seleccionado and isinstance(st.session_state.activo_seleccionado, dict):
-            # Verificar si ya pasó el tiempo de la señal
+            # Verificar señal
             if st.session_state.señal:
                 tiempo_transcurrido = (now - st.session_state.señal['timestamp']).total_seconds()
-                if tiempo_transcurrido > 300:  # 5 minutos
+                if tiempo_transcurrido > 300:
                     st.session_state.activo_seleccionado = None
                     st.session_state.alerta = None
                     st.session_state.señal = None
@@ -228,7 +232,7 @@ if st.session_state.conectado:
                     time.sleep(5)
                     st.rerun()
             else:
-                # Verificar timeout de monitoreo
+                # Timeout
                 if st.session_state.tiempo_inicio_monitoreo is None:
                     st.session_state.tiempo_inicio_monitoreo = now
                 else:
@@ -241,43 +245,45 @@ if st.session_state.conectado:
                         time.sleep(2)
                         st.rerun()
 
-                # Verificar cruce de EMA
-                cruce = verificar_cruce_ema(
+                direccion_esperada = st.session_state.activo_seleccionado.get('direccion')
+                if not direccion_esperada:
+                    st.session_state.activo_seleccionado = None
+                    st.rerun()
+
+                lista_para_entrar, direccion, fuerza, estrategia = evaluar_activo_seguimiento(
                     st.session_state.api,
                     st.session_state.activo_seleccionado['asset'],
-                    st.session_state.activo_seleccionado['direccion']
+                    direccion_esperada,
+                    umbral_pullback=umbral_pullback,
+                    ventana_cruce=ventana_cruce
                 )
-                if cruce:
+                if lista_para_entrar and direccion:
                     entrada = now + timedelta(seconds=anticipacion)
                     entrada_str = entrada.strftime("%H:%M:%S")
                     vencimiento = (entrada + timedelta(minutes=5)).strftime("%H:%M:%S")
                     st.session_state.señal = {
                         'asset': st.session_state.activo_seleccionado['asset'],
-                        'direccion': st.session_state.activo_seleccionado['direccion'],
+                        'direccion': direccion,
                         'entrada': entrada_str,
                         'vencimiento': vencimiento,
-                        'estrategias': st.session_state.activo_seleccionado['estrategias'],
+                        'estrategia': estrategia,
+                        'consenso': st.session_state.activo_seleccionado.get('consenso', 0),
                         'timestamp': now
                     }
-                    st.session_state.log.append(f"🚀 SEÑAL GENERADA: {st.session_state.activo_seleccionado['asset']} - {st.session_state.activo_seleccionado['direccion']} a las {entrada_str}")
+                    st.session_state.log.append(f"🚀 SEÑAL GENERADA: {st.session_state.activo_seleccionado['asset']} - {direccion} a las {entrada_str}")
                     st.rerun()
                 else:
-                    st.session_state.alerta = f"Esperando cruce de EMA para {st.session_state.activo_seleccionado['asset']} (dirección {st.session_state.activo_seleccionado['direccion']})..."
+                    st.session_state.alerta = f"Esperando pullback y confirmación para {st.session_state.activo_seleccionado['asset']} (consenso {st.session_state.activo_seleccionado.get('consenso', 0)} estrategias)..."
                     time.sleep(2)
                     st.rerun()
         else:
-            # No hay activo, buscar uno nuevo
-            # Actualizar activos según el tipo de mercado
+            # Buscar nuevo activo
             activos_totales = st.session_state.activos_totales
             if not activos_totales:
-                st.session_state.activos_totales = obtener_activos_abiertos(st.session_state.api, tipo_mercado)
-                activos_totales = st.session_state.activos_totales
-                if not activos_totales:
-                    st.warning("No hay activos disponibles")
-                    time.sleep(pausa_entre_rondas)
-                    st.rerun()
+                st.warning("No hay activos disponibles")
+                time.sleep(pausa_entre_rondas)
+                st.rerun()
 
-            # Dividir en rondas
             inicio = st.session_state.indice_ronda * tamaño_ronda
             fin = inicio + tamaño_ronda
             ronda_actual = activos_totales[inicio:fin]
@@ -290,16 +296,16 @@ if st.session_state.conectado:
             mejor = seleccionar_mejor_activo(
                 st.session_state.api,
                 ronda_actual,
-                min_estrategias=min_estrategias
+                min_consenso=min_consenso
             )
 
             if mejor:
                 st.session_state.activo_seleccionado = mejor
-                st.session_state.alerta = f"🔔 {mejor['asset']} - Dirección {mejor['direccion']} con {mejor['num_estrategias']} estrategias. Esperando cruce de EMA."
+                st.session_state.alerta = f"🔔 {mejor['asset']} - Consenso de {mejor['consenso']} estrategias hacia {mejor['direccion']}. Esperando pullback y confirmación."
                 st.session_state.tiempo_inicio_monitoreo = datetime.now(ecuador)
-                st.session_state.log.append(f"✅ Activo seleccionado: {mejor['asset']} ({mejor['direccion']}, {mejor['num_estrategias']} estrategias, fuerza {mejor['fuerza']:.1f})")
+                st.session_state.log.append(f"✅ Activo seleccionado: {mejor['asset']} ({mejor['direccion']}, consenso {mejor['consenso']})")
             else:
-                st.session_state.log.append("⚠️ No se encontraron activos con suficientes estrategias coincidentes.")
+                st.session_state.log.append("⚠️ No se encontraron activos con suficiente consenso.")
 
             st.session_state.indice_ronda += 1
             time.sleep(pausa_entre_rondas)
