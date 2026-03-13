@@ -6,12 +6,11 @@ import pytz
 from iqoptionapi.stable_api import IQ_Option
 from bot import (
     buscar_mejor_senal,
-    obtener_activos_abiertos,
-    evaluar_activo_senal
+    obtener_activos_abiertos
 )
 
 st.set_page_config(
-    page_title="NEUROTRADER GROCK",
+    page_title="NEUROTRADER - ESTRATEGIA GROK",
     page_icon="🧠",
     layout="wide",
     initial_sidebar_state="expanded"
@@ -65,9 +64,11 @@ if 'saldo' not in st.session_state:
 if 'monitoreando' not in st.session_state:
     st.session_state.monitoreando = False
 if 'operacion_en_curso' not in st.session_state:
-    st.session_state.operacion_en_curso = None  # dict con datos de la operación actual
-if 'proxima_senal' not in st.session_state:
-    st.session_state.proxima_senal = None  # dict con la mejor señal encontrada (para siguiente operación)
+    st.session_state.operacion_en_curso = False
+if 'senal_actual' not in st.session_state:
+    st.session_state.senal_actual = None
+if 'proxima_entrada' not in st.session_state:
+    st.session_state.proxima_entrada = None
 if 'log' not in st.session_state:
     st.session_state.log = []
 
@@ -97,12 +98,10 @@ def desconectar():
     st.session_state.api = None
     st.session_state.conectado = False
     st.session_state.monitoreando = False
-    st.session_state.operacion_en_curso = None
-    st.session_state.proxima_senal = None
 
 # Sidebar
 with st.sidebar:
-    st.markdown("## 🧠 NEUROTRADER GROCK")
+    st.markdown("## 🧠 NEUROTRADER")
     st.markdown("---")
     email = st.text_input("📧 Correo electrónico")
     password = st.text_input("🔑 Contraseña", type="password")
@@ -122,16 +121,18 @@ with st.sidebar:
     st.markdown("### ⚙️ Configuración")
 
     tipo_mercado = st.selectbox("Mercado", ["OTC", "REAL", "AMBOS"], index=2)
-    min_fuerza = st.slider("Fuerza mínima para señal", 30, 90, 50, 5,
-                           help="Las señales con fuerza inferior se ignoran")
-    anticipacion = st.slider("Anticipación de señal (segundos)", 0, 60, 20, 5,
-                             help="Tiempo antes del cierre de la vela para mostrar la señal")
+    umbral_adx = st.slider("Umbral ADX mínimo", 15, 30, 20, 1,
+                           help="ADX mínimo para confirmar tendencia")
+    anticipacion = st.slider("Anticipación de señal (segundos)", 0, 30, 20, 5,
+                             help="Tiempo antes de la entrada para mostrar la señal")
 
     st.markdown("---")
     if st.session_state.conectado:
         if not st.session_state.monitoreando:
             if st.button("▶️ INICIAR MONITOREO", use_container_width=True, type="primary"):
                 st.session_state.monitoreando = True
+                st.session_state.operacion_en_curso = False
+                st.session_state.senal_actual = None
                 st.session_state.log.append("🚀 Monitoreo iniciado")
                 st.rerun()
         else:
@@ -150,49 +151,37 @@ if st.session_state.conectado:
         st.metric("Saldo", f"${st.session_state.saldo:.2f}")
     with col2:
         if st.session_state.operacion_en_curso:
-            st.metric("Operación en curso", st.session_state.operacion_en_curso['asset'])
+            st.metric("Operación en curso", "SÍ")
         else:
-            st.metric("Operación en curso", "Ninguna")
+            st.metric("Operación en curso", "NO")
     with col3:
         st.metric("Señales generadas", len([s for s in st.session_state.log if "🚀" in s]))
 
-    # Mostrar operación en curso con cuenta regresiva
-    if st.session_state.operacion_en_curso:
-        op = st.session_state.operacion_en_curso
-        now = datetime.now(ecuador)
-        vencimiento = datetime.strptime(op['vencimiento'], "%H:%M:%S").time()
-        vencimiento_dt = datetime.combine(now.date(), vencimiento)
-        if vencimiento_dt < now:
-            vencimiento_dt += timedelta(days=1)
-        resto = (vencimiento_dt - now).total_seconds()
-        mins, segs = divmod(int(resto), 60)
+    # Mostrar señal actual si existe
+    if st.session_state.senal_actual:
+        s = st.session_state.senal_actual
+        card_class = "call-card" if s['direccion'] == "CALL" else "put-card"
         st.markdown(f"""
-        <div class="signal-card waiting-card">
-            <div class="signal-title">⏳ OPERACIÓN EN CURSO</div>
-            <div class="signal-detail"><strong>Activo:</strong> {op['asset']}</div>
-            <div class="signal-detail"><strong>Dirección:</strong> {op['direccion']}</div>
-            <div class="signal-detail"><strong>Entrada:</strong> {op['entrada']}</div>
-            <div class="signal-detail"><strong>Vencimiento:</strong> {op['vencimiento']}</div>
-            <div class="signal-detail"><strong>Tiempo restante:</strong> {mins:02d}:{segs:02d}</div>
+        <div class="signal-card {card_class}">
+            <div class="signal-title">{'🔵 COMPRA (CALL)' if s['direccion'] == 'CALL' else '🔴 VENTA (PUT)'}</div>
+            <div class="signal-detail"><strong>Activo:</strong> {s['asset']}</div>
+            <div class="signal-detail"><strong>Entrada:</strong> {s['entrada']}</div>
+            <div class="signal-detail"><strong>Vencimiento:</strong> {s['vencimiento']} (5 min)</div>
+            <div class="signal-detail"><strong>Nivel Fibonacci:</strong> {s['nombre_fib']} ({s['nivel_fib']:.5f})</div>
+            <div class="signal-detail"><strong>Rechazo:</strong> {'✅ Sí' if s['rechazo'] else '❌ No'}</div>
+            <div class="signal-detail"><strong>Fuerza ADX:</strong> {s['fuerza']:.1f}</div>
         </div>
         """, unsafe_allow_html=True)
 
-    # Mostrar próxima señal si existe (mientras no hay operación)
-    if not st.session_state.operacion_en_curso and st.session_state.proxima_senal:
-        senal = st.session_state.proxima_senal
-        card_class = "call-card" if senal['direccion'] == "CALL" else "put-card"
-        st.markdown(f"""
-        <div class="signal-card {card_class}">
-            <div class="signal-title">{'🔵 COMPRA' if senal['direccion'] == 'CALL' else '🔴 VENTA'}</div>
-            <div class="signal-detail"><strong>Activo:</strong> {senal['asset']}</div>
-            <div class="signal-detail"><strong>Fuerza:</strong> {senal['fuerza']:.1f}</div>
-            <div class="signal-detail"><strong>Nivel Fibonacci:</strong> {senal['nivel_fib']:.5f}</div>
-            <div class="signal-detail"><strong>Precio actual:</strong> {senal['precio']:.5f}</div>
-            <div class="signal-detail"><strong>Zona de entrada:</strong> {senal['zona'][0]:.5f} - {senal['zona'][1]:.5f}</div>
-        </div>
-        """, unsafe_allow_html=True)
-    elif not st.session_state.operacion_en_curso:
-        st.info("Esperando señal...")
+        if st.session_state.proxima_entrada:
+            now = datetime.now(ecuador)
+            segundos_restantes = (st.session_state.proxima_entrada - now).total_seconds()
+            if segundos_restantes > 0:
+                st.info(f"⏳ Próxima entrada en {int(segundos_restantes)} segundos...")
+            else:
+                st.success("✅ Momento de entrada alcanzado")
+    else:
+        st.info("No hay señal activa en este momento.")
 
     # Log de eventos
     with st.expander("📋 Log de eventos", expanded=True):
@@ -203,60 +192,59 @@ if st.session_state.conectado:
     if st.session_state.monitoreando:
         now = datetime.now(ecuador)
 
-        # Si hay operación en curso, verificar si ya venció
+        # Si hay una operación en curso, esperar a que termine
         if st.session_state.operacion_en_curso:
-            vencimiento = datetime.strptime(st.session_state.operacion_en_curso['vencimiento'], "%H:%M:%S").time()
-            vencimiento_dt = datetime.combine(now.date(), vencimiento)
-            if vencimiento_dt < now:
-                vencimiento_dt += timedelta(days=1)
-            if now >= vencimiento_dt:
-                # Operación vencida, limpiar
-                st.session_state.operacion_en_curso = None
-                st.session_state.log.append("✅ Operación finalizada")
-                # Inmediatamente después de finalizar, ver si hay próxima señal
-                if st.session_state.proxima_senal:
-                    # Lanzar la próxima señal
-                    senal = st.session_state.proxima_senal
-                    entrada = now + timedelta(seconds=anticipacion)
-                    entrada_str = entrada.strftime("%H:%M:%S")
-                    vencimiento_str = (entrada + timedelta(minutes=5)).strftime("%H:%M:%S")
-                    st.session_state.operacion_en_curso = {
-                        'asset': senal['asset'],
-                        'direccion': senal['direccion'],
-                        'entrada': entrada_str,
-                        'vencimiento': vencimiento_str,
-                        'fuerza': senal['fuerza']
-                    }
-                    st.session_state.proxima_senal = None
-                    st.session_state.log.append(f"🚀 SEÑAL EJECUTADA: {senal['asset']} - {senal['direccion']} a las {entrada_str}")
-                # Si no hay próxima, seguir buscando
-                time.sleep(1)
-                st.rerun()
+            if st.session_state.proxima_entrada and now >= st.session_state.proxima_entrada:
+                # La operación ya debería haberse ejecutado, ahora esperamos 5 minutos para que venza
+                tiempo_vencimiento = st.session_state.proxima_entrada + timedelta(minutes=5)
+                if now >= tiempo_vencimiento:
+                    st.session_state.operacion_en_curso = False
+                    st.session_state.senal_actual = None
+                    st.session_state.proxima_entrada = None
+                    st.session_state.log.append("✅ Operación finalizada. Buscando nueva señal...")
+                    time.sleep(2)
+                    st.rerun()
+                else:
+                    # Aún no vence
+                    segundos_restantes = (tiempo_vencimiento - now).total_seconds()
+                    st.info(f"⏳ Operación en curso. Vence en {int(segundos_restantes)} segundos.")
+                    time.sleep(5)
+                    st.rerun()
             else:
-                # Operación aún activa, mientras tanto buscar próxima señal
-                with st.spinner("Buscando próxima oportunidad..."):
-                    mejor = buscar_mejor_senal(st.session_state.api, tipo_mercado, min_fuerza)
-                    if mejor:
-                        st.session_state.proxima_senal = mejor
-                        st.session_state.log.append(f"🎯 Próxima señal encontrada: {mejor['asset']} ({mejor['direccion']}, fuerza {mejor['fuerza']:.1f})")
-                    else:
-                        st.session_state.proxima_senal = None
-                time.sleep(5)  # esperar un poco antes de la próxima búsqueda
+                # No debería pasar, pero por si acaso
+                st.session_state.operacion_en_curso = False
                 st.rerun()
         else:
-            # No hay operación, buscar la mejor señal ahora
-            mejor = buscar_mejor_senal(st.session_state.api, tipo_mercado, min_fuerza)
-            if mejor:
-                st.session_state.proxima_senal = mejor
-                st.session_state.log.append(f"🎯 Señal encontrada: {mejor['asset']} ({mejor['direccion']}, fuerza {mejor['fuerza']:.1f})")
-                # Esperar hasta el momento de entrada (simulado)
-                # En un bot real, aquí se ejecutaría la operación automáticamente
-                # Nosotros solo mostramos la señal
-                st.rerun()
-            else:
-                st.session_state.log.append("🔍 No se encontraron señales en este ciclo.")
-                time.sleep(10)
-                st.rerun()
+            # No hay operación, buscar la mejor señal
+            with st.spinner("Buscando la mejor oportunidad..."):
+                activos = obtener_activos_abiertos(st.session_state.api, tipo_mercado)
+                if activos:
+                    mejor = buscar_mejor_senal(st.session_state.api, activos, umbral_adx)
+                    if mejor:
+                        # Generar señal con anticipación
+                        entrada = now + timedelta(seconds=anticipacion)
+                        vencimiento = entrada + timedelta(minutes=5)
+                        st.session_state.senal_actual = {
+                            'asset': mejor['asset'],
+                            'direccion': mejor['direccion'],
+                            'entrada': entrada.strftime("%H:%M:%S"),
+                            'vencimiento': vencimiento.strftime("%H:%M:%S"),
+                            'nivel_fib': mejor['nivel_fib'],
+                            'nombre_fib': mejor['nombre_fib'],
+                            'rechazo': mejor['rechazo'],
+                            'fuerza': mejor['fuerza']
+                        }
+                        st.session_state.proxima_entrada = entrada
+                        st.session_state.operacion_en_curso = True
+                        st.session_state.log.append(f"🚀 SEÑAL GENERADA: {mejor['asset']} - {mejor['direccion']} a las {entrada.strftime('%H:%M:%S')}")
+                        st.rerun()
+                    else:
+                        st.session_state.log.append("🔍 No se encontraron señales en este ciclo.")
+                else:
+                    st.session_state.log.append("⚠️ No hay activos disponibles.")
+            # Esperar un poco antes del próximo ciclo
+            time.sleep(10)
+            st.rerun()
 
 else:
     st.info("🔒 Conéctate a IQ Option para comenzar.")
