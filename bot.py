@@ -13,7 +13,7 @@ logger = logging.getLogger(__name__)
 # Zona horaria de Ecuador
 ecuador = pytz.timezone("America/Guayaquil")
 
-# Lista de activos comunes (fallback, aunque idealmente se obtienen de la API)
+# Lista de activos comunes (fallback)
 FALLBACK_ACTIVOS = [
     "EURUSD-OTC", "GBPUSD-OTC", "AUDUSD-OTC", "USDJPY-OTC",
     "USDCHF-OTC", "NZDUSD-OTC", "USDCAD-OTC", "GBPJPY-OTC",
@@ -101,12 +101,9 @@ def detectar_niveles_ocultos(df, ventana=50, umbral_volumen=0.35):
     df = df.iloc[-ventana:].copy()
     niveles = []
     for _, row in df.iterrows():
-        # Estimación simple: el punto medio ponderado por volumen (aproximación)
-        # Como no tenemos datos de ticks, usamos el precio medio como representativo
         precio_medio = (row['high'] + row['low']) / 2
-        if row['vol_ratio'] > 1.5:  # volumen alto
+        if row['vol_ratio'] > 1.5:
             niveles.append(precio_medio)
-    # Agrupar niveles cercanos (tolerancia 0.1%)
     niveles_unicos = []
     tolerancia = 0.001
     for p in sorted(niveles):
@@ -118,10 +115,6 @@ def detectar_niveles_ocultos(df, ventana=50, umbral_volumen=0.35):
 # DETECCIÓN DE ZONAS DE BALANCE
 # =========================
 def detectar_zonas_balance(df, ventana=20):
-    """
-    Identifica velas doji o de rango estrecho con delta de volumen pequeño.
-    Retorna lista de índices de velas que son zonas de balance.
-    """
     if len(df) < ventana:
         return []
     df = df.iloc[-ventana:].copy()
@@ -129,26 +122,20 @@ def detectar_zonas_balance(df, ventana=20):
     for i, row in df.iterrows():
         rango = row['high'] - row['low']
         cuerpo = abs(row['close'] - row['open'])
-        # Vela doji o de rango pequeño
         if cuerpo < rango * 0.1 or rango / row['close'] < 0.001:
             zonas.append(i)
     return zonas
 
 # =========================
-# DETECCIÓN DE SOPORTES/RESISTENCIAS (niveles que han detenido el precio)
+# DETECCIÓN DE SOPORTES/RESISTENCIAS
 # =========================
 def detectar_soportes_resistencias(df, num_toques=3, ventana=100):
-    """
-    Busca niveles donde el precio ha rebotado al menos `num_toques` veces.
-    Retorna lista de niveles con su tipo.
-    """
     if len(df) < ventana:
         return []
     df = df.iloc[-ventana:].copy()
     highs = df['high']
     lows = df['low']
     conteo = defaultdict(int)
-    # Identificar máximos y mínimos locales
     for i in range(1, len(df)-1):
         if highs.iloc[i] > highs.iloc[i-1] and highs.iloc[i] > highs.iloc[i+1]:
             conteo[round(highs.iloc[i], 5)] += 1
@@ -160,7 +147,6 @@ def detectar_soportes_resistencias(df, num_toques=3, ventana=100):
         if cnt >= num_toques:
             tipo = 'resistencia' if precio > precio_actual else 'soporte'
             niveles.append({'precio': precio, 'tipo': tipo, 'toques': cnt})
-    # Ordenar por cercanía al precio actual
     niveles.sort(key=lambda x: abs(x['precio'] - precio_actual))
     return niveles
 
@@ -168,25 +154,15 @@ def detectar_soportes_resistencias(df, num_toques=3, ventana=100):
 # ANÁLISIS DE FUERZA DE UNA VELA
 # =========================
 def analizar_fuerza_vela(df, indice):
-    """
-    Analiza la vela en el índice dado y devuelve:
-        - direccion: 'CALL' o 'PUT' según el cierre
-        - fuerza: 1-10 basado en volumen, rango y delta
-        - nivel_activado: descripción del nivel que activó la señal (si aplica)
-    """
     if indice < 0 or indice >= len(df):
         return None
     vela = df.iloc[indice]
     cuerpo = abs(vela['close'] - vela['open'])
     rango = vela['high'] - vela['low']
     direccion = 'CALL' if vela['close'] > vela['open'] else 'PUT'
-    
-    # Fuerza base por tamaño de cuerpo
     fuerza_base = min(10, int(cuerpo / (rango + 1e-6) * 10))
-    # Bonus por volumen
     if 'vol_ratio' in vela:
         fuerza_base += min(5, int(vela['vol_ratio'] * 2))
-    # Penalización por mechas largas
     if direccion == 'CALL':
         mecha_sup = vela['high'] - vela['close']
         if mecha_sup > rango * 0.3:
@@ -196,25 +172,15 @@ def analizar_fuerza_vela(df, indice):
         if mecha_inf > rango * 0.3:
             fuerza_base -= 2
     fuerza = max(1, min(10, fuerza_base))
-    
-    # Detectar si rompió algún nivel relevante (simplificado)
     nivel_activado = None
-    # Aquí se podría integrar con los niveles detectados
     return {'direccion': direccion, 'fuerza': fuerza, 'nivel_activado': nivel_activado}
 
 # =========================
 # EVALUAR CONFIABILIDAD DE UN ACTIVO
 # =========================
 def evaluar_confiabilidad(api, asset):
-    """
-    Analiza un activo y devuelve un puntaje de confiabilidad basado en:
-        - Volumen promedio
-        - Estabilidad (baja volatilidad)
-        - Niveles detectados (cantidad y calidad)
-    Retorna un dict con puntaje y detalles, o None si no se puede evaluar.
-    """
     try:
-        candles = api.get_candles(asset, 60, 100, time.time())  # velas de 1 min
+        candles = api.get_candles(asset, 60, 100, time.time())
         if not candles or len(candles) < 50:
             return None
         df = pd.DataFrame(candles)
@@ -224,23 +190,17 @@ def evaluar_confiabilidad(api, asset):
         if len(df) < 50:
             return None
         df = calcular_indicadores(df)
-        
-        # Volumen promedio
         vol_prom = df['volume'].mean()
-        # Volatilidad (rango porcentual medio)
         rango_medio = ((df['high'] - df['low']) / df['close']).mean()
-        # Niveles de soporte/resistencia
         niveles = detectar_soportes_resistencias(df, num_toques=2)
-        puntaje_niveles = len(niveles) * 2  # cada nivel suma 2 puntos
-        
-        # Puntaje total (normalizado a 100)
+        puntaje_niveles = len(niveles) * 2
         puntaje = vol_prom * 0.01 + (1 / (rango_medio + 0.001)) * 10 + puntaje_niveles
         return {
             'asset': asset,
             'puntaje': puntaje,
             'vol_prom': vol_prom,
             'rango_medio': rango_medio,
-            'niveles': niveles[:3]  # guardamos los 3 más cercanos
+            'niveles': niveles[:3]
         }
     except Exception as e:
         logger.error(f"Error evaluando confiabilidad de {asset}: {e}")
@@ -250,9 +210,6 @@ def evaluar_confiabilidad(api, asset):
 # SELECCIONAR EL ACTIVO MÁS CONFIABLE
 # =========================
 def seleccionar_mejor_activo(api, lista_activos):
-    """
-    Evalúa todos los activos y retorna el que tenga mayor puntaje de confiabilidad.
-    """
     mejores = []
     for asset in lista_activos:
         res = evaluar_confiabilidad(api, asset)
@@ -265,7 +222,7 @@ def seleccionar_mejor_activo(api, lista_activos):
     return mejores[0]
 
 # =========================
-# OBTENER ACTIVOS ABIERTOS (desde IQ Option)
+# OBTENER ACTIVOS ABIERTOS
 # =========================
 def obtener_activos_abiertos(api, tipo_mercado="AMBOS"):
     try:
@@ -274,7 +231,6 @@ def obtener_activos_abiertos(api, tipo_mercado="AMBOS"):
         if 'binary' in open_time:
             for asset, data in open_time['binary'].items():
                 if data.get('open', False):
-                    # Aquí se pueden incluir tanto OTC como reales
                     activos.append(asset)
         logger.info(f"Se obtuvieron {len(activos)} activos abiertos")
         if not activos:
