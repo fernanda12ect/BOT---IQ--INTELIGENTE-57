@@ -1,24 +1,19 @@
 import streamlit as st
 import pandas as pd
 import time
-import plotly.graph_objects as go
-from plotly.subplots import make_subplots
 from datetime import datetime, timedelta
 import pytz
 from iqoptionapi.stable_api import IQ_Option
 from bot import (
-    obtener_activos_abiertos,
+    evaluar_activo,
     seleccionar_mejor_activo,
-    detectar_niveles_ocultos,
-    detectar_zonas_balance,
-    detectar_soportes_resistencias,
-    analizar_fuerza_vela,
-    calcular_indicadores
+    obtener_activos_abiertos,
+    ESTRATEGIAS
 )
 
 st.set_page_config(
-    page_title="TRADING AUTÓNOMO 1MIN",
-    page_icon="📈",
+    page_title="NEUROTRADER - 10 ESTRATEGIAS",
+    page_icon="🧠",
     layout="wide",
     initial_sidebar_state="expanded"
 )
@@ -49,6 +44,13 @@ st.markdown("""
         margin: 5px 0;
         border-radius: 5px;
     }
+    .asset-box {
+        background-color: #1a2a3a;
+        padding: 15px;
+        border-radius: 8px;
+        margin-bottom: 10px;
+        border-left: 4px solid #00a3ff;
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -63,16 +65,18 @@ if 'saldo' not in st.session_state:
     st.session_state.saldo = 0.0
 if 'monitoreando' not in st.session_state:
     st.session_state.monitoreando = False
-if 'activo_actual' not in st.session_state:
-    st.session_state.activo_actual = None  # dict con info del activo seleccionado
+if 'activo_seleccionado' not in st.session_state:
+    st.session_state.activo_seleccionado = None
 if 'senal_actual' not in st.session_state:
-    st.session_state.senal_actual = None  # última señal generada
-if 'df_velas' not in st.session_state:
-    st.session_state.df_velas = None  # DataFrame con velas para el gráfico
+    st.session_state.senal_actual = None
+if 'proxima_evaluacion' not in st.session_state:
+    st.session_state.proxima_evaluacion = None
 if 'log' not in st.session_state:
     st.session_state.log = []
-if 'proximo_segundo_59' not in st.session_state:
-    st.session_state.proximo_segundo_59 = None
+if 'indice_ronda' not in st.session_state:
+    st.session_state.indice_ronda = 0
+if 'activos_totales' not in st.session_state:
+    st.session_state.activos_totales = []
 
 # Zona horaria
 ecuador = pytz.timezone("America/Guayaquil")
@@ -88,6 +92,8 @@ def conectar(email, password):
             saldo = api.get_balance()
             st.session_state.saldo = saldo if saldo is not None else 0.0
             st.session_state.log.append(f"✅ Conectado - Saldo: {st.session_state.saldo}")
+            st.session_state.activos_totales = obtener_activos_abiertos(api, "AMBOS")
+            st.session_state.log.append(f"📊 Total activos disponibles: {len(st.session_state.activos_totales)}")
             return True
         else:
             st.error(f"Error: {reason}")
@@ -100,65 +106,12 @@ def desconectar():
     st.session_state.api = None
     st.session_state.conectado = False
     st.session_state.monitoreando = False
-    st.session_state.activo_actual = None
+    st.session_state.activo_seleccionado = None
     st.session_state.senal_actual = None
-
-def crear_grafico(df, niveles_ocultos, niveles_sr, zonas_balance, senal):
-    """
-    Crea un gráfico de velas con líneas de niveles y marcadores de señal.
-    """
-    fig = make_subplots(rows=2, cols=1, shared_xaxes=True,
-                        vertical_spacing=0.05,
-                        row_heights=[0.7, 0.3],
-                        subplot_titles=(f"Velas de 1 min - {st.session_state.activo_actual['asset'] if st.session_state.activo_actual else 'Sin activo'}", "Volumen"))
-
-    # Velas
-    fig.add_trace(go.Candlestick(x=df.index,
-                                  open=df['open'],
-                                  high=df['high'],
-                                  low=df['low'],
-                                  close=df['close'],
-                                  name='Precio',
-                                  increasing_line_color='#00ff88',
-                                  decreasing_line_color='#ff4b4b'),
-                  row=1, col=1)
-
-    # Líneas de niveles ocultos
-    for nivel in niveles_ocultos:
-        fig.add_hline(y=nivel, line_dash="dash", line_color="orange", row=1, col=1)
-
-    # Líneas de soportes/resistencias
-    for nivel in niveles_sr:
-        color = "green" if nivel['tipo'] == 'soporte' else "red"
-        fig.add_hline(y=nivel['precio'], line_dash="solid", line_color=color, row=1, col=1)
-
-    # Marcadores de zonas de balance
-    for idx in zonas_balance:
-        if idx < len(df):
-            fig.add_vline(x=df.index[idx], line_dash="dot", line_color="yellow", row=1, col=1)
-
-    # Señal actual (si existe)
-    if senal:
-        color = "#00ff88" if senal['direccion'] == 'CALL' else "#ff4b4b"
-        fig.add_annotation(x=df.index[-1], y=df['close'].iloc[-1],
-                           text=f"SEÑAL {senal['direccion']} (fuerza {senal['fuerza']})",
-                           showarrow=True, arrowhead=1, ax=0, ay=-40,
-                           font=dict(color=color, size=12),
-                           bgcolor="black", opacity=0.8)
-
-    # Volumen
-    colors = ['#00ff88' if close > open else '#ff4b4b' for close, open in zip(df['close'], df['open'])]
-    fig.add_trace(go.Bar(x=df.index, y=df['volume'], name='Volumen', marker_color=colors), row=2, col=1)
-
-    fig.update_layout(title=f"Análisis en tiempo real - {st.session_state.activo_actual['asset'] if st.session_state.activo_actual else 'Buscando activo...'}",
-                      xaxis_rangeslider_visible=False,
-                      template='plotly_dark',
-                      height=700)
-    return fig
 
 # Sidebar
 with st.sidebar:
-    st.markdown("## 📈 TRADING AUTÓNOMO 1MIN")
+    st.markdown("## 🧠 NEUROTRADER")
     st.markdown("---")
     email = st.text_input("📧 Correo electrónico")
     password = st.text_input("🔑 Contraseña", type="password")
@@ -177,15 +130,21 @@ with st.sidebar:
     st.markdown("---")
     st.markdown("### ⚙️ Configuración")
 
-    tipo_mercado = st.selectbox("Tipo de mercado", ["OTC", "REAL", "AMBOS"], index=2)
-    min_confiabilidad = st.slider("Puntaje mínimo de confiabilidad", 0, 100, 30, 5)
-    anticipacion = st.slider("Anticipación de señal (segundos antes del cierre)", 1, 10, 2, 1)
+    tipo_mercado = st.selectbox("Mercado", ["OTC", "REAL", "AMBOS"], index=2)
+    min_votos = st.slider("Mínimo de estrategias para seleccionar", 1, 5, 2, 1)
+    umbral_fuerza = st.slider("Umbral de fuerza para mantener activo", 0, 100, 50, 5)
+    tamanio_ronda = st.slider("Activos por ronda", 10, 50, 20, 5)
+    pausa_rondas = st.slider("Pausa entre rondas (seg)", 5, 30, 10, 5)
+    anticipacion = st.slider("Anticipación de señal (seg)", 5, 30, 20, 5)
 
     st.markdown("---")
     if st.session_state.conectado:
         if not st.session_state.monitoreando:
             if st.button("▶️ INICIAR", use_container_width=True, type="primary"):
                 st.session_state.monitoreando = True
+                st.session_state.indice_ronda = 0
+                st.session_state.activo_seleccionado = None
+                st.session_state.senal_actual = None
                 st.session_state.log.append("🚀 Monitoreo iniciado")
                 st.rerun()
         else:
@@ -202,126 +161,103 @@ if st.session_state.conectado:
     with col1:
         st.metric("Saldo", f"${st.session_state.saldo:.2f}")
     with col2:
-        if st.session_state.activo_actual:
-            st.metric("Activo objetivo", st.session_state.activo_actual['asset'])
+        if st.session_state.activo_seleccionado:
+            st.metric("Activo actual", st.session_state.activo_seleccionado['asset'])
         else:
-            st.metric("Activo objetivo", "Buscando...")
+            st.metric("Activo actual", "Ninguno")
     with col3:
-        st.metric("Señales generadas", len([s for s in st.session_state.log if "SEÑAL" in s]))
+        st.metric("Señales generadas", len([s for s in st.session_state.log if "🚀" in s]))
 
-    # Mostrar señal actual
     if st.session_state.senal_actual:
         s = st.session_state.senal_actual
         card_class = "call-card" if s['direccion'] == "CALL" else "put-card"
         st.markdown(f"""
         <div class="signal-card {card_class}">
-            <div class="signal-title">{'🔵 COMPRA (CALL)' if s['direccion'] == 'CALL' else '🔴 VENTA (PUT)'}</div>
+            <div class="signal-title">{'🔵 COMPRA' if s['direccion'] == 'CALL' else '🔴 VENTA'}</div>
             <div class="signal-detail"><strong>Activo:</strong> {s['asset']}</div>
             <div class="signal-detail"><strong>Entrada:</strong> {s['entrada']}</div>
-            <div class="signal-detail"><strong>Vencimiento:</strong> 1 minuto</div>
-            <div class="signal-detail"><strong>Fuerza:</strong> {s['fuerza']}/10</div>
-            <div class="signal-detail"><strong>Nivel activado:</strong> {s.get('nivel', 'Ninguno')}</div>
+            <div class="signal-detail"><strong>Vencimiento:</strong> 5 minutos</div>
+            <div class="signal-detail"><strong>Votos:</strong> CALL {s['votos_call']} / PUT {s['votos_put']}</div>
+            <div class="signal-detail"><strong>Fuerza:</strong> {s['fuerza']:.1f}</div>
         </div>
         """, unsafe_allow_html=True)
 
-    # Log de eventos
     with st.expander("📋 Log de eventos", expanded=True):
-        for linea in st.session_state.log[-20:]:
+        for linea in st.session_state.log[-30:]:
             st.text(linea)
 
-    # Lógica principal
+    # Lógica de monitoreo
     if st.session_state.monitoreando:
         now = datetime.now(ecuador)
-        segundo = now.second
 
-        # Calcular el próximo segundo 59
-        if st.session_state.proximo_segundo_59 is None:
-            # Si ya pasó el 59, programar para el próximo minuto
-            if segundo >= 59:
-                st.session_state.proximo_segundo_59 = now.replace(second=59, microsecond=0) + timedelta(minutes=1)
+        # Si hay un activo seleccionado, evaluamos cada 5 minutos
+        if st.session_state.activo_seleccionado:
+            if st.session_state.proxima_evaluacion is None:
+                # Sincronizar con el cierre de la vela de 5 minutos
+                minutos = now.minute
+                resto = minutos % 5
+                if resto == 0:
+                    prox = now + timedelta(minutes=5)
+                else:
+                    prox = now + timedelta(minutes=(5 - resto))
+                prox = prox.replace(second=0, microsecond=0)
+                st.session_state.proxima_evaluacion = prox
+
+            if now >= st.session_state.proxima_evaluacion:
+                # Evaluar el activo actual
+                res = evaluar_activo(st.session_state.api, st.session_state.activo_seleccionado['asset'])
+                if res and res['fuerza'] >= umbral_fuerza and (res['votos_call'] + res['votos_put']) >= min_votos:
+                    entrada = now + timedelta(seconds=anticipacion)
+                    entrada_str = entrada.strftime("%H:%M:%S")
+                    st.session_state.senal_actual = {
+                        'asset': res['asset'],
+                        'direccion': res['direccion'],
+                        'entrada': entrada_str,
+                        'votos_call': res['votos_call'],
+                        'votos_put': res['votos_put'],
+                        'fuerza': res['fuerza']
+                    }
+                    st.session_state.log.append(f"🚀 SEÑAL GENERADA: {res['asset']} - {res['direccion']} a las {entrada_str}")
+                elif res is None:
+                    st.session_state.log.append(f"⚠️ {st.session_state.activo_seleccionado['asset']} perdió fuerza. Buscando otro...")
+                    st.session_state.activo_seleccionado = None
+                st.session_state.proxima_evaluacion += timedelta(minutes=5)
+                time.sleep(1)
+                st.rerun()
             else:
-                st.session_state.proximo_segundo_59 = now.replace(second=59, microsecond=0)
-
-        # Si es hora de evaluar (segundo 59 - anticipacion)
-        segundo_objetivo = 59 - anticipacion
-        if segundo >= segundo_objetivo and now >= st.session_state.proximo_segundo_59 - timedelta(seconds=anticipacion):
-            # Estamos en la ventana de evaluación
-            st.info(f"⏳ Evaluando en el segundo {segundo}...")
-
-            # Si no hay activo seleccionado, buscar el mejor
-            if st.session_state.activo_actual is None:
-                with st.spinner("Buscando el activo más confiable..."):
-                    activos = obtener_activos_abiertos(st.session_state.api, tipo_mercado)
-                    mejor = seleccionar_mejor_activo(st.session_state.api, activos)
-                    if mejor and mejor['puntaje'] >= min_confiabilidad:
-                        st.session_state.activo_actual = mejor
-                        st.session_state.log.append(f"✅ Activo seleccionado: {mejor['asset']} (puntaje {mejor['puntaje']:.1f})")
-                    else:
-                        st.session_state.log.append("⚠️ No se encontró activo con suficiente confiabilidad.")
-                        # Programar próxima evaluación en 1 minuto
-                        st.session_state.proximo_segundo_59 += timedelta(minutes=1)
-                        time.sleep(1)
-                        st.rerun()
-
-            # Si hay activo, analizar la última vela
-            if st.session_state.activo_actual:
-                asset = st.session_state.activo_actual['asset']
-                # Obtener últimas 50 velas de 1 minuto
-                candles = st.session_state.api.get_candles(asset, 60, 50, time.time())
-                if candles and len(candles) >= 30:
-                    df = pd.DataFrame(candles)
-                    for col in ['open', 'max', 'min', 'close', 'volume']:
-                        df[col] = pd.to_numeric(df[col], errors='coerce')
-                    df.dropna(inplace=True)
-                    if len(df) >= 30:
-                        df = calcular_indicadores(df)
-                        st.session_state.df_velas = df
-
-                        # Detectar niveles
-                        niveles_ocultos = detectar_niveles_ocultos(df)
-                        niveles_sr = detectar_soportes_resistencias(df)
-                        zonas_balance = detectar_zonas_balance(df)
-
-                        # Analizar la última vela
-                        analisis = analizar_fuerza_vela(df, -1)
-                        if analisis and analisis['fuerza'] >= 7:  # umbral de fuerza
-                            # Generar señal
-                            entrada = now.replace(second=0, microsecond=0) + timedelta(minutes=1)
-                            st.session_state.senal_actual = {
-                                'asset': asset,
-                                'direccion': analisis['direccion'],
-                                'entrada': entrada.strftime("%H:%M:%S"),
-                                'fuerza': analisis['fuerza'],
-                                'nivel': analisis['nivel_activado'] or "Nivel no especificado"
-                            }
-                            st.session_state.log.append(f"🚀 SEÑAL GENERADA: {asset} - {analisis['direccion']} a las {entrada.strftime('%H:%M:%S')}")
-
-                # Programar próxima evaluación (en el siguiente minuto)
-                st.session_state.proximo_segundo_59 += timedelta(minutes=1)
+                segundos = (st.session_state.proxima_evaluacion - now).total_seconds()
+                st.info(f"⏳ Próxima evaluación en {int(segundos)} segundos...")
                 time.sleep(1)
                 st.rerun()
         else:
-            # Esperar hasta el momento adecuado
-            if st.session_state.proximo_segundo_59:
-                segundos_restantes = (st.session_state.proximo_segundo_59 - now).total_seconds() - anticipacion
-                if segundos_restantes > 0:
-                    st.info(f"⏳ Próxima evaluación en {int(segundos_restantes)} segundos...")
-                else:
-                    st.info("⏳ Preparando evaluación...")
-            time.sleep(1)
-            st.rerun()
+            # No hay activo, buscamos uno nuevo
+            activos = st.session_state.activos_totales
+            if not activos:
+                st.warning("No hay activos disponibles")
+                time.sleep(pausa_rondas)
+                st.rerun()
 
-    # Mostrar gráfico si hay datos
-    if st.session_state.df_velas is not None and st.session_state.activo_actual:
-        # Detectar niveles para el gráfico (usamos los últimos datos)
-        df = st.session_state.df_velas
-        niveles_ocultos = detectar_niveles_ocultos(df)
-        niveles_sr = detectar_soportes_resistencias(df)
-        zonas_balance = detectar_zonas_balance(df)
-        fig = crear_grafico(df, niveles_ocultos, niveles_sr, zonas_balance, st.session_state.senal_actual)
-        st.plotly_chart(fig, use_container_width=True)
-    else:
-        st.info("Esperando datos para mostrar el gráfico...")
+            inicio = st.session_state.indice_ronda * tamanio_ronda
+            fin = inicio + tamanio_ronda
+            ronda = activos[inicio:fin]
+
+            if not ronda:
+                st.session_state.indice_ronda = 0
+                st.rerun()
+
+            st.session_state.log.append(f"Analizando ronda {st.session_state.indice_ronda + 1} ({len(ronda)} activos)...")
+            mejor = seleccionar_mejor_activo(st.session_state.api, ronda, min_votos)
+
+            if mejor:
+                st.session_state.activo_seleccionado = mejor
+                st.session_state.log.append(f"✅ Activo seleccionado: {mejor['asset']} (votos CALL/PUT: {mejor['votos_call']}/{mejor['votos_put']})")
+                st.session_state.proxima_evaluacion = None
+            else:
+                st.session_state.log.append("⚠️ No se encontraron activos con suficientes estrategias.")
+
+            st.session_state.indice_ronda += 1
+            time.sleep(pausa_rondas)
+            st.rerun()
 
 else:
     st.info("🔒 Conéctate a IQ Option para comenzar.")
