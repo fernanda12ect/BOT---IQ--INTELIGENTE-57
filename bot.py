@@ -18,7 +18,7 @@ FALLBACK_ACTIVOS = [
     "EURUSD-OTC", "GBPUSD-OTC", "AUDUSD-OTC", "USDJPY-OTC",
     "USDCHF-OTC", "NZDUSD-OTC", "USDCAD-OTC", "GBPJPY-OTC",
     "EURJPY-OTC", "AUDCAD-OTC", "AUDJPY-OTC", "EURGBP-OTC",
-    "BTCUSD", "ETHUSD", "SOLUSD", "XRPUSD"
+    "EURUSD", "GBPUSD", "AUDUSD", "USDJPY", "USDCHF", "NZDUSD", "USDCAD"
 ]
 
 # =========================
@@ -82,6 +82,20 @@ def calcular_indicadores(df):
     mad = tp.rolling(20).apply(lambda x: np.abs(x - x.mean()).mean())
     df['cci'] = (tp - sma_tp) / (0.015 * mad)
 
+    # Heiken Ashi
+    df['ha_close'] = (df['open'] + df['high'] + df['low'] + df['close']) / 4
+    df['ha_open'] = (df['open'].shift(1) + df['close'].shift(1)) / 2
+    df['ha_high'] = df[['high', 'ha_open', 'ha_close']].max(axis=1)
+    df['ha_low'] = df[['low', 'ha_open', 'ha_close']].min(axis=1)
+
+    # Alligator
+    df['jaw'] = df['close'].rolling(13).mean().shift(8)
+    df['teeth'] = df['close'].rolling(8).mean().shift(5)
+    df['lips'] = df['close'].rolling(5).mean().shift(3)
+
+    # Momentum
+    df['momentum'] = df['close'] - df['close'].shift(14)
+
     # Volumen promedio
     df['vol_avg'] = df['volume'].rolling(20).mean()
     df['vol_ratio'] = df['volume'] / df['vol_avg']
@@ -89,98 +103,124 @@ def calcular_indicadores(df):
     return df
 
 # =========================
-# DETECCIÓN DE NIVELES OCULTOS
+# 10 ESTRATEGIAS
 # =========================
-def detectar_niveles_ocultos(df, ventana=50, umbral_volumen=0.35):
-    """
-    Detecta niveles donde se concentró al menos `umbral_volumen` del volumen total en una vela.
-    Retorna lista de precios.
-    """
-    if len(df) < ventana:
-        return []
-    df = df.iloc[-ventana:].copy()
-    niveles = []
-    for _, row in df.iterrows():
-        precio_medio = (row['high'] + row['low']) / 2
-        if row['vol_ratio'] > 1.5:
-            niveles.append(precio_medio)
-    niveles_unicos = []
-    tolerancia = 0.001
-    for p in sorted(niveles):
-        if not niveles_unicos or abs(p - niveles_unicos[-1]) / p > tolerancia:
-            niveles_unicos.append(p)
-    return niveles_unicos
+def estrategia_1_ema_adx(df):
+    if len(df) < 2:
+        return None, 0
+    last = df.iloc[-1]
+    if last['adx'] > 15:
+        if last['ema9'] > last['ema21']:
+            return 'CALL', 8
+        elif last['ema9'] < last['ema21']:
+            return 'PUT', 8
+    return None, 0
+
+def estrategia_2_macd_adx(df):
+    if len(df) < 2:
+        return None, 0
+    last = df.iloc[-1]
+    prev = df.iloc[-2]
+    if last['adx'] < 20:
+        if prev['macd'] <= prev['signal'] and last['macd'] > last['signal'] and last['hist'] > 0:
+            return 'CALL', 7
+        if prev['macd'] >= prev['signal'] and last['macd'] < last['signal'] and last['hist'] < 0:
+            return 'PUT', 7
+    return None, 0
+
+def estrategia_3_bb_rsi(df):
+    last = df.iloc[-1]
+    if last['close'] <= last['bb_lower'] and last['rsi'] < 30:
+        return 'CALL', 9
+    if last['close'] >= last['bb_upper'] and last['rsi'] > 70:
+        return 'PUT', 9
+    return None, 0
+
+def estrategia_4_sar_ema(df):
+    if len(df) < 2:
+        return None, 0
+    last = df.iloc[-1]
+    prev = df.iloc[-2]
+    if prev['close'] <= prev['ema50'] and last['close'] > last['ema50']:
+        return 'CALL', 6
+    if prev['close'] >= prev['ema50'] and last['close'] < last['ema50']:
+        return 'PUT', 6
+    return None, 0
+
+def estrategia_5_stoch_adx(df):
+    if len(df) < 2:
+        return None, 0
+    last = df.iloc[-1]
+    prev = df.iloc[-2]
+    if last['adx'] > 20:
+        if prev['stoch_k'] < 20 and last['stoch_k'] > last['stoch_d']:
+            return 'CALL', 8
+        if prev['stoch_k'] > 80 and last['stoch_k'] < last['stoch_d']:
+            return 'PUT', 8
+    return None, 0
+
+def estrategia_6_supertrend_ema(df):
+    last = df.iloc[-1]
+    if last['ema9'] > last['ema21'] and last['ema9'] > last['ema50']:
+        return 'CALL', 6
+    if last['ema9'] < last['ema21'] and last['ema9'] < last['ema50']:
+        return 'PUT', 6
+    return None, 0
+
+def estrategia_7_heiken_ashi_ema(df):
+    if len(df) < 2:
+        return None, 0
+    last = df.iloc[-1]
+    prev = df.iloc[-2]
+    if prev['ha_close'] > prev['ha_open'] and last['ha_close'] > last['ha_open'] and last['close'] > last['ema9']:
+        return 'CALL', 7
+    if prev['ha_close'] < prev['ha_open'] and last['ha_close'] < last['ha_open'] and last['close'] < last['ema9']:
+        return 'PUT', 7
+    return None, 0
+
+def estrategia_8_cci_bb(df):
+    last = df.iloc[-1]
+    if last['cci'] > -100 and last['close'] <= last['bb_lower']:
+        return 'CALL', 8
+    if last['cci'] < 100 and last['close'] >= last['bb_upper']:
+        return 'PUT', 8
+    return None, 0
+
+def estrategia_9_alligator_momentum(df):
+    last = df.iloc[-1]
+    if last['lips'] > last['teeth'] > last['jaw'] and last['momentum'] > 0:
+        return 'CALL', 7
+    if last['lips'] < last['teeth'] < last['jaw'] and last['momentum'] < 0:
+        return 'PUT', 7
+    return None, 0
+
+def estrategia_10_volumen_ema(df):
+    last = df.iloc[-1]
+    if last['vol_ratio'] > 1.5 and last['ema9'] > last['ema21']:
+        return 'CALL', 6
+    if last['vol_ratio'] > 1.5 and last['ema9'] < last['ema21']:
+        return 'PUT', 6
+    return None, 0
+
+ESTRATEGIAS = [
+    ("EMA + ADX", estrategia_1_ema_adx, 8),
+    ("MACD reversión", estrategia_2_macd_adx, 7),
+    ("BB + RSI", estrategia_3_bb_rsi, 9),
+    ("Cruce EMA50", estrategia_4_sar_ema, 6),
+    ("Stoch + ADX", estrategia_5_stoch_adx, 8),
+    ("Supertrend", estrategia_6_supertrend_ema, 6),
+    ("Heiken Ashi", estrategia_7_heiken_ashi_ema, 7),
+    ("CCI + BB", estrategia_8_cci_bb, 8),
+    ("Alligator", estrategia_9_alligator_momentum, 7),
+    ("Volumen + EMA", estrategia_10_volumen_ema, 6)
+]
 
 # =========================
-# DETECCIÓN DE ZONAS DE BALANCE
+# EVALUAR UN ACTIVO
 # =========================
-def detectar_zonas_balance(df, ventana=20):
-    if len(df) < ventana:
-        return []
-    df = df.iloc[-ventana:].copy()
-    zonas = []
-    for i, row in df.iterrows():
-        rango = row['high'] - row['low']
-        cuerpo = abs(row['close'] - row['open'])
-        if cuerpo < rango * 0.1 or rango / row['close'] < 0.001:
-            zonas.append(i)
-    return zonas
-
-# =========================
-# DETECCIÓN DE SOPORTES/RESISTENCIAS
-# =========================
-def detectar_soportes_resistencias(df, num_toques=3, ventana=100):
-    if len(df) < ventana:
-        return []
-    df = df.iloc[-ventana:].copy()
-    highs = df['high']
-    lows = df['low']
-    conteo = defaultdict(int)
-    for i in range(1, len(df)-1):
-        if highs.iloc[i] > highs.iloc[i-1] and highs.iloc[i] > highs.iloc[i+1]:
-            conteo[round(highs.iloc[i], 5)] += 1
-        if lows.iloc[i] < lows.iloc[i-1] and lows.iloc[i] < lows.iloc[i+1]:
-            conteo[round(lows.iloc[i], 5)] += 1
-    niveles = []
-    precio_actual = df['close'].iloc[-1]
-    for precio, cnt in conteo.items():
-        if cnt >= num_toques:
-            tipo = 'resistencia' if precio > precio_actual else 'soporte'
-            niveles.append({'precio': precio, 'tipo': tipo, 'toques': cnt})
-    niveles.sort(key=lambda x: abs(x['precio'] - precio_actual))
-    return niveles
-
-# =========================
-# ANÁLISIS DE FUERZA DE UNA VELA
-# =========================
-def analizar_fuerza_vela(df, indice):
-    if indice < 0 or indice >= len(df):
-        return None
-    vela = df.iloc[indice]
-    cuerpo = abs(vela['close'] - vela['open'])
-    rango = vela['high'] - vela['low']
-    direccion = 'CALL' if vela['close'] > vela['open'] else 'PUT'
-    fuerza_base = min(10, int(cuerpo / (rango + 1e-6) * 10))
-    if 'vol_ratio' in vela:
-        fuerza_base += min(5, int(vela['vol_ratio'] * 2))
-    if direccion == 'CALL':
-        mecha_sup = vela['high'] - vela['close']
-        if mecha_sup > rango * 0.3:
-            fuerza_base -= 2
-    else:
-        mecha_inf = vela['low'] - vela['open']
-        if mecha_inf > rango * 0.3:
-            fuerza_base -= 2
-    fuerza = max(1, min(10, fuerza_base))
-    nivel_activado = None
-    return {'direccion': direccion, 'fuerza': fuerza, 'nivel_activado': nivel_activado}
-
-# =========================
-# EVALUAR CONFIABILIDAD DE UN ACTIVO
-# =========================
-def evaluar_confiabilidad(api, asset):
+def evaluar_activo(api, asset):
     try:
-        candles = api.get_candles(asset, 60, 100, time.time())
+        candles = api.get_candles(asset, 300, 100, time.time())
         if not candles or len(candles) < 50:
             return None
         df = pd.DataFrame(candles)
@@ -189,37 +229,61 @@ def evaluar_confiabilidad(api, asset):
         df.dropna(inplace=True)
         if len(df) < 50:
             return None
+
         df = calcular_indicadores(df)
-        vol_prom = df['volume'].mean()
-        rango_medio = ((df['high'] - df['low']) / df['close']).mean()
-        niveles = detectar_soportes_resistencias(df, num_toques=2)
-        puntaje_niveles = len(niveles) * 2
-        puntaje = vol_prom * 0.01 + (1 / (rango_medio + 0.001)) * 10 + puntaje_niveles
+
+        votos_call = 0
+        votos_put = 0
+        peso_call = 0
+        peso_put = 0
+        estrategias_activas = []
+
+        for nombre, func, peso_base in ESTRATEGIAS:
+            try:
+                direc, peso_extra = func(df)
+                if direc:
+                    estrategias_activas.append(nombre)
+                    if direc == 'CALL':
+                        votos_call += 1
+                        peso_call += peso_base + (peso_extra or 0)
+                    else:
+                        votos_put += 1
+                        peso_put += peso_base + (peso_extra or 0)
+            except:
+                continue
+
+        if votos_call + votos_put == 0:
+            return None
+
+        if votos_call > votos_put:
+            direccion = 'CALL'
+            fuerza = peso_call / votos_call
+        elif votos_put > votos_call:
+            direccion = 'PUT'
+            fuerza = peso_put / votos_put
+        else:
+            if peso_call > peso_put:
+                direccion = 'CALL'
+                fuerza = peso_call / votos_call if votos_call > 0 else 0
+            else:
+                direccion = 'PUT'
+                fuerza = peso_put / votos_put if votos_put > 0 else 0
+
+        puntuacion = (votos_call + votos_put) * 10 + (peso_call + peso_put)
+
         return {
             'asset': asset,
-            'puntaje': puntaje,
-            'vol_prom': vol_prom,
-            'rango_medio': rango_medio,
-            'niveles': niveles[:3]
+            'direccion': direccion,
+            'votos_call': votos_call,
+            'votos_put': votos_put,
+            'fuerza': fuerza,
+            'estrategias': estrategias_activas,
+            'puntuacion': puntuacion,
+            'precio': df['close'].iloc[-1]
         }
     except Exception as e:
-        logger.error(f"Error evaluando confiabilidad de {asset}: {e}")
+        logger.error(f"Error evaluando {asset}: {e}")
         return None
-
-# =========================
-# SELECCIONAR EL ACTIVO MÁS CONFIABLE
-# =========================
-def seleccionar_mejor_activo(api, lista_activos):
-    mejores = []
-    for asset in lista_activos:
-        res = evaluar_confiabilidad(api, asset)
-        if res:
-            mejores.append(res)
-        time.sleep(0.1)
-    if not mejores:
-        return None
-    mejores.sort(key=lambda x: x['puntaje'], reverse=True)
-    return mejores[0]
 
 # =========================
 # OBTENER ACTIVOS ABIERTOS
@@ -231,12 +295,40 @@ def obtener_activos_abiertos(api, tipo_mercado="AMBOS"):
         if 'binary' in open_time:
             for asset, data in open_time['binary'].items():
                 if data.get('open', False):
-                    activos.append(asset)
+                    if tipo_mercado == 'OTC' and '-OTC' in asset:
+                        activos.append(asset)
+                    elif tipo_mercado == 'REAL' and '-OTC' not in asset:
+                        activos.append(asset)
+                    elif tipo_mercado == 'AMBOS':
+                        activos.append(asset)
         logger.info(f"Se obtuvieron {len(activos)} activos abiertos")
         if not activos:
             logger.warning("Usando lista de activos predeterminada (fallback)")
-            return FALLBACK_ACTIVOS
+            if tipo_mercado == 'OTC':
+                return [a for a in FALLBACK_ACTIVOS if '-OTC' in a]
+            elif tipo_mercado == 'REAL':
+                return [a for a in FALLBACK_ACTIVOS if '-OTC' not in a]
+            else:
+                return FALLBACK_ACTIVOS
         return activos
     except Exception as e:
         logger.error(f"Error obteniendo activos: {e}")
         return FALLBACK_ACTIVOS
+
+# =========================
+# SELECCIONAR EL MEJOR ACTIVO DE UNA RONDA
+# =========================
+def seleccionar_mejor_activo(api, lista_activos, min_votos=2):
+    mejores = []
+    for asset in lista_activos:
+        try:
+            res = evaluar_activo(api, asset)
+            if res and (res['votos_call'] + res['votos_put']) >= min_votos:
+                mejores.append(res)
+            time.sleep(0.1)
+        except:
+            continue
+    if not mejores:
+        return None
+    mejores.sort(key=lambda x: x['puntuacion'], reverse=True)
+    return mejores[0]
