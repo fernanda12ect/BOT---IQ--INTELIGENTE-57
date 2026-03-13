@@ -10,7 +10,7 @@ from bot import (
 )
 
 st.set_page_config(
-    page_title="NEUROTRADER - ESTRATEGIA GROK",
+    page_title="NEUROTRADER PRO - OFERTA/DEMANDA",
     page_icon="🧠",
     layout="wide",
     initial_sidebar_state="expanded"
@@ -69,8 +69,14 @@ if 'senal_actual' not in st.session_state:
     st.session_state.senal_actual = None
 if 'proxima_entrada' not in st.session_state:
     st.session_state.proxima_entrada = None
+if 'alertas' not in st.session_state:
+    st.session_state.alertas = []
 if 'log' not in st.session_state:
     st.session_state.log = []
+if 'indice_ronda' not in st.session_state:
+    st.session_state.indice_ronda = 0
+if 'activos_totales' not in st.session_state:
+    st.session_state.activos_totales = []
 
 # Zona horaria
 ecuador = pytz.timezone("America/Guayaquil")
@@ -86,6 +92,9 @@ def conectar(email, password):
             saldo = api.get_balance()
             st.session_state.saldo = saldo if saldo is not None else 0.0
             st.session_state.log.append(f"✅ Conectado - Saldo: {st.session_state.saldo}")
+            # Obtener activos una vez conectado
+            st.session_state.activos_totales = obtener_activos_abiertos(api, "AMBOS")
+            st.session_state.log.append(f"📊 Total activos disponibles: {len(st.session_state.activos_totales)}")
             return True
         else:
             st.error(f"Error: {reason}")
@@ -98,10 +107,11 @@ def desconectar():
     st.session_state.api = None
     st.session_state.conectado = False
     st.session_state.monitoreando = False
+    st.session_state.operacion_en_curso = False
 
 # Sidebar
 with st.sidebar:
-    st.markdown("## 🧠 NEUROTRADER")
+    st.markdown("## 🧠 NEUROTRADER PRO")
     st.markdown("---")
     email = st.text_input("📧 Correo electrónico")
     password = st.text_input("🔑 Contraseña", type="password")
@@ -121,10 +131,9 @@ with st.sidebar:
     st.markdown("### ⚙️ Configuración")
 
     tipo_mercado = st.selectbox("Mercado", ["OTC", "REAL", "AMBOS"], index=2)
-    umbral_adx = st.slider("Umbral ADX mínimo", 15, 30, 20, 1,
-                           help="ADX mínimo para confirmar tendencia")
-    anticipacion = st.slider("Anticipación de señal (segundos)", 0, 30, 20, 5,
-                             help="Tiempo antes de la entrada para mostrar la señal")
+    tamanio_ronda = st.slider("Activos por ronda", 10, 50, 20, 5)
+    pausa_rondas = st.slider("Pausa entre rondas (seg)", 5, 30, 10, 5)
+    anticipacion = st.slider("Anticipación de señal (seg)", 5, 30, 20, 5)
 
     st.markdown("---")
     if st.session_state.conectado:
@@ -133,6 +142,7 @@ with st.sidebar:
                 st.session_state.monitoreando = True
                 st.session_state.operacion_en_curso = False
                 st.session_state.senal_actual = None
+                st.session_state.alertas = []
                 st.session_state.log.append("🚀 Monitoreo iniciado")
                 st.rerun()
         else:
@@ -146,7 +156,7 @@ with st.sidebar:
 # Área principal
 if st.session_state.conectado:
     # Métricas
-    col1, col2, col3 = st.columns(3)
+    col1, col2, col3, col4 = st.columns(4)
     with col1:
         st.metric("Saldo", f"${st.session_state.saldo:.2f}")
     with col2:
@@ -156,20 +166,29 @@ if st.session_state.conectado:
             st.metric("Operación en curso", "NO")
     with col3:
         st.metric("Señales generadas", len([s for s in st.session_state.log if "🚀" in s]))
+    with col4:
+        st.metric("Alertas activas", len(st.session_state.alertas))
+
+    # Mostrar alertas anticipadas
+    if st.session_state.alertas:
+        with st.expander("🔔 Alertas anticipadas", expanded=True):
+            for alerta in st.session_state.alertas[-5:]:
+                st.markdown(f'<div class="alert-card">{alerta}</div>', unsafe_allow_html=True)
 
     # Mostrar señal actual si existe
     if st.session_state.senal_actual:
         s = st.session_state.senal_actual
         card_class = "call-card" if s['direccion'] == "CALL" else "put-card"
+        zona = s['zona']
         st.markdown(f"""
         <div class="signal-card {card_class}">
             <div class="signal-title">{'🔵 COMPRA (CALL)' if s['direccion'] == 'CALL' else '🔴 VENTA (PUT)'}</div>
             <div class="signal-detail"><strong>Activo:</strong> {s['asset']}</div>
             <div class="signal-detail"><strong>Entrada:</strong> {s['entrada']}</div>
-            <div class="signal-detail"><strong>Vencimiento:</strong> {s['vencimiento']} (5 min)</div>
-            <div class="signal-detail"><strong>Nivel Fibonacci:</strong> {s['nombre_fib']} ({s['nivel_fib']:.5f})</div>
-            <div class="signal-detail"><strong>Rechazo:</strong> {'✅ Sí' if s['rechazo'] else '❌ No'}</div>
-            <div class="signal-detail"><strong>Fuerza ADX:</strong> {s['fuerza']:.1f}</div>
+            <div class="signal-detail"><strong>Vencimiento:</strong> {s['vencimiento']} min</div>
+            <div class="signal-detail"><strong>Zona {zona['tipo'].upper()}:</strong> {zona['precio_min']:.5f} - {zona['precio_max']:.5f}</div>
+            <div class="signal-detail"><strong>Confirmación:</strong> {s['tipo_vela'] if s['confirmacion'] else 'Zona fuerte'}</div>
+            <div class="signal-detail"><strong>Fuerza consenso:</strong> {s['fuerza']:.1f}%</div>
         </div>
         """, unsafe_allow_html=True)
 
@@ -188,16 +207,20 @@ if st.session_state.conectado:
         for linea in st.session_state.log[-30:]:
             st.text(linea)
 
-    # Lógica de monitoreo
+    # =========================
+    # LÓGICA PRINCIPAL
+    # =========================
     if st.session_state.monitoreando:
         now = datetime.now(ecuador)
 
         # Si hay una operación en curso, esperar a que termine
         if st.session_state.operacion_en_curso:
-            if st.session_state.proxima_entrada and now >= st.session_state.proxima_entrada:
-                # La operación ya debería haberse ejecutado, ahora esperamos 5 minutos para que venza
-                tiempo_vencimiento = st.session_state.proxima_entrada + timedelta(minutes=5)
-                if now >= tiempo_vencimiento:
+            if st.session_state.proxima_entrada:
+                # La operación debería haberse ejecutado en el momento de entrada
+                # Calculamos el vencimiento real (entrada + minutos de vencimiento)
+                vencimiento_real = st.session_state.proxima_entrada + timedelta(minutes=st.session_state.senal_actual['vencimiento'])
+                if now >= vencimiento_real:
+                    # Operación finalizada
                     st.session_state.operacion_en_curso = False
                     st.session_state.senal_actual = None
                     st.session_state.proxima_entrada = None
@@ -205,45 +228,70 @@ if st.session_state.conectado:
                     time.sleep(2)
                     st.rerun()
                 else:
-                    # Aún no vence
-                    segundos_restantes = (tiempo_vencimiento - now).total_seconds()
+                    # Aún en curso, mostrar tiempo restante
+                    segundos_restantes = (vencimiento_real - now).total_seconds()
                     st.info(f"⏳ Operación en curso. Vence en {int(segundos_restantes)} segundos.")
                     time.sleep(5)
                     st.rerun()
             else:
-                # No debería pasar, pero por si acaso
+                # Error, reiniciamos
                 st.session_state.operacion_en_curso = False
                 st.rerun()
         else:
-            # No hay operación, buscar la mejor señal
-            with st.spinner("Buscando la mejor oportunidad..."):
-                activos = obtener_activos_abiertos(st.session_state.api, tipo_mercado)
-                if activos:
-                    mejor = buscar_mejor_senal(st.session_state.api, activos, umbral_adx)
-                    if mejor:
-                        # Generar señal con anticipación
-                        entrada = now + timedelta(seconds=anticipacion)
-                        vencimiento = entrada + timedelta(minutes=5)
-                        st.session_state.senal_actual = {
-                            'asset': mejor['asset'],
-                            'direccion': mejor['direccion'],
-                            'entrada': entrada.strftime("%H:%M:%S"),
-                            'vencimiento': vencimiento.strftime("%H:%M:%S"),
-                            'nivel_fib': mejor['nivel_fib'],
-                            'nombre_fib': mejor['nombre_fib'],
-                            'rechazo': mejor['rechazo'],
-                            'fuerza': mejor['fuerza']
-                        }
-                        st.session_state.proxima_entrada = entrada
-                        st.session_state.operacion_en_curso = True
-                        st.session_state.log.append(f"🚀 SEÑAL GENERADA: {mejor['asset']} - {mejor['direccion']} a las {entrada.strftime('%H:%M:%S')}")
-                        st.rerun()
-                    else:
-                        st.session_state.log.append("🔍 No se encontraron señales en este ciclo.")
+            # No hay operación, buscamos señales
+            # Actualizar lista de activos según mercado
+            activos_totales = st.session_state.activos_totales
+            if not activos_totales:
+                st.session_state.activos_totales = obtener_activos_abiertos(st.session_state.api, tipo_mercado)
+                activos_totales = st.session_state.activos_totales
+                if not activos_totales:
+                    st.warning("No hay activos disponibles")
+                    time.sleep(pausa_rondas)
+                    st.rerun()
+
+            # Dividir en rondas
+            inicio = st.session_state.indice_ronda * tamanio_ronda
+            fin = inicio + tamanio_ronda
+            ronda_actual = activos_totales[inicio:fin]
+
+            if not ronda_actual:
+                st.session_state.indice_ronda = 0
+                st.rerun()
+
+            st.session_state.log.append(f"Analizando ronda {st.session_state.indice_ronda + 1} ({len(ronda_actual)} activos)...")
+            mejor = buscar_mejor_senal(st.session_state.api, ronda_actual)
+
+            if mejor:
+                # Verificar si está cerca de la zona para alerta anticipada
+                if mejor['distancia'] > 1.5:
+                    # Lejos, solo registrar
+                    st.session_state.log.append(f"🔍 {mejor['asset']} - {mejor['direccion']} (zona a {mejor['distancia']:.1f} ATR)")
+                elif mejor['distancia'] <= 1.5 and not mejor['confirmacion']:
+                    # Cerca pero sin confirmación, generar alerta
+                    alerta = f"🔔 {mejor['asset']} se acerca a zona de {mejor['zona']['tipo']}. Esperando vela de confirmación."
+                    if alerta not in st.session_state.alertas:
+                        st.session_state.alertas.append(alerta)
+                        st.session_state.log.append(alerta)
+                elif mejor['confirmacion']:
+                    # Señal lista, generar entrada
+                    entrada = now + timedelta(seconds=anticipacion)
+                    entrada_str = entrada.strftime("%H:%M:%S")
+                    mejor['entrada'] = entrada_str
+                    st.session_state.senal_actual = mejor
+                    st.session_state.proxima_entrada = entrada
+                    st.session_state.operacion_en_curso = True
+                    st.session_state.log.append(f"🚀 SEÑAL GENERADA: {mejor['asset']} - {mejor['direccion']} a las {entrada_str} (vencimiento {mejor['vencimiento']} min)")
+                    # Limpiar alertas de este activo
+                    st.session_state.alertas = [a for a in st.session_state.alertas if mejor['asset'] not in a]
+                    st.rerun()
                 else:
-                    st.session_state.log.append("⚠️ No hay activos disponibles.")
-            # Esperar un poco antes del próximo ciclo
-            time.sleep(10)
+                    st.session_state.log.append(f"⏭️ {mejor['asset']} - cerca pero sin confirmación")
+            else:
+                st.session_state.log.append("⚠️ No se encontraron señales en esta ronda.")
+
+            # Avanzar a la siguiente ronda
+            st.session_state.indice_ronda += 1
+            time.sleep(pausa_rondas)
             st.rerun()
 
 else:
