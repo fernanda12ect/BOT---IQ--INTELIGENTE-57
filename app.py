@@ -5,20 +5,19 @@ from datetime import datetime, timedelta
 import pytz
 from iqoptionapi.stable_api import IQ_Option
 from bot import (
-    evaluar_activo,
-    seleccionar_mejor_activo,
+    buscar_mejor_senal,
     obtener_activos_abiertos,
-    ESTRATEGIAS
+    evaluar_activo_senal
 )
 
 st.set_page_config(
-    page_title="NEUROTRADER - AVISO DE CAMBIO",
+    page_title="NEUROTRADER GROCK",
     page_icon="🧠",
     layout="wide",
     initial_sidebar_state="expanded"
 )
 
-# Estilos CSS (igual que antes)
+# Estilos CSS
 st.markdown("""
 <style>
     .stApp { background-color: #0b0f17; color: #e0e0e0; }
@@ -51,13 +50,6 @@ st.markdown("""
         margin-bottom: 10px;
         border-left: 4px solid #00a3ff;
     }
-    .warning-card {
-        background-color: #3a1e1e;
-        border-left: 4px solid #ff4b4b;
-        padding: 10px;
-        margin: 5px 0;
-        border-radius: 5px;
-    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -72,18 +64,12 @@ if 'saldo' not in st.session_state:
     st.session_state.saldo = 0.0
 if 'monitoreando' not in st.session_state:
     st.session_state.monitoreando = False
-if 'activo_actual' not in st.session_state:
-    st.session_state.activo_actual = None  # dict con info del activo actual
-if 'activo_proximo' not in st.session_state:
-    st.session_state.activo_proximo = None  # dict con info del próximo activo (si hay cambio programado)
-if 'cambio_programado' not in st.session_state:
-    st.session_state.cambio_programado = None  # timestamp del cambio
-if 'ultima_senal' not in st.session_state:
-    st.session_state.ultima_senal = None
+if 'operacion_en_curso' not in st.session_state:
+    st.session_state.operacion_en_curso = None  # dict con datos de la operación actual
+if 'proxima_senal' not in st.session_state:
+    st.session_state.proxima_senal = None  # dict con la mejor señal encontrada (para siguiente operación)
 if 'log' not in st.session_state:
     st.session_state.log = []
-if 'proxima_evaluacion' not in st.session_state:
-    st.session_state.proxima_evaluacion = None
 
 # Zona horaria
 ecuador = pytz.timezone("America/Guayaquil")
@@ -111,13 +97,12 @@ def desconectar():
     st.session_state.api = None
     st.session_state.conectado = False
     st.session_state.monitoreando = False
-    st.session_state.activo_actual = None
-    st.session_state.activo_proximo = None
-    st.session_state.cambio_programado = None
+    st.session_state.operacion_en_curso = None
+    st.session_state.proxima_senal = None
 
 # Sidebar
 with st.sidebar:
-    st.markdown("## 🧠 NEUROTRADER")
+    st.markdown("## 🧠 NEUROTRADER GROCK")
     st.markdown("---")
     email = st.text_input("📧 Correo electrónico")
     password = st.text_input("🔑 Contraseña", type="password")
@@ -137,13 +122,9 @@ with st.sidebar:
     st.markdown("### ⚙️ Configuración")
 
     tipo_mercado = st.selectbox("Mercado", ["OTC", "REAL", "AMBOS"], index=2)
-    min_votos = st.slider("Mínimo de estrategias para seleccionar", 1, 5, 2, 1,
-                          help="El activo debe tener al menos este número de estrategias en la misma dirección")
-    umbral_fuerza = st.slider("Umbral de fuerza para mantener activo", 0, 100, 50, 5,
-                              help="Si la fuerza baja de este valor, se buscará un reemplazo")
-    tiempo_aviso = st.slider("Tiempo de aviso para cambio (minutos)", 5, 60, 20, 5,
-                             help="Minutos antes del cambio para notificar el nuevo activo")
-    anticipacion = st.slider("Anticipación de señal (segundos)", 0, 30, 20, 5,
+    min_fuerza = st.slider("Fuerza mínima para señal", 30, 90, 50, 5,
+                           help="Las señales con fuerza inferior se ignoran")
+    anticipacion = st.slider("Anticipación de señal (segundos)", 0, 60, 20, 5,
                              help="Tiempo antes del cierre de la vela para mostrar la señal")
 
     st.markdown("---")
@@ -152,18 +133,6 @@ with st.sidebar:
             if st.button("▶️ INICIAR MONITOREO", use_container_width=True, type="primary"):
                 st.session_state.monitoreando = True
                 st.session_state.log.append("🚀 Monitoreo iniciado")
-                with st.spinner("Buscando el mejor activo..."):
-                    activos = obtener_activos_abiertos(st.session_state.api, tipo_mercado)
-                    mejor = seleccionar_mejor_activo(st.session_state.api, activos, min_votos)
-                    if mejor:
-                        st.session_state.activo_actual = mejor
-                        st.session_state.log.append(f"✅ Activo seleccionado: {mejor['asset']} (votos CALL/PUT: {mejor['votos_call']}/{mejor['votos_put']}, fuerza {mejor['fuerza']:.1f})")
-                        now = datetime.now(ecuador)
-                        prox = now + timedelta(minutes=5)
-                        prox = prox.replace(second=0, microsecond=0)
-                        st.session_state.proxima_evaluacion = prox
-                    else:
-                        st.session_state.log.append("⚠️ No se encontró ningún activo con suficientes estrategias.")
                 st.rerun()
         else:
             if st.button("⏹️ DETENER", use_container_width=True, type="secondary"):
@@ -175,56 +144,55 @@ with st.sidebar:
 
 # Área principal
 if st.session_state.conectado:
+    # Métricas
     col1, col2, col3 = st.columns(3)
     with col1:
         st.metric("Saldo", f"${st.session_state.saldo:.2f}")
     with col2:
-        if st.session_state.activo_actual:
-            st.metric("Activo actual", st.session_state.activo_actual['asset'])
+        if st.session_state.operacion_en_curso:
+            st.metric("Operación en curso", st.session_state.operacion_en_curso['asset'])
         else:
-            st.metric("Activo actual", "Ninguno")
+            st.metric("Operación en curso", "Ninguna")
     with col3:
         st.metric("Señales generadas", len([s for s in st.session_state.log if "🚀" in s]))
 
-    # Información del activo actual
-    if st.session_state.activo_actual:
-        a = st.session_state.activo_actual
+    # Mostrar operación en curso con cuenta regresiva
+    if st.session_state.operacion_en_curso:
+        op = st.session_state.operacion_en_curso
+        now = datetime.now(ecuador)
+        vencimiento = datetime.strptime(op['vencimiento'], "%H:%M:%S").time()
+        vencimiento_dt = datetime.combine(now.date(), vencimiento)
+        if vencimiento_dt < now:
+            vencimiento_dt += timedelta(days=1)
+        resto = (vencimiento_dt - now).total_seconds()
+        mins, segs = divmod(int(resto), 60)
         st.markdown(f"""
-        <div class="asset-box">
-            <strong>🎯 ACTIVO ACTUAL:</strong> {a['asset']}<br>
-            <strong>Dirección:</strong> {'🔵 COMPRA' if a['direccion'] == 'CALL' else '🔴 VENTA'}<br>
-            <strong>Votos CALL/PUT:</strong> {a['votos_call']} / {a['votos_put']}<br>
-            <strong>Fuerza:</strong> {a['fuerza']:.1f}<br>
-            <strong>Estrategias:</strong> {', '.join(a['estrategias'][:5])}{'...' if len(a['estrategias'])>5 else ''}
+        <div class="signal-card waiting-card">
+            <div class="signal-title">⏳ OPERACIÓN EN CURSO</div>
+            <div class="signal-detail"><strong>Activo:</strong> {op['asset']}</div>
+            <div class="signal-detail"><strong>Dirección:</strong> {op['direccion']}</div>
+            <div class="signal-detail"><strong>Entrada:</strong> {op['entrada']}</div>
+            <div class="signal-detail"><strong>Vencimiento:</strong> {op['vencimiento']}</div>
+            <div class="signal-detail"><strong>Tiempo restante:</strong> {mins:02d}:{segs:02d}</div>
         </div>
         """, unsafe_allow_html=True)
 
-    # Aviso de próximo cambio
-    if st.session_state.activo_proximo and st.session_state.cambio_programado:
-        tiempo_restante = (st.session_state.cambio_programado - datetime.now(ecuador)).total_seconds() / 60
-        if tiempo_restante > 0:
-            st.markdown(f"""
-            <div class="warning-card">
-                ⚠️ **PRÓXIMO CAMBIO PROGRAMADO**<br>
-                Nuevo activo: {st.session_state.activo_proximo['asset']} (votos: {st.session_state.activo_proximo['votos_call']}/{st.session_state.activo_proximo['votos_put']}, fuerza {st.session_state.activo_proximo['fuerza']:.1f})<br>
-                Cambio en: {int(tiempo_restante)} minutos.
-            </div>
-            """, unsafe_allow_html=True)
-
-    # Señal generada
-    if st.session_state.ultima_senal:
-        s = st.session_state.ultima_senal
-        card_class = "call-card" if s['direccion'] == "CALL" else "put-card"
+    # Mostrar próxima señal si existe (mientras no hay operación)
+    if not st.session_state.operacion_en_curso and st.session_state.proxima_senal:
+        senal = st.session_state.proxima_senal
+        card_class = "call-card" if senal['direccion'] == "CALL" else "put-card"
         st.markdown(f"""
         <div class="signal-card {card_class}">
-            <div class="signal-title">{'🔵 COMPRA' if s['direccion'] == 'CALL' else '🔴 VENTA'}</div>
-            <div class="signal-detail"><strong>Activo:</strong> {s['asset']}</div>
-            <div class="signal-detail"><strong>Entrada:</strong> {s['entrada']}</div>
-            <div class="signal-detail"><strong>Vencimiento:</strong> {s['vencimiento']} (5 min)</div>
-            <div class="signal-detail"><strong>Votos:</strong> CALL {s['votos_call']} / PUT {s['votos_put']}</div>
-            <div class="signal-detail"><strong>Fuerza:</strong> {s['fuerza']:.1f}</div>
+            <div class="signal-title">{'🔵 COMPRA' if senal['direccion'] == 'CALL' else '🔴 VENTA'}</div>
+            <div class="signal-detail"><strong>Activo:</strong> {senal['asset']}</div>
+            <div class="signal-detail"><strong>Fuerza:</strong> {senal['fuerza']:.1f}</div>
+            <div class="signal-detail"><strong>Nivel Fibonacci:</strong> {senal['nivel_fib']:.5f}</div>
+            <div class="signal-detail"><strong>Precio actual:</strong> {senal['precio']:.5f}</div>
+            <div class="signal-detail"><strong>Zona de entrada:</strong> {senal['zona'][0]:.5f} - {senal['zona'][1]:.5f}</div>
         </div>
         """, unsafe_allow_html=True)
+    elif not st.session_state.operacion_en_curso:
+        st.info("Esperando señal...")
 
     # Log de eventos
     with st.expander("📋 Log de eventos", expanded=True):
@@ -232,96 +200,63 @@ if st.session_state.conectado:
             st.text(linea)
 
     # Lógica de monitoreo
-    if st.session_state.monitoreando and st.session_state.activo_actual:
+    if st.session_state.monitoreando:
         now = datetime.now(ecuador)
 
-        # Si hay cambio programado y ya es hora, realizar el cambio
-        if st.session_state.cambio_programado and now >= st.session_state.cambio_programado:
-            if st.session_state.activo_proximo:
-                st.session_state.activo_actual = st.session_state.activo_proximo
-                st.session_state.log.append(f"🔄 Cambio realizado: Nuevo activo {st.session_state.activo_actual['asset']}")
-                st.session_state.activo_proximo = None
-                st.session_state.cambio_programado = None
-                st.rerun()
-            else:
-                st.session_state.cambio_programado = None
-
-        # Evaluación periódica (cada 5 minutos)
-        if st.session_state.proxima_evaluacion and now >= st.session_state.proxima_evaluacion:
-            # Evaluar el activo actual
-            res = evaluar_activo(st.session_state.api, st.session_state.activo_actual['asset'])
-            if res:
-                st.session_state.activo_actual = res
-                # Verificar si sigue siendo rentable
-                if res['fuerza'] >= umbral_fuerza and (res['votos_call'] + res['votos_put']) >= min_votos:
-                    # Generar señal
+        # Si hay operación en curso, verificar si ya venció
+        if st.session_state.operacion_en_curso:
+            vencimiento = datetime.strptime(st.session_state.operacion_en_curso['vencimiento'], "%H:%M:%S").time()
+            vencimiento_dt = datetime.combine(now.date(), vencimiento)
+            if vencimiento_dt < now:
+                vencimiento_dt += timedelta(days=1)
+            if now >= vencimiento_dt:
+                # Operación vencida, limpiar
+                st.session_state.operacion_en_curso = None
+                st.session_state.log.append("✅ Operación finalizada")
+                # Inmediatamente después de finalizar, ver si hay próxima señal
+                if st.session_state.proxima_senal:
+                    # Lanzar la próxima señal
+                    senal = st.session_state.proxima_senal
                     entrada = now + timedelta(seconds=anticipacion)
                     entrada_str = entrada.strftime("%H:%M:%S")
-                    vencimiento = (entrada + timedelta(minutes=5)).strftime("%H:%M:%S")
-                    st.session_state.ultima_senal = {
-                        'asset': res['asset'],
-                        'direccion': res['direccion'],
+                    vencimiento_str = (entrada + timedelta(minutes=5)).strftime("%H:%M:%S")
+                    st.session_state.operacion_en_curso = {
+                        'asset': senal['asset'],
+                        'direccion': senal['direccion'],
                         'entrada': entrada_str,
-                        'vencimiento': vencimiento,
-                        'votos_call': res['votos_call'],
-                        'votos_put': res['votos_put'],
-                        'fuerza': res['fuerza']
+                        'vencimiento': vencimiento_str,
+                        'fuerza': senal['fuerza']
                     }
-                    st.session_state.log.append(f"🚀 SEÑAL GENERADA: {res['asset']} - {res['direccion']} a las {entrada_str}")
-                else:
-                    # El activo perdió fuerza, buscar un reemplazo si no hay uno programado
-                    if st.session_state.activo_proximo is None:
-                        st.session_state.log.append(f"⚠️ {res['asset']} perdió fuerza (fuerza {res['fuerza']:.1f}). Buscando reemplazo...")
-                        activos = obtener_activos_abiertos(st.session_state.api, tipo_mercado)
-                        mejor = seleccionar_mejor_activo(st.session_state.api, activos, min_votos)
-                        if mejor:
-                            st.session_state.activo_proximo = mejor
-                            st.session_state.cambio_programado = now + timedelta(minutes=tiempo_aviso)
-                            st.session_state.log.append(f"📅 Cambio programado a {mejor['asset']} para {st.session_state.cambio_programado.strftime('%H:%M')}")
-                        else:
-                            st.session_state.log.append("⚠️ No se encontró ningún reemplazo. Continuando con el actual...")
-            else:
-                st.session_state.log.append(f"❌ Error evaluando {st.session_state.activo_actual['asset']}")
-
-            # Programar próxima evaluación (siguiente vela de 5 minutos)
-            prox = now + timedelta(minutes=5)
-            prox = prox.replace(second=0, microsecond=0)
-            st.session_state.proxima_evaluacion = prox
-            st.session_state.log.append(f"⏳ Próxima evaluación en {prox.strftime('%H:%M:%S')}")
-            time.sleep(1)
-            st.rerun()
-        else:
-            # Mostrar tiempo restante para próxima evaluación
-            if st.session_state.proxima_evaluacion:
-                segundos_restantes = (st.session_state.proxima_evaluacion - now).total_seconds()
-                if segundos_restantes > 0:
-                    st.info(f"⏳ Próxima evaluación en {int(segundos_restantes)} segundos...")
-                    time.sleep(1)
-                    st.rerun()
-                else:
-                    st.rerun()
-            else:
-                # Si no hay próxima evaluación, calcularla
-                prox = now + timedelta(minutes=5)
-                prox = prox.replace(second=0, microsecond=0)
-                st.session_state.proxima_evaluacion = prox
+                    st.session_state.proxima_senal = None
+                    st.session_state.log.append(f"🚀 SEÑAL EJECUTADA: {senal['asset']} - {senal['direccion']} a las {entrada_str}")
+                # Si no hay próxima, seguir buscando
+                time.sleep(1)
                 st.rerun()
-    elif st.session_state.monitoreando and not st.session_state.activo_actual:
-        # No hay activo, intentar seleccionar uno
-        with st.spinner("Buscando el mejor activo..."):
-            activos = obtener_activos_abiertos(st.session_state.api, tipo_mercado)
-            mejor = seleccionar_mejor_activo(st.session_state.api, activos, min_votos)
-            if mejor:
-                st.session_state.activo_actual = mejor
-                st.session_state.log.append(f"✅ Activo seleccionado: {mejor['asset']}")
-                now = datetime.now(ecuador)
-                prox = now + timedelta(minutes=5)
-                prox = prox.replace(second=0, microsecond=0)
-                st.session_state.proxima_evaluacion = prox
             else:
-                st.session_state.log.append("⚠️ No se encontró ningún activo con suficientes estrategias.")
-        time.sleep(5)
-        st.rerun()
+                # Operación aún activa, mientras tanto buscar próxima señal
+                with st.spinner("Buscando próxima oportunidad..."):
+                    mejor = buscar_mejor_senal(st.session_state.api, tipo_mercado, min_fuerza)
+                    if mejor:
+                        st.session_state.proxima_senal = mejor
+                        st.session_state.log.append(f"🎯 Próxima señal encontrada: {mejor['asset']} ({mejor['direccion']}, fuerza {mejor['fuerza']:.1f})")
+                    else:
+                        st.session_state.proxima_senal = None
+                time.sleep(5)  # esperar un poco antes de la próxima búsqueda
+                st.rerun()
+        else:
+            # No hay operación, buscar la mejor señal ahora
+            mejor = buscar_mejor_senal(st.session_state.api, tipo_mercado, min_fuerza)
+            if mejor:
+                st.session_state.proxima_senal = mejor
+                st.session_state.log.append(f"🎯 Señal encontrada: {mejor['asset']} ({mejor['direccion']}, fuerza {mejor['fuerza']:.1f})")
+                # Esperar hasta el momento de entrada (simulado)
+                # En un bot real, aquí se ejecutaría la operación automáticamente
+                # Nosotros solo mostramos la señal
+                st.rerun()
+            else:
+                st.session_state.log.append("🔍 No se encontraron señales en este ciclo.")
+                time.sleep(10)
+                st.rerun()
 
 else:
     st.info("🔒 Conéctate a IQ Option para comenzar.")
