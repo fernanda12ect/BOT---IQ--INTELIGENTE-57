@@ -5,8 +5,9 @@ from datetime import datetime, timedelta
 import pytz
 from iqoptionapi.stable_api import IQ_Option
 from bot import (
-    buscar_senales,
-    obtener_activos_abiertos
+    buscar_mejor_senal,
+    obtener_activos_abiertos,
+    obtener_velas_1min
 )
 
 st.set_page_config(
@@ -16,7 +17,7 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# Estilos CSS (mantenemos los mismos)
+# Estilos CSS
 st.markdown("""
 <style>
     .stApp { background-color: #0b0f17; color: #e0e0e0; }
@@ -65,9 +66,9 @@ if 'saldo' not in st.session_state:
 if 'monitoreando' not in st.session_state:
     st.session_state.monitoreando = False
 if 'señales_emitidas' not in st.session_state:
-    st.session_state.señales_emitidas = []  # historial de señales emitidas
+    st.session_state.señales_emitidas = []
 if 'ultima_entrada' not in st.session_state:
-    st.session_state.ultima_entrada = None  # momento de la última entrada
+    st.session_state.ultima_entrada = None
 if 'log' not in st.session_state:
     st.session_state.log = []
 if 'indice_ronda' not in st.session_state:
@@ -127,8 +128,9 @@ with st.sidebar:
 
     tipo_mercado = st.selectbox("Mercado", ["OTC", "REAL", "AMBOS"], index=2)
     activos_por_ciclo = st.slider("Activos por ciclo", 10, 30, 20, 5)
-    pausa_ciclo = st.slider("Pausa entre ciclos (seg)", 60, 180, 90, 10, help="1.5 - 3 minutos")
+    pausa_ciclo = st.slider("Pausa entre ciclos (seg)", 60, 180, 90, 10)
     anticipacion = st.slider("Anticipación de señal (seg)", 5, 30, 15, 5)
+    activar_estrategia_1min = st.checkbox("Activar estrategia de 1 minuto (sesiones de alta volatilidad)", value=True)
 
     st.markdown("---")
     if st.session_state.conectado:
@@ -151,7 +153,6 @@ with st.sidebar:
 if st.session_state.conectado:
     st.title("🎯 Señales de Trading - 3 Estrategias")
 
-    # Métricas
     col1, col2, col3 = st.columns(3)
     with col1:
         st.metric("Saldo", f"${st.session_state.saldo:.2f}")
@@ -172,9 +173,9 @@ if st.session_state.conectado:
             st.markdown(f"""
             <div class="signal-card {card_class}">
                 <div class="asset-title">[{señal['hora']}] {señal['asset']}</div>
-                <div><strong>{señal['direccion']}</strong> - {señal['estrategias']}</div>
-                <div class="signal-detail">Entrada: {señal['entrada']} | Vencimiento: 5 min</div>
-                <div class="signal-detail">Fuerza: {señal['fuerza']}%</div>
+                <div><strong>{señal['direccion']}</strong> - {señal['estrategia']}</div>
+                <div class="signal-detail">Entrada: {señal['entrada']} | Vencimiento: {señal['vencimiento']} min</div>
+                <div class="signal-detail">Descripción: {señal['descripcion']}</div>
             </div>
             """, unsafe_allow_html=True)
     else:
@@ -191,14 +192,12 @@ if st.session_state.conectado:
 
         # Verificar si podemos analizar (si no hay operación reciente o ya pasaron 5 min)
         if st.session_state.ultima_entrada is None or now >= st.session_state.ultima_entrada + timedelta(minutes=5):
-            # Podemos analizar
             activos = st.session_state.activos_totales
             if not activos:
                 st.warning("No hay activos disponibles")
                 time.sleep(pausa_ciclo)
                 st.rerun()
 
-            # Dividir en ciclos
             inicio = st.session_state.indice_ronda * activos_por_ciclo
             fin = inicio + activos_por_ciclo
             lote = activos[inicio:fin]
@@ -208,24 +207,56 @@ if st.session_state.conectado:
                 st.rerun()
 
             st.session_state.log.append(f"🔄 Analizando lote {st.session_state.indice_ronda + 1} ({len(lote)} activos)...")
-            señales = buscar_senales(st.session_state.api, lote, max_activos=activos_por_ciclo)
+            mejor_senal = buscar_mejor_senal(st.session_state.api, lote, activar_estrategia_1min)
 
-            if señales:
-                # Tomamos la mejor señal (la primera, ya ordenada por fuerza)
-                mejor = señales[0]
-                entrada = now + timedelta(seconds=anticipacion)
-                entrada_str = entrada.strftime("%H:%M:%S")
-                hora_actual = now.strftime("%H:%M:%S")
-                st.session_state.señales_emitidas.append({
-                    'hora': hora_actual,
-                    'asset': mejor['asset'],
-                    'direccion': mejor['direccion'],
-                    'estrategias': ', '.join(mejor['estrategias']),
-                    'entrada': entrada_str,
-                    'fuerza': mejor['fuerza']
-                })
-                st.session_state.ultima_entrada = entrada
-                st.session_state.log.append(f"🚀 SEÑAL: {mejor['asset']} - {mejor['direccion']} a las {entrada_str} (Estrategias: {', '.join(mejor['estrategias'])})")
+            if mejor_senal:
+                asset = mejor_senal['asset']
+                direccion = mejor_senal['direccion']
+                estrategia = mejor_senal['estrategia']
+                vencimiento = mejor_senal['vencimiento']
+                descripcion = mejor_senal['descripcion']
+                nivel = mejor_senal.get('nivel', None)
+
+                # Mensaje previo
+                st.session_state.log.append(f"⏳ Esperando confirmación de punto de entrada para {estrategia} en {asset} (vencimiento: {vencimiento} min)")
+
+                # Si es estrategia de 1 minuto, necesitamos confirmación post-señal
+                if vencimiento == 1 and nivel is not None:
+                    # Esperar 10 segundos
+                    time.sleep(10)
+                    # Obtener última vela de 1 minuto para verificar si el precio rompió
+                    df_confirm = obtener_velas_1min(st.session_state.api, asset, n=1)
+                    if df_confirm is not None:
+                        nuevo_precio = df_confirm['close'].iloc[-1]
+                        if direccion == 'CALL' and nuevo_precio < nivel:
+                            st.session_state.log.append(f"❌ Señal cancelada: {asset} rompió soporte")
+                            mejor_senal = None
+                        elif direccion == 'PUT' and nuevo_precio > nivel:
+                            st.session_state.log.append(f"❌ Señal cancelada: {asset} rompió resistencia")
+                            mejor_senal = None
+                        else:
+                            st.session_state.log.append(f"✅ Confirmación positiva para {asset}")
+                    else:
+                        st.session_state.log.append("⚠️ No se pudo obtener confirmación, se procede con la señal")
+
+                if mejor_senal:
+                    # Emitir señal
+                    entrada = now + timedelta(seconds=anticipacion)
+                    entrada_str = entrada.strftime("%H:%M:%S")
+                    hora_actual = now.strftime("%H:%M:%S")
+                    st.session_state.señales_emitidas.append({
+                        'hora': hora_actual,
+                        'asset': asset,
+                        'direccion': direccion,
+                        'estrategia': estrategia,
+                        'entrada': entrada_str,
+                        'vencimiento': vencimiento,
+                        'descripcion': descripcion
+                    })
+                    st.session_state.ultima_entrada = entrada
+                    st.session_state.log.append(f"🚀 SEÑAL: {asset} - {direccion} a las {entrada_str} (Estrategia: {estrategia}, Vencimiento: {vencimiento} min)")
+                else:
+                    st.session_state.log.append("🔍 Señal cancelada tras confirmación.")
             else:
                 st.session_state.log.append("🔍 No se encontraron señales en este lote.")
 
@@ -234,14 +265,12 @@ if st.session_state.conectado:
             time.sleep(pausa_ciclo)
             st.rerun()
         else:
-            # Esperar a que termine la operación actual
             tiempo_restante = (st.session_state.ultima_entrada + timedelta(minutes=5) - now).total_seconds()
             if tiempo_restante > 0:
                 st.info(f"⏳ Esperando {int(tiempo_restante)} segundos para el próximo análisis...")
                 time.sleep(1)
                 st.rerun()
             else:
-                # Ya pasó el tiempo, reiniciamos el ciclo
                 st.session_state.ultima_entrada = None
                 st.rerun()
 
