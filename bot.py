@@ -4,6 +4,7 @@ import time
 import logging
 from datetime import datetime
 import pytz
+from collections import defaultdict
 
 # Configurar logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -77,12 +78,40 @@ def calcular_indicadores(df):
     return df
 
 # =========================
-# DETECCIÓN DE NIVELES (SOPORTE/RESISTENCIA + BOX)
+# FUNCIONES AUXILIARES PARA OBTENER VELAS
+# =========================
+def obtener_velas_5min(api, asset, n=100):
+    try:
+        candles = api.get_candles(asset, 300, n, time.time())
+        if not candles or len(candles) < n:
+            return None
+        df = pd.DataFrame(candles)
+        for col in ['open', 'max', 'min', 'close', 'volume']:
+            df[col] = pd.to_numeric(df[col], errors='coerce')
+        df.dropna(inplace=True)
+        return df
+    except Exception as e:
+        logger.error(f"Error obteniendo velas 5min de {asset}: {e}")
+        return None
+
+def obtener_velas_1min(api, asset, n=100):
+    try:
+        candles = api.get_candles(asset, 60, n, time.time())
+        if not candles or len(candles) < n:
+            return None
+        df = pd.DataFrame(candles)
+        for col in ['open', 'max', 'min', 'close', 'volume']:
+            df[col] = pd.to_numeric(df[col], errors='coerce')
+        df.dropna(inplace=True)
+        return df
+    except Exception as e:
+        logger.error(f"Error obteniendo velas 1min de {asset}: {e}")
+        return None
+
+# =========================
+# DETECCIÓN DE NIVELES (SOPORTE/RESISTENCIA)
 # =========================
 def detectar_niveles_sr(df, num_toques=2, ventana=100):
-    """
-    Detecta niveles horizontales (soportes/resistencias) basados en máximos y mínimos locales.
-    """
     if len(df) < ventana:
         return []
     df = df.iloc[-ventana:].copy()
@@ -102,156 +131,230 @@ def detectar_niveles_sr(df, num_toques=2, ventana=100):
         if cnt >= num_toques:
             tipo = 'resistencia' if precio > precio_actual else 'soporte'
             niveles.append({'precio': precio, 'tipo': tipo, 'toques': cnt})
-    # Ordenar por cercanía
     niveles.sort(key=lambda x: abs(x['precio'] - precio_actual))
     return niveles
 
 # =========================
-# ESTRATEGIA 1: CRUCE DE EMAs
+# DETECCIÓN DE LÍNEAS DE TENDENCIA
 # =========================
-def estrategia_cruce_emas(df):
-    """
-    EMA12 cruza EMA26, precio fuera de Bollinger, RSI coherente.
-    """
-    if len(df) < 2:
-        return None
-    last = df.iloc[-1]
-    prev = df.iloc[-2]
+def detectar_lineas_tendencia(df, ventana=50):
+    if len(df) < ventana:
+        return []
+    df = df.iloc[-ventana:].copy()
+    indices = np.arange(len(df))
+    minimos = df['low'].values
+    maximos = df['high'].values
 
-    # Cruce alcista
-    if prev['ema12'] <= prev['ema26'] and last['ema12'] > last['ema26']:
-        if last['close'] > last['bb_upper'] or last['close'] < last['bb_lower']:
-            return None  # fuera de BB no es ideal para cruce
-        if last['rsi'] < 70 and last['rsi'] > 30:
-            return 'CALL', 'Cruce EMAs Alcista'
-    # Cruce bajista
-    if prev['ema12'] >= prev['ema26'] and last['ema12'] < last['ema26']:
-        if last['close'] > last['bb_upper'] or last['close'] < last['bb_lower']:
-            return None
-        if last['rsi'] < 70 and last['rsi'] > 30:
-            return 'PUT', 'Cruce EMAs Bajista'
-    return None
+    lineas = []
+    # Tendencia alcista: 2 mínimos crecientes
+    for i in range(len(minimos)-5):
+        for j in range(i+3, len(minimos)):
+            if minimos[j] > minimos[i] and (j - i) > 3:
+                pendiente = (minimos[j] - minimos[i]) / (j - i)
+                intercepto = minimos[i] - pendiente * i
+                precio_linea = intercepto + pendiente * (len(df)-1)
+                lineas.append({
+                    'tipo': 'alcista',
+                    'pendiente': pendiente,
+                    'intercepto': intercepto,
+                    'precio_actual': precio_linea,
+                    'puntos': (i, j)
+                })
+    # Tendencia bajista: 2 máximos decrecientes
+    for i in range(len(maximos)-5):
+        for j in range(i+3, len(maximos)):
+            if maximos[j] < maximos[i] and (j - i) > 3:
+                pendiente = (maximos[j] - maximos[i]) / (j - i)
+                intercepto = maximos[i] - pendiente * i
+                precio_linea = intercepto + pendiente * (len(df)-1)
+                lineas.append({
+                    'tipo': 'bajista',
+                    'pendiente': pendiente,
+                    'intercepto': intercepto,
+                    'precio_actual': precio_linea,
+                    'puntos': (i, j)
+                })
+    # Ordenar por cercanía al precio actual
+    precio_actual = df['close'].iloc[-1]
+    for l in lineas:
+        l['distancia'] = abs(precio_actual - l['precio_actual'])
+    lineas.sort(key=lambda x: x['distancia'])
+    return lineas[:5]
 
 # =========================
-# ESTRATEGIA 2: DIVERGENCIAS (RSI o MACD)
+# ESTRATEGIA 1: DIVERGENCIAS (5 min)
 # =========================
 def estrategia_divergencias(df):
-    """
-    Divergencia alcista: precio hace mínimo más bajo, RSI hace mínimo más alto.
-    Divergencia bajista: precio hace máximo más alto, RSI hace máximo más bajo.
-    Requiere ADX > 25 para confirmar fuerza.
-    """
     if len(df) < 5:
         return None
     last = df.iloc[-1]
     if last['adx'] < 25:
         return None
 
-    # Tomar últimas 5 velas para buscar divergencias
     segmento = df.iloc[-5:]
     min_precio_idx = segmento['low'].idxmin()
     max_precio_idx = segmento['high'].idxmax()
     min_rsi_idx = segmento['rsi'].idxmin()
     max_rsi_idx = segmento['rsi'].idxmax()
-
-    # Divergencia alcista
-    if min_precio_idx < min_rsi_idx and segmento.loc[min_precio_idx, 'low'] < segmento.loc[min_rsi_idx, 'low']:
-        if segmento.loc[min_rsi_idx, 'rsi'] > segmento.loc[min_precio_idx, 'rsi']:
-            return 'CALL', 'Divergencia alcista RSI'
-
-    # Divergencia bajista
-    if max_precio_idx > max_rsi_idx and segmento.loc[max_precio_idx, 'high'] > segmento.loc[max_rsi_idx, 'high']:
-        if segmento.loc[max_rsi_idx, 'rsi'] < segmento.loc[max_precio_idx, 'rsi']:
-            return 'PUT', 'Divergencia bajista RSI'
-
-    # También podemos buscar divergencias con MACD
     min_macd_idx = segmento['macd'].idxmin()
     max_macd_idx = segmento['macd'].idxmax()
+
+    # Divergencia alcista RSI
+    if min_precio_idx < min_rsi_idx and segmento.loc[min_precio_idx, 'low'] < segmento.loc[min_rsi_idx, 'low']:
+        if segmento.loc[min_rsi_idx, 'rsi'] > segmento.loc[min_precio_idx, 'rsi']:
+            return ('CALL', 'Divergencia alcista RSI')
+    # Divergencia bajista RSI
+    if max_precio_idx > max_rsi_idx and segmento.loc[max_precio_idx, 'high'] > segmento.loc[max_rsi_idx, 'high']:
+        if segmento.loc[max_rsi_idx, 'rsi'] < segmento.loc[max_precio_idx, 'rsi']:
+            return ('PUT', 'Divergencia bajista RSI')
+    # Divergencia alcista MACD
     if min_precio_idx < min_macd_idx and segmento.loc[min_precio_idx, 'low'] < segmento.loc[min_macd_idx, 'low']:
         if segmento.loc[min_macd_idx, 'macd'] > segmento.loc[min_precio_idx, 'macd']:
-            return 'CALL', 'Divergencia alcista MACD'
+            return ('CALL', 'Divergencia alcista MACD')
+    # Divergencia bajista MACD
     if max_precio_idx > max_macd_idx and segmento.loc[max_precio_idx, 'high'] > segmento.loc[max_macd_idx, 'high']:
         if segmento.loc[max_macd_idx, 'macd'] < segmento.loc[max_precio_idx, 'macd']:
-            return 'PUT', 'Divergencia bajista MACD'
-
+            return ('PUT', 'Divergencia bajista MACD')
     return None
 
 # =========================
-# ESTRATEGIA 3: SOPORTE/RESISTENCIA + BOX
+# ESTRATEGIA 2: CRUCE DE EMAs (5 min)
 # =========================
-def estrategia_sr_box(df, umbral_distancia=0.001):
-    """
-    Busca niveles de soporte/resistencia cercanos y verifica si el precio está reaccionando.
-    """
-    niveles = detectar_niveles_sr(df, num_toques=2)
-    if not niveles:
+def estrategia_cruce_emas(df):
+    if len(df) < 2:
         return None
+    last = df.iloc[-1]
+    prev = df.iloc[-2]
+
+    if prev['ema12'] <= prev['ema26'] and last['ema12'] > last['ema26']:
+        if last['close'] > last['bb_upper'] or last['close'] < last['bb_lower']:
+            return None
+        if 30 <= last['rsi'] <= 70:
+            return ('CALL', 'Cruce EMAs Alcista')
+    if prev['ema12'] >= prev['ema26'] and last['ema12'] < last['ema26']:
+        if last['close'] > last['bb_upper'] or last['close'] < last['bb_lower']:
+            return None
+        if 30 <= last['rsi'] <= 70:
+            return ('PUT', 'Cruce EMAs Bajista')
+    return None
+
+# =========================
+# ESTRATEGIA 3: SOPORTE/RESISTENCIA + LÍNEAS DE TENDENCIA (1 min)
+# =========================
+def estrategia_sr_tendencia_1min(api, asset, umbral_distancia=0.001):
+    df = obtener_velas_1min(api, asset, n=50)
+    if df is None or len(df) < 30:
+        return None
+    df = calcular_indicadores(df)
     precio_actual = df['close'].iloc[-1]
-    nivel_cercano = niveles[0]
-    distancia = abs(precio_actual - nivel_cercano['precio']) / precio_actual
-    if distancia > umbral_distancia:
+    atr = df['atr'].iloc[-1]
+
+    # Filtro de volatilidad: ATR no debe ser >0.5% del precio
+    if atr / precio_actual > 0.005:
         return None
 
-    # Verificar EMA20 para tendencia general
-    if nivel_cercano['tipo'] == 'soporte' and precio_actual > df['ema20'].iloc[-1]:
-        # Rebote en soporte con tendencia alcista
-        return 'CALL', f'Soporte + EMA20'
-    if nivel_cercano['tipo'] == 'resistencia' and precio_actual < df['ema20'].iloc[-1]:
-        # Rechazo en resistencia con tendencia bajista
-        return 'PUT', f'Resistencia + EMA20'
+    # Niveles S/R en últimas 20 velas con 2 toques
+    niveles = detectar_niveles_sr(df, num_toques=2, ventana=20)
+    # Líneas de tendencia en últimas 15 velas
+    lineas = detectar_lineas_tendencia(df, ventana=15)
 
-    # Si no hay alineación con EMA, pero el nivel es fuerte, igual puede ser señal
-    if nivel_cercano['toques'] >= 3:
-        if nivel_cercano['tipo'] == 'soporte':
-            return 'CALL', f'Soporte fuerte ({nivel_cercano["toques"]} toques)'
+    mejor_distancia = float('inf')
+    tipo = None
+    nivel_precio = None
+    descripcion = ""
+
+    for n in niveles:
+        d = abs(precio_actual - n['precio']) / precio_actual
+        if d < mejor_distancia and d <= umbral_distancia:
+            mejor_distancia = d
+            tipo = n['tipo']
+            nivel_precio = n['precio']
+            descripcion = f"{tipo} con {n['toques']} toques"
+
+    for l in lineas:
+        d = abs(precio_actual - l['precio_actual']) / precio_actual
+        if d < mejor_distancia and d <= umbral_distancia:
+            mejor_distancia = d
+            tipo = l['tipo']
+            nivel_precio = l['precio_actual']
+            descripcion = f"Línea {tipo}"
+
+    if tipo is None:
+        return None
+
+    # Determinar dirección esperada
+    if tipo in ('soporte', 'alcista'):
+        direccion_esperada = 'CALL'
+    else:
+        direccion_esperada = 'PUT'
+
+    # Verificar patrón de vela de rebote en la última vela
+    ultima = df.iloc[-1]
+    cuerpo = abs(ultima['close'] - ultima['open'])
+    rango = ultima['high'] - ultima['low']
+
+    if direccion_esperada == 'CALL':
+        mecha_inf = min(ultima['open'], ultima['close']) - ultima['low']
+        if mecha_inf > 2 * cuerpo and cuerpo < rango * 0.3:
+            pass  # OK
         else:
-            return 'PUT', f'Resistencia fuerte ({nivel_cercano["toques"]} toques)'
+            return None
+    else:
+        mecha_sup = ultima['high'] - max(ultima['open'], ultima['close'])
+        if mecha_sup > 2 * cuerpo and cuerpo < rango * 0.3:
+            pass
+        else:
+            return None
 
-    return None
-
-# Lista de estrategias (nombre, función)
-ESTRATEGIAS = [
-    ("Cruce EMAs", estrategia_cruce_emas),
-    ("Divergencias", estrategia_divergencias),
-    ("Soporte/Resistencia", estrategia_sr_box)
-]
+    # Todo OK, devolvemos la señal
+    return {
+        'direccion': direccion_esperada,
+        'descripcion': descripcion,
+        'nivel': nivel_precio,
+        'distancia': mejor_distancia,
+        'fuerza': 70,  # valor base
+        'estrategia': 'Soporte/Resistencia + Líneas',
+        'vencimiento': 1  # minutos
+    }
 
 # =========================
 # EVALUAR UN ACTIVO (buscar señales de todas las estrategias)
 # =========================
-def evaluar_activo(api, asset):
-    try:
-        candles = api.get_candles(asset, 300, 100, time.time())  # velas de 5 min
-        if not candles or len(candles) < 50:
-            return []
-        df = pd.DataFrame(candles)
-        for col in ['open', 'max', 'min', 'close', 'volume']:
-            df[col] = pd.to_numeric(df[col], errors='coerce')
-        df.dropna(inplace=True)
-        if len(df) < 50:
-            return []
+def evaluar_activo(api, asset, activar_estrategia_1min=True):
+    señales = []
 
-        df = calcular_indicadores(df)
-        señales = []
-        for nombre, funcion in ESTRATEGIAS:
-            try:
-                res = funcion(df)
-                if res:
-                    direccion, descripcion = res
-                    señales.append({
-                        'estrategia': nombre,
-                        'direccion': direccion,
-                        'descripcion': descripcion,
-                        'fuerza': 70,  # valor base, se podría calcular
-                        'precio': df['close'].iloc[-1]
-                    })
-            except Exception as e:
-                logger.error(f"Error en {nombre} para {asset}: {e}")
-                continue
-        return señales
-    except Exception as e:
-        logger.error(f"Error evaluando {asset}: {e}")
-        return []
+    # Estrategias de 5 min
+    df5 = obtener_velas_5min(api, asset, n=100)
+    if df5 is not None and len(df5) >= 50:
+        df5 = calcular_indicadores(df5)
+        res1 = estrategia_divergencias(df5)
+        if res1:
+            direc, desc = res1
+            señales.append({
+                'direccion': direc,
+                'descripcion': desc,
+                'fuerza': 80,  # ponderación
+                'estrategia': 'Divergencias',
+                'vencimiento': 5
+            })
+        res2 = estrategia_cruce_emas(df5)
+        if res2:
+            direc, desc = res2
+            señales.append({
+                'direccion': direc,
+                'descripcion': desc,
+                'fuerza': 70,
+                'estrategia': 'Cruce EMAs',
+                'vencimiento': 5
+            })
+
+    # Estrategia de 1 min (si está activada)
+    if activar_estrategia_1min:
+        res3 = estrategia_sr_tendencia_1min(api, asset)
+        if res3:
+            señales.append(res3)
+
+    return señales
 
 # =========================
 # OBTENER ACTIVOS ABIERTOS
@@ -274,39 +377,22 @@ def obtener_activos_abiertos(api, tipo_mercado="AMBOS"):
         return FALLBACK_ACTIVOS
 
 # =========================
-# SELECCIONAR SEÑALES (hasta 20 por ciclo, con prioridad a coincidencias)
+# SELECCIONAR LA MEJOR SEÑAL DE UN LOTE
 # =========================
-def buscar_senales(api, lista_activos, max_activos=20):
-    """
-    Analiza hasta max_activos y devuelve una lista de señales, priorizando aquellas
-    donde más estrategias coinciden.
-    """
-    resultados = []
-    for asset in lista_activos[:max_activos]:
-        señales = evaluar_activo(api, asset)
-        if señales:
-            # Contar cuántas estrategias dan la misma dirección
-            calls = sum(1 for s in señales if s['direccion'] == 'CALL')
-            puts = sum(1 for s in señales if s['direccion'] == 'PUT')
-            if calls > puts:
-                direccion = 'CALL'
-                fuerza = calls * 20  # 20 puntos por estrategia
-            elif puts > calls:
-                direccion = 'PUT'
-                fuerza = puts * 20
-            else:
-                continue  # empate, no señal clara
-            # Usamos la primera señal como representativa (o podríamos guardar todas)
-            primera = señales[0]
-            resultados.append({
-                'asset': asset,
-                'direccion': direccion,
-                'estrategias': [s['estrategia'] for s in señales],
-                'fuerza': fuerza,
-                'descripcion': primera['descripcion'],
-                'precio': primera['precio']
-            })
-        time.sleep(0.1)
-    # Ordenar por fuerza (más estrategias primero)
-    resultados.sort(key=lambda x: x['fuerza'], reverse=True)
-    return resultados
+def buscar_mejor_senal(api, lista_activos, activar_estrategia_1min=True):
+    mejor_senal = None
+    mejor_fuerza = -1
+    for asset in lista_activos:
+        señales = evaluar_activo(api, asset, activar_estrategia_1min)
+        for s in señales:
+            # Asignamos una fuerza combinada (podemos usar la fuerza base o ajustar)
+            fuerza = s.get('fuerza', 50)
+            # Priorizar señales de 1 minuto ligeramente
+            if s['vencimiento'] == 1:
+                fuerza += 5
+            if fuerza > mejor_fuerza:
+                mejor_fuerza = fuerza
+                mejor_senal = s
+                mejor_senal['asset'] = asset
+        time.sleep(0.1)  # pausa entre activos
+    return mejor_senal
