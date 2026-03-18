@@ -17,7 +17,7 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# Estilos CSS
+# Estilos CSS (igual que antes)
 st.markdown("""
 <style>
     .stApp { background-color: #0b0f17; color: #e0e0e0; }
@@ -51,6 +51,11 @@ st.markdown("""
         font-size: 0.9rem;
         color: #ccc;
     }
+    .countdown {
+        font-size: 1.5rem;
+        color: #ffaa00;
+        font-weight: bold;
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -69,6 +74,8 @@ if 'señales_emitidas' not in st.session_state:
     st.session_state.señales_emitidas = []
 if 'ultima_entrada' not in st.session_state:
     st.session_state.ultima_entrada = None
+if 'senal_actual' not in st.session_state:
+    st.session_state.senal_actual = None  # señal que está en espera de entrada
 if 'log' not in st.session_state:
     st.session_state.log = []
 if 'indice_ronda' not in st.session_state:
@@ -139,6 +146,8 @@ with st.sidebar:
                 st.session_state.monitoreando = True
                 st.session_state.indice_ronda = 0
                 st.session_state.señales_emitidas = []
+                st.session_state.senal_actual = None
+                st.session_state.ultima_entrada = None
                 st.session_state.log.append("🚀 Monitoreo iniciado")
                 st.rerun()
         else:
@@ -165,10 +174,21 @@ if st.session_state.conectado:
         else:
             st.metric("Próximo análisis", "Inmediato")
 
+    # Mostrar señal actual (si está en espera)
+    if st.session_state.senal_actual:
+        s = st.session_state.senal_actual
+        now = datetime.now(ecuador)
+        tiempo_entrada = s['entrada_datetime']
+        if now < tiempo_entrada:
+            segundos = (tiempo_entrada - now).total_seconds()
+            st.info(f"⏳ Próxima entrada en {int(segundos)} segundos...")
+        else:
+            st.success("✅ Momento de entrada alcanzado")
+
     # Mostrar últimas señales emitidas
     if st.session_state.señales_emitidas:
-        st.subheader("📊 Señales activas (más recientes primero)")
-        for señal in st.session_state.señales_emitidas[-5:][::-1]:
+        st.subheader("📊 Historial de señales")
+        for señal in st.session_state.señales_emitidas[-10:][::-1]:
             card_class = "call-card" if señal['direccion'] == "CALL" else "put-card"
             st.markdown(f"""
             <div class="signal-card {card_class}">
@@ -190,8 +210,43 @@ if st.session_state.conectado:
     if st.session_state.monitoreando:
         now = datetime.now(ecuador)
 
-        # Verificar si podemos analizar (si no hay operación reciente o ya pasaron 5 min)
-        if st.session_state.ultima_entrada is None or now >= st.session_state.ultima_entrada + timedelta(minutes=5):
+        # Si hay una señal en espera, verificar si ya es hora de entrada
+        if st.session_state.senal_actual:
+            entrada_dt = st.session_state.senal_actual['entrada_datetime']
+            if now >= entrada_dt:
+                # Ya es hora de entrada, mover a historial
+                señal = st.session_state.senal_actual
+                st.session_state.señales_emitidas.append({
+                    'hora': now.strftime("%H:%M:%S"),
+                    'asset': señal['asset'],
+                    'direccion': señal['direccion'],
+                    'estrategia': señal['estrategia'],
+                    'entrada': entrada_dt.strftime("%H:%M:%S"),
+                    'vencimiento': señal['vencimiento'],
+                    'descripcion': señal['descripcion']
+                })
+                st.session_state.ultima_entrada = entrada_dt
+                st.session_state.senal_actual = None
+                st.rerun()
+            else:
+                # Aún no es hora, esperar
+                time.sleep(1)
+                st.rerun()
+
+        # Si hay una operación en curso (esperando vencimiento)
+        elif st.session_state.ultima_entrada:
+            tiempo_restante = (st.session_state.ultima_entrada + timedelta(minutes=5) - now).total_seconds()
+            if tiempo_restante > 0:
+                st.info(f"⏳ Operación en curso. Próximo análisis en {int(tiempo_restante)} segundos...")
+                time.sleep(1)
+                st.rerun()
+            else:
+                # Vencimiento alcanzado, liberar para nuevo análisis
+                st.session_state.ultima_entrada = None
+                st.rerun()
+
+        # No hay señal ni operación, podemos analizar
+        else:
             activos = st.session_state.activos_totales
             if not activos:
                 st.warning("No hay activos disponibles")
@@ -217,14 +272,11 @@ if st.session_state.conectado:
                 descripcion = mejor_senal['descripcion']
                 nivel = mejor_senal.get('nivel', None)
 
-                # Mensaje previo
                 st.session_state.log.append(f"⏳ Esperando confirmación de punto de entrada para {estrategia} en {asset} (vencimiento: {vencimiento} min)")
 
-                # Si es estrategia de 1 minuto, necesitamos confirmación post-señal
+                # Confirmación para estrategia de 1 minuto
                 if vencimiento == 1 and nivel is not None:
-                    # Esperar 10 segundos
                     time.sleep(10)
-                    # Obtener última vela de 1 minuto para verificar si el precio rompió
                     df_confirm = obtener_velas_1min(st.session_state.api, asset, n=1)
                     if df_confirm is not None:
                         nuevo_precio = df_confirm['close'].iloc[-1]
@@ -240,38 +292,30 @@ if st.session_state.conectado:
                         st.session_state.log.append("⚠️ No se pudo obtener confirmación, se procede con la señal")
 
                 if mejor_senal:
-                    # Emitir señal
-                    entrada = now + timedelta(seconds=anticipacion)
-                    entrada_str = entrada.strftime("%H:%M:%S")
-                    hora_actual = now.strftime("%H:%M:%S")
-                    st.session_state.señales_emitidas.append({
-                        'hora': hora_actual,
+                    # Calcular hora de entrada
+                    entrada_dt = now + timedelta(seconds=anticipacion)
+                    entrada_str = entrada_dt.strftime("%H:%M:%S")
+                    st.session_state.senal_actual = {
                         'asset': asset,
                         'direccion': direccion,
                         'estrategia': estrategia,
+                        'entrada_datetime': entrada_dt,
                         'entrada': entrada_str,
                         'vencimiento': vencimiento,
                         'descripcion': descripcion
-                    })
-                    st.session_state.ultima_entrada = entrada
-                    st.session_state.log.append(f"🚀 SEÑAL: {asset} - {direccion} a las {entrada_str} (Estrategia: {estrategia}, Vencimiento: {vencimiento} min)")
+                    }
+                    st.session_state.log.append(f"🔔 Señal generada: {asset} - {direccion} a las {entrada_str}")
+                    # Forzar rerun inmediato para mostrar la cuenta regresiva
+                    st.rerun()
                 else:
-                    st.session_state.log.append("🔍 Señal cancelada tras confirmación.")
+                    # Señal cancelada, continuar con el siguiente lote
+                    st.session_state.indice_ronda += 1
+                    time.sleep(pausa_ciclo)
+                    st.rerun()
             else:
                 st.session_state.log.append("🔍 No se encontraron señales en este lote.")
-
-            # Pasar al siguiente lote
-            st.session_state.indice_ronda += 1
-            time.sleep(pausa_ciclo)
-            st.rerun()
-        else:
-            tiempo_restante = (st.session_state.ultima_entrada + timedelta(minutes=5) - now).total_seconds()
-            if tiempo_restante > 0:
-                st.info(f"⏳ Esperando {int(tiempo_restante)} segundos para el próximo análisis...")
-                time.sleep(1)
-                st.rerun()
-            else:
-                st.session_state.ultima_entrada = None
+                st.session_state.indice_ronda += 1
+                time.sleep(pausa_ciclo)
                 st.rerun()
 
 else:
