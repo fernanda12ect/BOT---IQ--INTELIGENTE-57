@@ -66,13 +66,19 @@ if 'saldo' not in st.session_state:
 if 'monitoreando' not in st.session_state:
     st.session_state.monitoreando = False
 if 'activos_seleccionados' not in st.session_state:
-    st.session_state.activos_seleccionados = []  # lista de los 2 activos actuales
+    st.session_state.activos_seleccionados = []
 if 'señales' not in st.session_state:
-    st.session_state.señales = []  # historial de señales generadas
+    st.session_state.señales = []
 if 'ultima_senal_tiempo' not in st.session_state:
-    st.session_state.ultima_senal_tiempo = None  # para esperar 5 min después de señal
+    st.session_state.ultima_senal_tiempo = None
 if 'log' not in st.session_state:
     st.session_state.log = []
+if 'activos_totales' not in st.session_state:
+    st.session_state.activos_totales = []
+if 'otc_count' not in st.session_state:
+    st.session_state.otc_count = 0
+if 'real_count' not in st.session_state:
+    st.session_state.real_count = 0
 
 # Zona horaria
 ecuador = pytz.timezone("America/Guayaquil")
@@ -88,10 +94,6 @@ def conectar(email, password):
             saldo = api.get_balance()
             st.session_state.saldo = saldo if saldo is not None else 0.0
             st.session_state.log.append(f"✅ Conectado - Saldo: {st.session_state.saldo}")
-            # Obtener activos
-            activos = obtener_activos_abiertos(api, "AMBOS")
-            st.session_state.activos_totales = activos
-            st.session_state.log.append(f"📊 Total activos disponibles: {len(activos)}")
             return True
         else:
             st.error(f"Error: {reason}")
@@ -126,7 +128,7 @@ with st.sidebar:
     st.markdown("---")
     st.markdown("### ⚙️ Configuración")
 
-    tipo_mercado = st.selectbox("Mercado", ["OTC", "REAL", "AMBOS"], index=2)
+    tipo_mercado = st.selectbox("Mercado a analizar", ["OTC", "REAL", "AMBOS"], index=2)
     pausa_entre_ciclos = st.slider("Pausa entre ciclos de búsqueda (seg)", 30, 120, 60, 10)
     anticipacion = st.slider("Anticipación de señal (seg)", 5, 30, 15, 5)
 
@@ -136,15 +138,19 @@ with st.sidebar:
             if st.button("▶️ INICIAR", use_container_width=True, type="primary"):
                 st.session_state.monitoreando = True
                 st.session_state.log.append("🚀 Monitoreo iniciado")
-                # Seleccionar los 2 activos más fuertes
-                with st.spinner("Seleccionando los 2 activos más fuertes..."):
-                    activos_totales = obtener_activos_abiertos(st.session_state.api, tipo_mercado)
-                    if activos_totales:
-                        seleccionados = seleccionar_activos_fuertes(st.session_state.api, activos_totales, num_activos=2)
+                # Obtener activos con conteo
+                activos, otc, real = obtener_activos_abiertos(st.session_state.api, tipo_mercado)
+                st.session_state.activos_totales = activos
+                st.session_state.otc_count = otc
+                st.session_state.real_count = real
+                st.session_state.log.append(f"📊 Activos disponibles: {len(activos)} (OTC: {otc}, REAL: {real})")
+                if activos:
+                    with st.spinner("Seleccionando los 2 activos más fuertes..."):
+                        seleccionados = seleccionar_activos_fuertes(st.session_state.api, activos, num_activos=2)
                         st.session_state.activos_seleccionados = seleccionados
                         st.session_state.log.append(f"✅ Activos seleccionados: {', '.join(seleccionados)}")
-                    else:
-                        st.session_state.log.append("⚠️ No hay activos disponibles")
+                else:
+                    st.session_state.log.append("⚠️ No hay activos disponibles para el mercado seleccionado.")
                 st.rerun()
         else:
             if st.button("⏹️ DETENER", use_container_width=True, type="secondary"):
@@ -158,13 +164,18 @@ with st.sidebar:
 if st.session_state.conectado:
     st.title("📊 Señales de Divergencia (5 min)")
 
-    col1, col2, col3 = st.columns(3)
+    col1, col2, col3, col4 = st.columns(4)
     with col1:
         st.metric("Saldo", f"${st.session_state.saldo:.2f}")
     with col2:
         st.metric("Activos seguimiento", len(st.session_state.activos_seleccionados))
     with col3:
         st.metric("Señales emitidas", len(st.session_state.señales))
+    with col4:
+        st.metric("Activos disponibles", len(st.session_state.activos_totales))
+
+    # Mostrar conteo de activos disponibles por tipo
+    st.info(f"📊 OTC: {st.session_state.otc_count} | REAL: {st.session_state.real_count}")
 
     # Mostrar activos seleccionados
     if st.session_state.activos_seleccionados:
@@ -237,13 +248,16 @@ if st.session_state.conectado:
         else:
             # No hay activos seleccionados, buscar nuevos
             st.session_state.log.append("🔍 Buscando nuevos activos fuertes...")
-            activos_totales = obtener_activos_abiertos(st.session_state.api, tipo_mercado)
-            if activos_totales:
-                seleccionados = seleccionar_activos_fuertes(st.session_state.api, activos_totales, num_activos=2)
+            activos, otc, real = obtener_activos_abiertos(st.session_state.api, tipo_mercado)
+            st.session_state.activos_totales = activos
+            st.session_state.otc_count = otc
+            st.session_state.real_count = real
+            if activos:
+                seleccionados = seleccionar_activos_fuertes(st.session_state.api, activos, num_activos=2)
                 st.session_state.activos_seleccionados = seleccionados
                 st.session_state.log.append(f"✅ Nuevos activos seleccionados: {', '.join(seleccionados)}")
             else:
-                st.session_state.log.append("⚠️ No hay activos disponibles")
+                st.session_state.log.append("⚠️ No hay activos disponibles para el mercado seleccionado.")
             time.sleep(pausa_entre_ciclos)
             st.rerun()
 
