@@ -18,7 +18,7 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# Estilos CSS profesionales (3D cards) - igual que antes
+# Estilos CSS profesionales (3D cards)
 st.markdown("""
 <style>
     .stApp {
@@ -133,7 +133,7 @@ if 'saldo' not in st.session_state:
 if 'monitoreando' not in st.session_state:
     st.session_state.monitoreando = False
 if 'activo_actual' not in st.session_state:
-    st.session_state.activo_actual = None
+    st.session_state.activo_actual = None  # dict con la señal activa
 if 'senal_activa' not in st.session_state:
     st.session_state.senal_activa = None
 if 'ultima_entrada' not in st.session_state:
@@ -211,6 +211,7 @@ with st.sidebar:
             if st.button("▶️ INICIAR", use_container_width=True, type="primary"):
                 st.session_state.monitoreando = True
                 st.session_state.log.append("🚀 Monitoreo iniciado")
+                # Obtener lista de activos
                 st.session_state.activos_totales = obtener_activos_abiertos(st.session_state.api, tipo_mercado)
                 st.session_state.log.append(f"📊 Total activos disponibles: {len(st.session_state.activos_totales)}")
                 st.rerun()
@@ -264,24 +265,22 @@ if st.session_state.conectado:
 
         # Si hay señal activa, esperar a que venza (5 min después de entrada)
         if st.session_state.senal_activa:
-            try:
-                entrada_dt = datetime.strptime(st.session_state.senal_activa['entrada'], "%H:%M:%S").time()
-                entrada_completa = datetime.combine(now.date(), entrada_dt)
-                if entrada_completa < now:
-                    entrada_completa += timedelta(days=1)
-                if now >= entrada_completa + timedelta(minutes=5):
-                    st.session_state.senal_activa = None
-                    st.session_state.log.append("🗑️ Señal expirada. Buscando nueva...")
-                    st.rerun()
-                else:
-                    seg_rest = (entrada_completa + timedelta(minutes=5) - now).total_seconds()
-                    st.info(f"⏳ Señal activa. Próximo análisis en {int(seg_rest)} segundos...")
-                    time.sleep(1)
-                    st.rerun()
-            except Exception as e:
-                # Si hay error en el cálculo, reiniciamos la señal
+            # Convertir entrada_str a datetime con zona horaria
+            entrada_str = st.session_state.senal_activa['entrada']
+            # Asumimos que la entrada_str está en formato HH:MM:SS y corresponde al día actual
+            entrada_dt = datetime.strptime(entrada_str, "%H:%M:%S").time()
+            entrada_completa = datetime.combine(now.date(), entrada_dt)
+            entrada_completa = ecuador.localize(entrada_completa)  # hacer timezone-aware
+            if entrada_completa < now:
+                entrada_completa += timedelta(days=1)
+            if now >= entrada_completa + timedelta(minutes=5):
                 st.session_state.senal_activa = None
-                st.session_state.log.append(f"⚠️ Error en señal activa: {e}. Reiniciando...")
+                st.session_state.log.append("🗑️ Señal expirada. Buscando nueva...")
+                st.rerun()
+            else:
+                seg_rest = (entrada_completa + timedelta(minutes=5) - now).total_seconds()
+                st.info(f"⏳ Señal activa. Próximo análisis en {int(seg_rest)} segundos...")
+                time.sleep(1)
                 st.rerun()
         else:
             # Buscar la mejor señal
