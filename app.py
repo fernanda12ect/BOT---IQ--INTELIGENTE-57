@@ -5,19 +5,19 @@ from datetime import datetime, timedelta
 import pytz
 from iqoptionapi.stable_api import IQ_Option
 from bot import (
-    buscar_mejor_senal,
-    obtener_activos_abiertos,
-    obtener_velas_1min
+    evaluar_activo,
+    seleccionar_activos_fuertes,
+    obtener_activos_abiertos
 )
 
 st.set_page_config(
-    page_title="NEUROTRADER - 3 ESTRATEGIAS",
-    page_icon="🎯",
+    page_title="NEUROTRADER - DIVERGENCIAS",
+    page_icon="📊",
     layout="wide",
     initial_sidebar_state="expanded"
 )
 
-# Estilos CSS (igual que antes)
+# Estilos CSS
 st.markdown("""
 <style>
     .stApp { background-color: #0b0f17; color: #e0e0e0; }
@@ -51,11 +51,6 @@ st.markdown("""
         font-size: 0.9rem;
         color: #ccc;
     }
-    .countdown {
-        font-size: 1.5rem;
-        color: #ffaa00;
-        font-weight: bold;
-    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -70,18 +65,14 @@ if 'saldo' not in st.session_state:
     st.session_state.saldo = 0.0
 if 'monitoreando' not in st.session_state:
     st.session_state.monitoreando = False
-if 'señales_emitidas' not in st.session_state:
-    st.session_state.señales_emitidas = []
-if 'ultima_entrada' not in st.session_state:
-    st.session_state.ultima_entrada = None
-if 'senal_actual' not in st.session_state:
-    st.session_state.senal_actual = None  # señal que está en espera de entrada
+if 'activos_seleccionados' not in st.session_state:
+    st.session_state.activos_seleccionados = []  # lista de los 2 activos actuales
+if 'señales' not in st.session_state:
+    st.session_state.señales = []  # historial de señales generadas
+if 'ultima_senal_tiempo' not in st.session_state:
+    st.session_state.ultima_senal_tiempo = None  # para esperar 5 min después de señal
 if 'log' not in st.session_state:
     st.session_state.log = []
-if 'indice_ronda' not in st.session_state:
-    st.session_state.indice_ronda = 0
-if 'activos_totales' not in st.session_state:
-    st.session_state.activos_totales = []
 
 # Zona horaria
 ecuador = pytz.timezone("America/Guayaquil")
@@ -97,8 +88,10 @@ def conectar(email, password):
             saldo = api.get_balance()
             st.session_state.saldo = saldo if saldo is not None else 0.0
             st.session_state.log.append(f"✅ Conectado - Saldo: {st.session_state.saldo}")
-            st.session_state.activos_totales = obtener_activos_abiertos(api, "AMBOS")
-            st.session_state.log.append(f"📊 Total activos disponibles: {len(st.session_state.activos_totales)}")
+            # Obtener activos
+            activos = obtener_activos_abiertos(api, "AMBOS")
+            st.session_state.activos_totales = activos
+            st.session_state.log.append(f"📊 Total activos disponibles: {len(activos)}")
             return True
         else:
             st.error(f"Error: {reason}")
@@ -114,7 +107,7 @@ def desconectar():
 
 # Sidebar
 with st.sidebar:
-    st.markdown("## 🎯 NEUROTRADER")
+    st.markdown("## 📈 NEUROTRADER - DIVERGENCIAS")
     st.markdown("---")
     email = st.text_input("📧 Correo electrónico")
     password = st.text_input("🔑 Contraseña", type="password")
@@ -134,21 +127,24 @@ with st.sidebar:
     st.markdown("### ⚙️ Configuración")
 
     tipo_mercado = st.selectbox("Mercado", ["OTC", "REAL", "AMBOS"], index=2)
-    activos_por_ciclo = st.slider("Activos por ciclo", 10, 30, 20, 5)
-    pausa_ciclo = st.slider("Pausa entre ciclos (seg)", 60, 180, 90, 10)
+    pausa_entre_ciclos = st.slider("Pausa entre ciclos de búsqueda (seg)", 30, 120, 60, 10)
     anticipacion = st.slider("Anticipación de señal (seg)", 5, 30, 15, 5)
-    activar_estrategia_1min = st.checkbox("Activar estrategia de 1 minuto (sesiones de alta volatilidad)", value=True)
 
     st.markdown("---")
     if st.session_state.conectado:
         if not st.session_state.monitoreando:
             if st.button("▶️ INICIAR", use_container_width=True, type="primary"):
                 st.session_state.monitoreando = True
-                st.session_state.indice_ronda = 0
-                st.session_state.señales_emitidas = []
-                st.session_state.senal_actual = None
-                st.session_state.ultima_entrada = None
                 st.session_state.log.append("🚀 Monitoreo iniciado")
+                # Seleccionar los 2 activos más fuertes
+                with st.spinner("Seleccionando los 2 activos más fuertes..."):
+                    activos_totales = obtener_activos_abiertos(st.session_state.api, tipo_mercado)
+                    if activos_totales:
+                        seleccionados = seleccionar_activos_fuertes(st.session_state.api, activos_totales, num_activos=2)
+                        st.session_state.activos_seleccionados = seleccionados
+                        st.session_state.log.append(f"✅ Activos seleccionados: {', '.join(seleccionados)}")
+                    else:
+                        st.session_state.log.append("⚠️ No hay activos disponibles")
                 st.rerun()
         else:
             if st.button("⏹️ DETENER", use_container_width=True, type="secondary"):
@@ -160,46 +156,37 @@ with st.sidebar:
 
 # Área principal
 if st.session_state.conectado:
-    st.title("🎯 Señales de Trading - 3 Estrategias")
+    st.title("📊 Señales de Divergencia (5 min)")
 
     col1, col2, col3 = st.columns(3)
     with col1:
         st.metric("Saldo", f"${st.session_state.saldo:.2f}")
     with col2:
-        st.metric("Señales emitidas", len(st.session_state.señales_emitidas))
+        st.metric("Activos seguimiento", len(st.session_state.activos_seleccionados))
     with col3:
-        if st.session_state.ultima_entrada:
-            tiempo_restante = max(0, (st.session_state.ultima_entrada + timedelta(minutes=5) - datetime.now(ecuador)).total_seconds())
-            st.metric("Próximo análisis", f"{int(tiempo_restante)}s" if tiempo_restante > 0 else "Ahora")
-        else:
-            st.metric("Próximo análisis", "Inmediato")
+        st.metric("Señales emitidas", len(st.session_state.señales))
 
-    # Mostrar señal actual (si está en espera)
-    if st.session_state.senal_actual:
-        s = st.session_state.senal_actual
-        now = datetime.now(ecuador)
-        tiempo_entrada = s['entrada_datetime']
-        if now < tiempo_entrada:
-            segundos = (tiempo_entrada - now).total_seconds()
-            st.info(f"⏳ Próxima entrada en {int(segundos)} segundos...")
-        else:
-            st.success("✅ Momento de entrada alcanzado")
+    # Mostrar activos seleccionados
+    if st.session_state.activos_seleccionados:
+        st.subheader("🎯 Activos en seguimiento")
+        for asset in st.session_state.activos_seleccionados:
+            st.markdown(f'<div class="alert-card">🔍 {asset}</div>', unsafe_allow_html=True)
 
-    # Mostrar últimas señales emitidas
-    if st.session_state.señales_emitidas:
+    # Mostrar últimas señales
+    if st.session_state.señales:
         st.subheader("📊 Historial de señales")
-        for señal in st.session_state.señales_emitidas[-10:][::-1]:
+        for señal in st.session_state.señales[-10:][::-1]:
             card_class = "call-card" if señal['direccion'] == "CALL" else "put-card"
             st.markdown(f"""
             <div class="signal-card {card_class}">
                 <div class="asset-title">[{señal['hora']}] {señal['asset']}</div>
-                <div><strong>{señal['direccion']}</strong> - {señal['estrategia']}</div>
-                <div class="signal-detail">Entrada: {señal['entrada']} | Vencimiento: {señal['vencimiento']} min</div>
-                <div class="signal-detail">Descripción: {señal['descripcion']}</div>
+                <div><strong>{señal['direccion']}</strong> - {señal['descripcion']}</div>
+                <div class="signal-detail">Entrada: {señal['entrada']} | Vencimiento: 5 min</div>
+                <div class="signal-detail">Fuerza: {señal['fuerza']:.1f}%</div>
             </div>
             """, unsafe_allow_html=True)
     else:
-        st.info("No hay señales emitidas aún.")
+        st.info("No hay señales aún.")
 
     # Log de eventos
     with st.expander("📋 Log de eventos", expanded=False):
@@ -210,113 +197,55 @@ if st.session_state.conectado:
     if st.session_state.monitoreando:
         now = datetime.now(ecuador)
 
-        # Si hay una señal en espera, verificar si ya es hora de entrada
-        if st.session_state.senal_actual:
-            entrada_dt = st.session_state.senal_actual['entrada_datetime']
-            if now >= entrada_dt:
-                # Ya es hora de entrada, mover a historial
-                señal = st.session_state.senal_actual
-                st.session_state.señales_emitidas.append({
-                    'hora': now.strftime("%H:%M:%S"),
-                    'asset': señal['asset'],
-                    'direccion': señal['direccion'],
-                    'estrategia': señal['estrategia'],
-                    'entrada': entrada_dt.strftime("%H:%M:%S"),
-                    'vencimiento': señal['vencimiento'],
-                    'descripcion': señal['descripcion']
-                })
-                st.session_state.ultima_entrada = entrada_dt
-                st.session_state.senal_actual = None
-                st.rerun()
-            else:
-                # Aún no es hora, esperar
-                time.sleep(1)
-                st.rerun()
-
-        # Si hay una operación en curso (esperando vencimiento)
-        elif st.session_state.ultima_entrada:
-            tiempo_restante = (st.session_state.ultima_entrada + timedelta(minutes=5) - now).total_seconds()
-            if tiempo_restante > 0:
-                st.info(f"⏳ Operación en curso. Próximo análisis en {int(tiempo_restante)} segundos...")
+        # Verificar si hay una operación en curso (después de una señal, esperar 5 min)
+        if st.session_state.ultima_senal_tiempo:
+            tiempo_transcurrido = (now - st.session_state.ultima_senal_tiempo).total_seconds()
+            if tiempo_transcurrido < 300:  # 5 minutos
+                st.info(f"⏳ Esperando {int(300 - tiempo_transcurrido)} segundos antes de nueva señal...")
                 time.sleep(1)
                 st.rerun()
             else:
-                # Vencimiento alcanzado, liberar para nuevo análisis
-                st.session_state.ultima_entrada = None
-                st.rerun()
+                st.session_state.ultima_senal_tiempo = None
+                # No hacemos rerun inmediato, para que pueda evaluar
 
-        # No hay señal ni operación, podemos analizar
-        else:
-            activos = st.session_state.activos_totales
-            if not activos:
-                st.warning("No hay activos disponibles")
-                time.sleep(pausa_ciclo)
-                st.rerun()
-
-            inicio = st.session_state.indice_ronda * activos_por_ciclo
-            fin = inicio + activos_por_ciclo
-            lote = activos[inicio:fin]
-
-            if not lote:
-                st.session_state.indice_ronda = 0
-                st.rerun()
-
-            st.session_state.log.append(f"🔄 Analizando lote {st.session_state.indice_ronda + 1} ({len(lote)} activos)...")
-            mejor_senal = buscar_mejor_senal(st.session_state.api, lote, activar_estrategia_1min)
-
-            if mejor_senal:
-                asset = mejor_senal['asset']
-                direccion = mejor_senal['direccion']
-                estrategia = mejor_senal['estrategia']
-                vencimiento = mejor_senal['vencimiento']
-                descripcion = mejor_senal['descripcion']
-                nivel = mejor_senal.get('nivel', None)
-
-                st.session_state.log.append(f"⏳ Esperando confirmación de punto de entrada para {estrategia} en {asset} (vencimiento: {vencimiento} min)")
-
-                # Confirmación para estrategia de 1 minuto
-                if vencimiento == 1 and nivel is not None:
-                    time.sleep(10)
-                    df_confirm = obtener_velas_1min(st.session_state.api, asset, n=1)
-                    if df_confirm is not None:
-                        nuevo_precio = df_confirm['close'].iloc[-1]
-                        if direccion == 'CALL' and nuevo_precio < nivel:
-                            st.session_state.log.append(f"❌ Señal cancelada: {asset} rompió soporte")
-                            mejor_senal = None
-                        elif direccion == 'PUT' and nuevo_precio > nivel:
-                            st.session_state.log.append(f"❌ Señal cancelada: {asset} rompió resistencia")
-                            mejor_senal = None
-                        else:
-                            st.session_state.log.append(f"✅ Confirmación positiva para {asset}")
-                    else:
-                        st.session_state.log.append("⚠️ No se pudo obtener confirmación, se procede con la señal")
-
-                if mejor_senal:
-                    # Calcular hora de entrada
-                    entrada_dt = now + timedelta(seconds=anticipacion)
-                    entrada_str = entrada_dt.strftime("%H:%M:%S")
-                    st.session_state.senal_actual = {
+        # Evaluar los activos seleccionados
+        if st.session_state.activos_seleccionados:
+            for asset in st.session_state.activos_seleccionados:
+                res = evaluar_activo(st.session_state.api, asset)
+                if res and 'direccion' in res:
+                    # Es una señal
+                    entrada = now + timedelta(seconds=anticipacion)
+                    entrada_str = entrada.strftime("%H:%M:%S")
+                    st.session_state.señales.append({
+                        'hora': now.strftime("%H:%M:%S"),
                         'asset': asset,
-                        'direccion': direccion,
-                        'estrategia': estrategia,
-                        'entrada_datetime': entrada_dt,
+                        'direccion': res['direccion'],
+                        'descripcion': res['descripcion'],
                         'entrada': entrada_str,
-                        'vencimiento': vencimiento,
-                        'descripcion': descripcion
-                    }
-                    st.session_state.log.append(f"🔔 Señal generada: {asset} - {direccion} a las {entrada_str}")
-                    # Forzar rerun inmediato para mostrar la cuenta regresiva
+                        'fuerza': res['fuerza']
+                    })
+                    st.session_state.ultima_senal_tiempo = now
+                    st.session_state.log.append(f"🚀 SEÑAL: {asset} - {res['direccion']} a las {entrada_str} (Fuerza: {res['fuerza']:.1f}%)")
+                    # Forzar rerun para mostrar la señal inmediatamente
                     st.rerun()
-                else:
-                    # Señal cancelada, continuar con el siguiente lote
-                    st.session_state.indice_ronda += 1
-                    time.sleep(pausa_ciclo)
-                    st.rerun()
+                # Esperar un poco entre activos
+                time.sleep(1)
+
+            # Si no hubo señal, esperar un poco y volver a evaluar
+            time.sleep(pausa_entre_ciclos)
+            st.rerun()
+        else:
+            # No hay activos seleccionados, buscar nuevos
+            st.session_state.log.append("🔍 Buscando nuevos activos fuertes...")
+            activos_totales = obtener_activos_abiertos(st.session_state.api, tipo_mercado)
+            if activos_totales:
+                seleccionados = seleccionar_activos_fuertes(st.session_state.api, activos_totales, num_activos=2)
+                st.session_state.activos_seleccionados = seleccionados
+                st.session_state.log.append(f"✅ Nuevos activos seleccionados: {', '.join(seleccionados)}")
             else:
-                st.session_state.log.append("🔍 No se encontraron señales en este lote.")
-                st.session_state.indice_ronda += 1
-                time.sleep(pausa_ciclo)
-                st.rerun()
+                st.session_state.log.append("⚠️ No hay activos disponibles")
+            time.sleep(pausa_entre_ciclos)
+            st.rerun()
 
 else:
     st.info("🔒 Conéctate a IQ Option para comenzar.")
