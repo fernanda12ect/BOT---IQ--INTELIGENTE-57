@@ -6,18 +6,18 @@ import pytz
 from iqoptionapi.stable_api import IQ_Option
 from bot import (
     evaluar_activo,
-    seleccionar_activos_fuertes,
-    obtener_activos_abiertos
+    seleccionar_mejor_activo,
+    obtener_activos_otc
 )
 
 st.set_page_config(
-    page_title="NEUROTRADER - NIVELES",
-    page_icon="📈",
+    page_title="NEUROTRADER OTC 1MIN",
+    page_icon="⚡",
     layout="wide",
     initial_sidebar_state="expanded"
 )
 
-# Estilos CSS (tarjetas profesionales)
+# Estilos CSS (similares a anteriores)
 st.markdown("""
 <style>
     .stApp {
@@ -52,7 +52,7 @@ st.markdown("""
         background: linear-gradient(90deg, #00b4ff, #0077ee);
         box-shadow: 0 6px 15px rgba(0,163,255,0.5);
     }
-    .asset-card {
+    .signal-card {
         background: linear-gradient(145deg, #1a2032, #0f1422);
         border-radius: 20px;
         padding: 20px;
@@ -63,19 +63,19 @@ st.markdown("""
         position: relative;
         overflow: hidden;
     }
-    .asset-card:hover {
+    .signal-card:hover {
         transform: translateY(-5px);
         box-shadow: 0 25px 40px -12px rgba(0,0,0,0.6);
         border-color: #00a3ff;
     }
-    .asset-name {
+    .signal-title {
         font-size: 1.4rem;
         font-weight: bold;
         margin-bottom: 10px;
         color: #fff;
         text-shadow: 0 2px 5px rgba(0,0,0,0.3);
     }
-    .asset-status {
+    .signal-status {
         font-size: 0.9rem;
         padding: 4px 12px;
         border-radius: 20px;
@@ -83,16 +83,13 @@ st.markdown("""
         background: rgba(0,0,0,0.5);
         margin-bottom: 15px;
     }
-    .signal-call {
+    .call {
         border-left: 5px solid #00ff88;
         background: linear-gradient(90deg, rgba(0,255,136,0.1) 0%, rgba(0,0,0,0) 100%);
     }
-    .signal-put {
+    .put {
         border-left: 5px solid #ff4b4b;
         background: linear-gradient(90deg, rgba(255,75,75,0.1) 0%, rgba(0,0,0,0) 100%);
-    }
-    .signal-neutral {
-        border-left: 5px solid #ffaa00;
     }
     .force-bar {
         background: #2a2f3a;
@@ -131,14 +128,12 @@ if 'saldo' not in st.session_state:
     st.session_state.saldo = 0.0
 if 'monitoreando' not in st.session_state:
     st.session_state.monitoreando = False
-if 'activos_monitoreo' not in st.session_state:
-    st.session_state.activos_monitoreo = []  # lista de dicts con info de cada activo
-if 'señales_activas' not in st.session_state:
-    st.session_state.señales_activas = {}  # dict {asset: dict con señal}
+if 'senal_actual' not in st.session_state:
+    st.session_state.senal_actual = None
 if 'log' not in st.session_state:
     st.session_state.log = []
-if 'activos_totales' not in st.session_state:
-    st.session_state.activos_totales = []
+if 'ultima_evaluacion' not in st.session_state:
+    st.session_state.ultima_evaluacion = None
 
 # Zona horaria
 ecuador = pytz.timezone("America/Guayaquil")
@@ -169,7 +164,7 @@ def desconectar():
 
 # Sidebar
 with st.sidebar:
-    st.markdown("## 📈 NEUROTRADER - NIVELES")
+    st.markdown("## ⚡ NEUROTRADER OTC 1MIN")
     st.markdown("---")
     email = st.text_input("📧 Correo electrónico")
     password = st.text_input("🔑 Contraseña", type="password")
@@ -188,23 +183,15 @@ with st.sidebar:
     st.markdown("---")
     st.markdown("### ⚙️ Configuración")
 
-    tipo_mercado = st.selectbox("Mercado", ["OTC", "REAL", "AMBOS"], index=2)
-    umbral_fuerza = st.slider("Fuerza mínima para considerar activo", 0, 100, 40, 5)
-    anticipacion = st.slider("Anticipación de señal (segundos antes del cierre)", 5, 60, 30, 5)
-    max_activos = st.slider("Número máximo de activos a monitorear", 1, 5, 5, 1)
+    umbral_fuerza = st.slider("Fuerza mínima para señal (%)", 0, 100, 50, 5)
+    st.info("La señal se generará en el segundo 59 de cada minuto.")
 
     st.markdown("---")
     if st.session_state.conectado:
         if not st.session_state.monitoreando:
-            if st.button("▶️ INICIAR", use_container_width=True, type="primary"):
+            if st.button("▶️ INICIAR MONITOREO", use_container_width=True, type="primary"):
                 st.session_state.monitoreando = True
                 st.session_state.log.append("🚀 Monitoreo iniciado")
-                st.session_state.activos_totales = obtener_activos_abiertos(st.session_state.api, tipo_mercado)
-                # Seleccionar los mejores activos
-                with st.spinner("Seleccionando los mejores activos..."):
-                    mejores = seleccionar_activos_fuertes(st.session_state.api, st.session_state.activos_totales, max_activos)
-                    st.session_state.activos_monitoreo = mejores
-                    st.session_state.log.append(f"✅ Activos seleccionados: {', '.join([a['asset'] for a in mejores])}")
                 st.rerun()
         else:
             if st.button("⏹️ DETENER", use_container_width=True, type="secondary"):
@@ -216,50 +203,34 @@ with st.sidebar:
 
 # Área principal
 if st.session_state.conectado:
-    st.title("📊 Estrategia de Niveles Clave (1 minuto)")
+    st.title("⚡ Señales OTC 1 Minuto - Segundo 59")
 
     col1, col2, col3 = st.columns(3)
     with col1:
         st.metric("Saldo", f"${st.session_state.saldo:.2f}")
     with col2:
-        st.metric("Activos en seguimiento", len(st.session_state.activos_monitoreo))
+        st.metric("Estado", "ACTIVO" if st.session_state.monitoreando else "DETENIDO")
     with col3:
-        st.metric("Señales activas", len(st.session_state.señales_activas))
+        st.metric("Última señal", "Sí" if st.session_state.senal_actual else "No")
 
-    # Mostrar tarjetas de los activos
-    if st.session_state.activos_monitoreo:
-        cols = st.columns(len(st.session_state.activos_monitoreo))
-        for idx, activo_data in enumerate(st.session_state.activos_monitoreo):
-            with cols[idx]:
-                asset = activo_data['asset']
-                tendencia = activo_data['tendencia']
-                fuerza = activo_data['fuerza']
-                # Verificar si ya hay una señal activa para este activo
-                senal = st.session_state.señales_activas.get(asset)
-                if senal and senal.get('activa'):
-                    # Tarjeta con señal activa
-                    card_class = "signal-call" if senal['direccion'] == "CALL" else "signal-put"
-                    st.markdown(f"""
-                    <div class="asset-card {card_class}">
-                        <div class="asset-name">{asset}</div>
-                        <div class="asset-status">✅ SEÑAL ACTIVA</div>
-                        <div><strong>{senal['direccion']}</strong> - {senal['descripcion']}</div>
-                        <div>Entrada: {senal['entrada']}</div>
-                        <div>Vencimiento: {senal['vencimiento']}</div>
-                    </div>
-                    """, unsafe_allow_html=True)
-                else:
-                    # Tarjeta neutra
-                    estado = "NEUTRO - Esperando nivel"
-                    st.markdown(f"""
-                    <div class="asset-card signal-neutral">
-                        <div class="asset-name">{asset}</div>
-                        <div class="asset-status">⚪ {estado}</div>
-                        <div>Tendencia: {tendencia if tendencia else 'No definida'}</div>
-                        <div>Fuerza: {fuerza:.1f}%</div>
-                        <div class="force-bar"><div class="force-fill" style="width: {fuerza}%;"></div></div>
-                    </div>
-                    """, unsafe_allow_html=True)
+    # Mostrar señal actual si existe
+    if st.session_state.senal_actual:
+        s = st.session_state.senal_actual
+        card_class = "call" if s['direccion'] == "CALL" else "put"
+        st.markdown(f"""
+        <div class="signal-card {card_class}">
+            <div class="signal-title">{'🔵 COMPRA (CALL)' if s['direccion'] == 'CALL' else '🔴 VENTA (PUT)'}</div>
+            <div class="signal-status">✅ SEÑAL ACTIVA</div>
+            <div><strong>Activo:</strong> {s['asset']}</div>
+            <div><strong>Descripción:</strong> {s['descripcion']}</div>
+            <div><strong>Fuerza:</strong> {s['fuerza']:.1f}%</div>
+            <div class="force-bar"><div class="force-fill" style="width: {s['fuerza']}%;"></div></div>
+            <div><strong>Tipo activo:</strong> {s['tipo_activo']}</div>
+            <div class="entry-time">⏱️ Entrada: {s['entrada']} | Vencimiento: {s['vencimiento']}</div>
+        </div>
+        """, unsafe_allow_html=True)
+    else:
+        st.info("No hay señal activa. Esperando próximo minuto...")
 
     # Log de eventos
     with st.expander("📋 Log de eventos", expanded=True):
@@ -269,118 +240,63 @@ if st.session_state.conectado:
     # Lógica de monitoreo
     if st.session_state.monitoreando:
         now = datetime.now(ecuador)
-        # Calcular próximo cierre de vela de 1 minuto (para sincronización)
-        # Pero para simplificar, analizamos cada segundo y generamos señal cuando se alcanza nivel
-        # En realidad, deberíamos tener un loop que revise constantemente los precios.
-        # Como Streamlit no es tiempo real, simulamos con rerun cada segundo.
+        segundo = now.second
 
-        # Primero, verificar si alguna señal activa ha expirado (1 min después de entrada)
-        activas = st.session_state.señales_activas.copy()
-        for asset, senal in activas.items():
-            if senal.get('activa'):
-                entrada_dt = datetime.strptime(senal['entrada'], "%H:%M:%S").time()
-                entrada_completa = datetime.combine(now.date(), entrada_dt)
-                entrada_completa = ecuador.localize(entrada_completa)
-                if entrada_completa > now:
-                    entrada_completa -= timedelta(days=1)
-                expiracion = entrada_completa + timedelta(minutes=1)
-                if now >= expiracion:
-                    senal['activa'] = False
-                    st.session_state.señales_activas[asset] = senal
-                    st.session_state.log.append(f"🗑️ Señal expirada para {asset}")
-                    # Opcional: si la señal era ganadora, podríamos decidir si seguir con el mismo activo
-                    # Por simplicidad, solo la eliminamos.
-
-        # Evaluar activos en busca de nuevos niveles
-        for activo_data in st.session_state.activos_monitoreo:
-            asset = activo_data['asset']
-            # Si ya tiene señal activa, saltar
-            if st.session_state.señales_activas.get(asset, {}).get('activa'):
-                continue
-
-            # Obtener datos actualizados del activo
-            res = evaluar_activo(st.session_state.api, asset)
-            if res is None:
-                continue
-            tendencia = res['tendencia']
-            fuerza = res['fuerza']
-            # Actualizar fuerza en activo_data
-            activo_data['fuerza'] = fuerza
-            activo_data['tendencia'] = tendencia
-
-            # Si no hay tendencia clara, no operamos
-            if tendencia is None:
-                continue
-
-            # Buscar niveles (soportes/resistencias) o líneas de tendencia
-            # Ver si el precio actual está cerca de algún nivel
-            precio = res['precio']
-            atr = res.get('atr', 0.001)
-            umbral = 0.5 * atr / precio  # 0.5 ATR como distancia máxima
-            nivel_encontrado = None
-            direccion_esperada = None
-            descripcion = ""
-
-            # 1. Verificar soporte/resistencia horizontal
-            for nivel in res['niveles']:
-                distancia = abs(precio - nivel['precio']) / precio
-                if distancia < umbral:
-                    if nivel['tipo'] == 'soporte' and tendencia == 'CALL':
-                        nivel_encontrado = nivel['precio']
-                        direccion_esperada = 'CALL'
-                        descripcion = f"Soporte {nivel['precio']:.5f} ({nivel['toques']} toques)"
-                        break
-                    elif nivel['tipo'] == 'resistencia' and tendencia == 'PUT':
-                        nivel_encontrado = nivel['precio']
-                        direccion_esperada = 'PUT'
-                        descripcion = f"Resistencia {nivel['precio']:.5f} ({nivel['toques']} toques)"
-                        break
-
-            # 2. Si no hay nivel horizontal, buscar línea de tendencia
-            if not nivel_encontrado:
-                for linea in res['lineas']:
-                    distancia = abs(precio - linea['precio']) / precio
-                    if distancia < umbral:
-                        if linea['tipo'] == 'alcista' and tendencia == 'CALL':
-                            nivel_encontrado = linea['precio']
-                            direccion_esperada = 'CALL'
-                            descripcion = f"Línea tendencia alcista"
-                            break
-                        elif linea['tipo'] == 'bajista' and tendencia == 'PUT':
-                            nivel_encontrado = linea['precio']
-                            direccion_esperada = 'PUT'
-                            descripcion = f"Línea tendencia bajista"
-                            break
-
-            if nivel_encontrado and direccion_esperada:
-                # Generar señal para entrada en la próxima vela (1 minuto después)
-                # Calculamos la próxima vela de 1 minuto
-                now_utc = now.astimezone(pytz.UTC)
-                minute = now_utc.minute
-                start_minute = minute  # la vela actual termina en 60 - segundos
-                # Simplemente, la entrada será dentro de 1 minuto (próxima vela)
-                entrada_dt = now + timedelta(minutes=1)
-                entrada_dt = entrada_dt.replace(second=0, microsecond=0)
-                entrada_str = entrada_dt.strftime("%H:%M:%S")
-                vencimiento_str = (entrada_dt + timedelta(minutes=1)).strftime("%H:%M:%S")
-                st.session_state.señales_activas[asset] = {
-                    'activa': True,
-                    'direccion': direccion_esperada,
-                    'descripcion': descripcion,
-                    'entrada': entrada_str,
-                    'vencimiento': vencimiento_str,
-                    'fuerza': fuerza
-                }
-                st.session_state.log.append(f"🚀 SEÑAL: {asset} - {direccion_esperada} a las {entrada_str} (Nivel: {descripcion})")
-                # Forzar rerun para mostrar la tarjeta
+        # Si hay señal activa, esperar a que expire (1 min después de entrada)
+        if st.session_state.senal_actual:
+            entrada_dt = datetime.strptime(st.session_state.senal_actual['entrada'], "%H:%M:%S").time()
+            entrada_completa = datetime.combine(now.date(), entrada_dt)
+            entrada_completa = ecuador.localize(entrada_completa)
+            if entrada_completa > now:
+                entrada_completa -= timedelta(days=1)
+            expiracion = entrada_completa + timedelta(minutes=1)
+            if now >= expiracion:
+                st.session_state.senal_actual = None
+                st.session_state.log.append("🗑️ Señal expirada")
                 st.rerun()
-
-        # Actualizar el session_state con los nuevos valores de fuerza/tendencia
-        # (se actualizó in-place)
-
-        # Esperar 1 segundo y volver a evaluar
-        time.sleep(1)
-        st.rerun()
+            else:
+                # Mostrar tiempo restante
+                seg_rest = (expiracion - now).total_seconds()
+                st.info(f"⏳ Señal activa. Vence en {int(seg_rest)} segundos...")
+                time.sleep(1)
+                st.rerun()
+        else:
+            # No hay señal, evaluar en el segundo 59
+            if segundo == 59:
+                # Realizar análisis
+                with st.spinner("Analizando activos OTC..."):
+                    activos = obtener_activos_otc(st.session_state.api)
+                    if not activos:
+                        st.session_state.log.append("⚠️ No hay activos OTC disponibles")
+                    else:
+                        mejor = seleccionar_mejor_activo(st.session_state.api, activos)
+                        if mejor and mejor['fuerza'] >= umbral_fuerza:
+                            # Calcular entrada y vencimiento
+                            entrada_dt = now.replace(second=0, microsecond=0) + timedelta(minutes=1)
+                            entrada_str = entrada_dt.strftime("%H:%M:%S")
+                            vencimiento_dt = entrada_dt + timedelta(minutes=1)
+                            vencimiento_str = vencimiento_dt.strftime("%H:%M:%S")
+                            st.session_state.senal_actual = {
+                                'asset': mejor['asset'],
+                                'direccion': mejor['direccion'],
+                                'descripcion': mejor['descripcion'],
+                                'fuerza': mejor['fuerza'],
+                                'tipo_activo': mejor['tipo_activo'],
+                                'entrada': entrada_str,
+                                'vencimiento': vencimiento_str
+                            }
+                            st.session_state.log.append(f"🚀 SEÑAL: {mejor['asset']} - {mejor['direccion']} a las {entrada_str}")
+                        else:
+                            st.session_state.log.append("🔍 No se encontró señal con fuerza suficiente")
+                # Esperar a que pase el segundo 59 para no repetir en el mismo minuto
+                time.sleep(1)
+                st.rerun()
+            else:
+                # Mostrar tiempo restante hasta el segundo 59
+                seg_rest = 59 - segundo if segundo < 59 else 59 + (60 - segundo)
+                st.info(f"⏳ Próximo análisis en {seg_rest} segundos...")
+                time.sleep(1)
+                st.rerun()
 
 else:
     st.info("🔒 Conéctate a IQ Option para comenzar.")
