@@ -18,7 +18,7 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# Estilos CSS profesionales (3D cards)
+# Estilos CSS (igual que antes)
 st.markdown("""
 <style>
     .stApp {
@@ -138,8 +138,6 @@ if 'log' not in st.session_state:
     st.session_state.log = []
 if 'activos_totales' not in st.session_state:
     st.session_state.activos_totales = []
-if 'indice_ronda' not in st.session_state:
-    st.session_state.indice_ronda = 0
 
 # Zona horaria
 ecuador = pytz.timezone("America/Guayaquil")
@@ -168,6 +166,18 @@ def desconectar():
     st.session_state.conectado = False
     st.session_state.monitoreando = False
 
+def get_next_candle_times(now):
+    """Calcula el inicio y fin de la vela de 5 minutos actual y la próxima."""
+    # Convertir a UTC para el cálculo (IQ Option usa UTC)
+    now_utc = now.astimezone(pytz.UTC)
+    minute = now_utc.minute
+    # Encontrar el inicio de la vela actual (múltiplo de 5 minutos)
+    start_minute = (minute // 5) * 5
+    candle_start = now_utc.replace(minute=start_minute, second=0, microsecond=0)
+    candle_end = candle_start + timedelta(minutes=5)
+    next_candle_start = candle_end
+    return candle_start, candle_end, next_candle_start
+
 # Sidebar
 with st.sidebar:
     st.markdown("## 📈 NEUROTRADER PRO")
@@ -191,8 +201,8 @@ with st.sidebar:
 
     tipo_mercado = st.selectbox("Mercado", ["OTC", "REAL", "AMBOS"], index=2)
     umbral_fuerza = st.slider("Fuerza mínima para señal (%)", 0, 100, 50, 5)
-    pausa_entre_ciclos = st.slider("Pausa entre ciclos (seg)", 30, 120, 60, 10)
-    anticipacion = st.slider("Anticipación de señal (seg)", 5, 30, 15, 5)
+    anticipacion = st.slider("Anticipación de señal (segundos antes del cierre)", 5, 60, 30, 5,
+                             help="La señal se mostrará X segundos antes de que termine la vela de 5 minutos actual.")
 
     st.markdown("---")
     if st.session_state.conectado:
@@ -257,69 +267,74 @@ if st.session_state.conectado:
     # Lógica de monitoreo
     if st.session_state.monitoreando:
         now = datetime.now(ecuador)
+        candle_start, candle_end, next_candle_start = get_next_candle_times(now)
 
-        # Si hay señal activa, esperar a que venza (5 minutos después de entrada)
+        # Si hay señal activa, esperar a que expire (5 minutos después de la entrada)
         if st.session_state.senal_activa:
-            entrada_str = st.session_state.senal_activa['entrada']
-            # Convertir entrada_str a datetime del día actual
-            entrada_hora = datetime.strptime(entrada_str, "%H:%M:%S").time()
-            entrada_dt = datetime.combine(now.date(), entrada_hora)
-            entrada_dt = ecuador.localize(entrada_dt)
-            # Si la entrada ya pasó hoy, asumimos que fue ayer (para evitar tiempos negativos)
-            if entrada_dt > now:
-                entrada_dt -= timedelta(days=1)
-            expiracion = entrada_dt + timedelta(minutes=5)
+            entrada_dt = datetime.strptime(st.session_state.senal_activa['entrada'], "%H:%M:%S").time()
+            entrada_completa = datetime.combine(now.date(), entrada_dt)
+            entrada_completa = ecuador.localize(entrada_completa)
+            if entrada_completa > now:
+                entrada_completa -= timedelta(days=1)  # ajuste por si la entrada fue ayer
+            expiracion = entrada_completa + timedelta(minutes=5)
             if now >= expiracion:
                 st.session_state.senal_activa = None
                 st.session_state.log.append("🗑️ Señal expirada. Buscando nueva...")
                 st.rerun()
             else:
+                # Mostrar tiempo restante
                 seg_rest = (expiracion - now).total_seconds()
                 mins = int(seg_rest // 60)
                 segs = int(seg_rest % 60)
-                st.info(f"⏳ Señal activa. Próximo análisis en {mins} min {segs} seg...")
+                st.info(f"⏳ Señal activa. Vence en {mins} min {segs} seg...")
                 time.sleep(1)
                 st.rerun()
         else:
-            # No hay señal, buscar la mejor oportunidad
-            if not st.session_state.activos_totales:
-                st.session_state.activos_totales = obtener_activos_abiertos(st.session_state.api, tipo_mercado)
-            if not st.session_state.activos_totales:
-                st.warning("No hay activos disponibles")
-                time.sleep(pausa_entre_ciclos)
+            # No hay señal, evaluar si estamos en el momento de generar una (antes del cierre de la vela actual)
+            seg_hasta_cierre = (candle_end - now).total_seconds()
+            if 0 <= seg_hasta_cierre <= anticipacion:
+                # Estamos en la ventana de anticipación, ejecutar análisis
+                if not st.session_state.activos_totales:
+                    st.session_state.activos_totales = obtener_activos_abiertos(st.session_state.api, tipo_mercado)
+                if not st.session_state.activos_totales:
+                    st.warning("No hay activos disponibles")
+                    time.sleep(2)
+                    st.rerun()
+
+                # Analizar todos los activos (podemos usar lotes, pero por simplicidad analizamos todos)
+                mejor = seleccionar_mejor_activo(st.session_state.api, st.session_state.activos_totales)
+                if mejor and mejor['fuerza'] >= umbral_fuerza:
+                    # La señal se generará ahora, pero la entrada será al inicio de la próxima vela
+                    entrada_dt = next_candle_start.astimezone(ecuador)
+                    entrada_str = entrada_dt.strftime("%H:%M:%S")
+                    vencimiento_dt = entrada_dt + timedelta(minutes=5)
+                    vencimiento_str = vencimiento_dt.strftime("%H:%M:%S")
+                    st.session_state.senal_activa = {
+                        'asset': mejor['asset'],
+                        'direccion': mejor['direccion'],
+                        'estrategias': mejor['estrategias'],
+                        'fuerza': mejor['fuerza'],
+                        'entrada': entrada_str,
+                        'vencimiento': vencimiento_str
+                    }
+                    st.session_state.log.append(f"🚀 SEÑAL: {mejor['asset']} - {mejor['direccion']} a las {entrada_str} (Fuerza: {mejor['fuerza']:.1f}%)")
+                    st.session_state.log.append(f"   Estrategias: {', '.join(mejor['estrategias'])}")
+                else:
+                    st.session_state.log.append("🔍 No se encontraron señales en esta vela.")
+                # Después de analizar, esperamos a que termine la vela actual y luego al siguiente ciclo
+                time.sleep(1)
                 st.rerun()
-
-            activos = st.session_state.activos_totales
-            inicio = st.session_state.indice_ronda * 20
-            fin = inicio + 20
-            lote = activos[inicio:fin]
-            if not lote:
-                st.session_state.indice_ronda = 0
-                st.rerun()
-
-            st.session_state.log.append(f"🔍 Analizando lote {st.session_state.indice_ronda + 1} ({len(lote)} activos)...")
-            mejor = seleccionar_mejor_activo(st.session_state.api, lote)
-            st.session_state.indice_ronda += 1
-
-            if mejor and mejor['fuerza'] >= umbral_fuerza:
-                entrada = now + timedelta(seconds=anticipacion)
-                entrada_str = entrada.strftime("%H:%M:%S")
-                vencimiento_str = (entrada + timedelta(minutes=5)).strftime("%H:%M:%S")
-                st.session_state.senal_activa = {
-                    'asset': mejor['asset'],
-                    'direccion': mejor['direccion'],
-                    'estrategias': mejor['estrategias'],
-                    'fuerza': mejor['fuerza'],
-                    'entrada': entrada_str,
-                    'vencimiento': vencimiento_str
-                }
-                st.session_state.log.append(f"🚀 SEÑAL: {mejor['asset']} - {mejor['direccion']} a las {entrada_str} (Fuerza: {mejor['fuerza']:.1f}%)")
-                st.session_state.log.append(f"   Estrategias: {', '.join(mejor['estrategias'])}")
             else:
-                st.session_state.log.append("🔍 No se encontraron señales en este lote.")
-
-            time.sleep(pausa_entre_ciclos)
-            st.rerun()
+                # Mostrar tiempo restante para la próxima ventana de análisis
+                if seg_hasta_cierre > anticipacion:
+                    seg_rest = seg_hasta_cierre - anticipacion
+                    st.info(f"⏳ Próximo análisis en {int(seg_rest)} segundos...")
+                else:
+                    # Si ya pasó el cierre (seg_hasta_cierre negativo), esperar hasta el siguiente ciclo
+                    seg_rest = (candle_start + timedelta(minutes=5) - now).total_seconds()
+                    st.info(f"⏳ Próximo análisis en {int(seg_rest)} segundos...")
+                time.sleep(1)
+                st.rerun()
 
 else:
     st.info("🔒 Conéctate a IQ Option para comenzar.")
