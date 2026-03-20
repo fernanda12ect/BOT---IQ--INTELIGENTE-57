@@ -31,7 +31,6 @@ def calcular_indicadores(df):
     # EMAs
     df['ema9'] = df['close'].ewm(span=9, adjust=False).mean()
     df['ema21'] = df['close'].ewm(span=21, adjust=False).mean()
-    df['ema20'] = df['close'].ewm(span=20, adjust=False).mean()
     df['ema50'] = df['close'].ewm(span=50, adjust=False).mean()
 
     # RSI
@@ -77,12 +76,6 @@ def calcular_indicadores(df):
     df['stoch_k'] = 100 * (df['close'] - low14) / (high14 - low14)
     df['stoch_d'] = df['stoch_k'].rolling(3).mean()
 
-    # Heiken Ashi
-    df['ha_close'] = (df['open'] + df['high'] + df['low'] + df['close']) / 4
-    df['ha_open'] = (df['open'].shift(1) + df['close'].shift(1)) / 2
-    df['ha_high'] = df[['high', 'ha_open', 'ha_close']].max(axis=1)
-    df['ha_low'] = df[['low', 'ha_open', 'ha_close']].min(axis=1)
-
     # Volumen promedio
     df['vol_avg'] = df['volume'].rolling(20).mean()
     df['vol_ratio'] = df['volume'] / df['vol_avg']
@@ -90,25 +83,11 @@ def calcular_indicadores(df):
     return df
 
 # =========================
-# TENDENCIA GLOBAL (para filtrar señales en contra)
-# =========================
-def tendencia_global(df):
-    """Retorna la tendencia basada en EMA20 y EMA50 y ADX."""
-    last = df.iloc[-1]
-    if last['adx'] < 20:
-        return None  # sin tendencia clara
-    if last['ema20'] > last['ema50']:
-        return 'CALL'
-    elif last['ema20'] < last['ema50']:
-        return 'PUT'
-    return None
-
-# =========================
 # 8 ESTRATEGIAS MEJORADAS (cada una devuelve dirección y peso)
 # =========================
 
 def estrategia_1_divergencia(df):
-    """Divergencia RSI/MACD + ADX > 20 + volumen"""
+    """Divergencia RSI/MACD + ADX > 20 + volumen confirmación"""
     if len(df) < 5:
         return None, 0
     last = df.iloc[-1]
@@ -123,67 +102,67 @@ def estrategia_1_divergencia(df):
     min_macd_idx = segmento['macd'].idxmin()
     max_macd_idx = segmento['macd'].idxmax()
 
-    # Volumen confirmación
-    ultimas = df.iloc[-3:]
-    vol_alcista = ultimas[ultimas['close'] > ultimas['open']]['volume'].mean()
-    vol_bajista = ultimas[ultimas['close'] < ultimas['open']]['volume'].mean()
-    vol_total = ultimas['volume'].mean()
+    # Volumen confirmación: la vela de la divergencia debe tener volumen > 1.3x promedio
+    def vol_confirm(idx):
+        return df.loc[idx, 'vol_ratio'] > 1.3 if idx in df.index else False
 
     # Divergencia alcista RSI
     if min_precio_idx < min_rsi_idx and segmento.loc[min_precio_idx, 'low'] < segmento.loc[min_rsi_idx, 'low']:
-        if segmento.loc[min_rsi_idx, 'rsi'] > segmento.loc[min_precio_idx, 'rsi'] and vol_alcista > vol_total * 1.2:
+        if segmento.loc[min_rsi_idx, 'rsi'] > segmento.loc[min_precio_idx, 'rsi'] and vol_confirm(min_rsi_idx):
             return 'CALL', 10
     # Divergencia bajista RSI
     if max_precio_idx > max_rsi_idx and segmento.loc[max_precio_idx, 'high'] > segmento.loc[max_rsi_idx, 'high']:
-        if segmento.loc[max_rsi_idx, 'rsi'] < segmento.loc[max_precio_idx, 'rsi'] and vol_bajista > vol_total * 1.2:
+        if segmento.loc[max_rsi_idx, 'rsi'] < segmento.loc[max_precio_idx, 'rsi'] and vol_confirm(max_rsi_idx):
             return 'PUT', 10
     # Divergencia alcista MACD
     if min_precio_idx < min_macd_idx and segmento.loc[min_precio_idx, 'low'] < segmento.loc[min_macd_idx, 'low']:
-        if segmento.loc[min_macd_idx, 'macd'] > segmento.loc[min_precio_idx, 'macd'] and vol_alcista > vol_total * 1.2:
+        if segmento.loc[min_macd_idx, 'macd'] > segmento.loc[min_precio_idx, 'macd'] and vol_confirm(min_macd_idx):
             return 'CALL', 10
     # Divergencia bajista MACD
     if max_precio_idx > max_macd_idx and segmento.loc[max_precio_idx, 'high'] > segmento.loc[max_macd_idx, 'high']:
-        if segmento.loc[max_macd_idx, 'macd'] < segmento.loc[max_precio_idx, 'macd'] and vol_bajista > vol_total * 1.2:
+        if segmento.loc[max_macd_idx, 'macd'] < segmento.loc[max_precio_idx, 'macd'] and vol_confirm(max_macd_idx):
             return 'PUT', 10
     return None, 0
 
 def estrategia_2_cruce_ema(df):
-    """EMA9 cruza EMA21 + ADX > 20 + RSI en zona no extrema + alineación con tendencia global"""
+    """EMA9 cruza EMA21 + ADX > 20 + volumen en la vela de cruce > 1.2x"""
     if len(df) < 2:
         return None, 0
     last = df.iloc[-1]
     prev = df.iloc[-2]
     if last['adx'] < 20:
         return None, 0
-    if 30 <= last['rsi'] <= 70:
-        if prev['ema9'] <= prev['ema21'] and last['ema9'] > last['ema21']:
+    # Cruce alcista
+    if prev['ema9'] <= prev['ema21'] and last['ema9'] > last['ema21']:
+        if last['vol_ratio'] > 1.2:
             return 'CALL', 9
-        if prev['ema9'] >= prev['ema21'] and last['ema9'] < last['ema21']:
+    # Cruce bajista
+    if prev['ema9'] >= prev['ema21'] and last['ema9'] < last['ema21']:
+        if last['vol_ratio'] > 1.2:
             return 'PUT', 9
     return None, 0
 
 def estrategia_3_bb_rsi(df):
-    """Bollinger + RSI extremo + alineación con tendencia"""
+    """Bollinger + RSI extremo (sobreventa/sobrecompra) + volumen confirmación"""
     last = df.iloc[-1]
-    tend = tendencia_global(df)
-    if last['close'] <= last['bb_lower'] and last['rsi'] < 30:
-        if tend == 'CALL' or tend is None:
-            return 'CALL', 8
-    if last['close'] >= last['bb_upper'] and last['rsi'] > 70:
-        if tend == 'PUT' or tend is None:
-            return 'PUT', 8
+    if last['close'] <= last['bb_lower'] and last['rsi'] < 30 and last['vol_ratio'] > 1.2:
+        return 'CALL', 8
+    if last['close'] >= last['bb_upper'] and last['rsi'] > 70 and last['vol_ratio'] > 1.2:
+        return 'PUT', 8
     return None, 0
 
 def estrategia_4_macd_cruce_senal(df):
-    """MACD cruza línea de señal con histograma expandiéndose"""
+    """MACD cruza línea de señal + histograma expandiéndose + volumen"""
     if len(df) < 2:
         return None, 0
     last = df.iloc[-1]
     prev = df.iloc[-2]
     if prev['macd'] <= prev['signal'] and last['macd'] > last['signal'] and last['hist'] > 0:
-        return 'CALL', 8
+        if last['vol_ratio'] > 1.2:
+            return 'CALL', 8
     if prev['macd'] >= prev['signal'] and last['macd'] < last['signal'] and last['hist'] < 0:
-        return 'PUT', 8
+        if last['vol_ratio'] > 1.2:
+            return 'PUT', 8
     return None, 0
 
 def estrategia_5_stoch_adx(df):
@@ -200,45 +179,43 @@ def estrategia_5_stoch_adx(df):
         return 'PUT', 7
     return None, 0
 
-def estrategia_6_heiken_ashi_ema(df):
-    """
-    Heiken Ashi mejorada: detecta tendencia de Heiken Ashi (últimas 3 velas)
-    y confirma con EMA9 y volumen.
-    """
-    if len(df) < 4:
+def estrategia_6_heiken_ashi_tendencia(df):
+    """Heiken Ashi para detectar tendencia (2 velas consecutivas del mismo color) + EMA9"""
+    if len(df) < 3:
         return None, 0
-    # Últimas 3 velas de Heiken Ashi
-    ha_ultimas = df[['ha_close', 'ha_open']].iloc[-3:]
-    ha_alcistas = (ha_ultimas['ha_close'] > ha_ultimas['ha_open']).sum()
-    ha_bajistas = (ha_ultimas['ha_close'] < ha_ultimas['ha_open']).sum()
-    last = df.iloc[-1]
-    # Tendencia de Heiken Ashi: si al menos 2 de las últimas 3 son alcistas
-    if ha_alcistas >= 2 and last['close'] > last['ema9']:
-        return 'CALL', 7
-    if ha_bajistas >= 2 and last['close'] < last['ema9']:
-        return 'PUT', 7
+    # Calcular Heiken Ashi
+    ha_close = (df['open'] + df['high'] + df['low'] + df['close']) / 4
+    ha_open = (df['open'].shift(1) + df['close'].shift(1)) / 2
+    ha_open = ha_open.fillna(ha_close)
+    # Color de las últimas dos velas HA
+    color1 = 1 if ha_close.iloc[-1] > ha_open.iloc[-1] else -1
+    color2 = 1 if ha_close.iloc[-2] > ha_open.iloc[-2] else -1
+    if color1 == 1 and color2 == 1:
+        # Dos velas alcistas consecutivas
+        if df['ema9'].iloc[-1] > df['ema21'].iloc[-1] and df['vol_ratio'].iloc[-1] > 1.2:
+            return 'CALL', 7
+    if color1 == -1 and color2 == -1:
+        if df['ema9'].iloc[-1] < df['ema21'].iloc[-1] and df['vol_ratio'].iloc[-1] > 1.2:
+            return 'PUT', 7
     return None, 0
 
 def estrategia_7_volume_spike(df):
-    """Pico de volumen + vela grande en dirección + confirmación de tendencia"""
+    """Pico de volumen + vela grande en dirección + ADX > 20"""
     last = df.iloc[-1]
-    tend = tendencia_global(df)
-    if last['vol_ratio'] > 1.8:
+    if last['vol_ratio'] > 1.8 and last['adx'] > 20:
         cuerpo = abs(last['close'] - last['open'])
         rango = last['high'] - last['low']
         if cuerpo > rango * 0.6:
             if last['close'] > last['open']:
-                if tend == 'CALL' or tend is None:
-                    return 'CALL', 7
+                return 'CALL', 7
             else:
-                if tend == 'PUT' or tend is None:
-                    return 'PUT', 7
+                return 'PUT', 7
     return None, 0
 
 def estrategia_8_tendencia_adx(df):
-    """ADX > 25 y EMAs alineadas (tendencia fuerte)"""
+    """ADX > 25 y EMAs alineadas (tendencia fuerte) + volumen"""
     last = df.iloc[-1]
-    if last['adx'] > 25:
+    if last['adx'] > 25 and last['vol_ratio'] > 1.2:
         if last['ema9'] > last['ema21'] and last['ema9'] > last['ema50']:
             return 'CALL', 6
         if last['ema9'] < last['ema21'] and last['ema9'] < last['ema50']:
@@ -252,13 +229,13 @@ ESTRATEGIAS = [
     ("Bollinger + RSI", estrategia_3_bb_rsi, 8),
     ("MACD señal", estrategia_4_macd_cruce_senal, 8),
     ("Stochastic + ADX", estrategia_5_stoch_adx, 7),
-    ("Heiken Ashi + EMA9", estrategia_6_heiken_ashi_ema, 7),
+    ("Heiken Ashi", estrategia_6_heiken_ashi_tendencia, 7),
     ("Volumen Spike", estrategia_7_volume_spike, 7),
     ("Tendencia ADX", estrategia_8_tendencia_adx, 6)
 ]
 
 # =========================
-# EVALUAR UN ACTIVO (con votación)
+# EVALUAR UN ACTIVO (votación por consenso)
 # =========================
 def evaluar_activo(api, asset):
     try:
@@ -273,7 +250,6 @@ def evaluar_activo(api, asset):
             return None
 
         df = calcular_indicadores(df)
-        tend = tendencia_global(df)
 
         votos_call = 0
         votos_put = 0
@@ -285,9 +261,6 @@ def evaluar_activo(api, asset):
             try:
                 direc, peso_extra = func(df)
                 if direc:
-                    # Filtro adicional: si la estrategia va en contra de la tendencia global, reducir peso
-                    if tend is not None and direc != tend:
-                        peso_extra = max(peso_extra - 3, 0)  # penalizar
                     estrategias_activas.append(nombre)
                     if direc == 'CALL':
                         votos_call += 1
