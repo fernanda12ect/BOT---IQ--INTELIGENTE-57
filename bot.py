@@ -13,14 +13,12 @@ logger = logging.getLogger(__name__)
 # Zona horaria de Ecuador
 ecuador = pytz.timezone("America/Guayaquil")
 
-# Lista de activos de fallback ampliada (para cuando la API no devuelva datos)
+# Lista de activos comunes (fallback)
 FALLBACK_ACTIVOS = [
     "EURUSD-OTC", "GBPUSD-OTC", "AUDUSD-OTC", "USDJPY-OTC",
     "USDCHF-OTC", "NZDUSD-OTC", "USDCAD-OTC", "GBPJPY-OTC",
     "EURJPY-OTC", "AUDCAD-OTC", "AUDJPY-OTC", "EURGBP-OTC",
-    "EURUSD", "GBPUSD", "AUDUSD", "USDJPY", "USDCHF", "NZDUSD",
-    "USDCAD", "GBPJPY", "EURJPY", "AUDCAD", "AUDJPY", "EURGBP",
-    "EURCHF", "GBPCHF", "CADCHF", "AUDNZD"
+    "EURUSD", "GBPUSD", "AUDUSD", "USDJPY", "USDCHF", "NZDUSD", "USDCAD"
 ]
 
 # =========================
@@ -30,7 +28,7 @@ def calcular_indicadores(df):
     df = df.copy()
     df.rename(columns={'max': 'high', 'min': 'low'}, inplace=True)
 
-    # EMAs
+    # EMAs para tendencia
     df['ema9'] = df['close'].ewm(span=9, adjust=False).mean()
     df['ema21'] = df['close'].ewm(span=21, adjust=False).mean()
     df['ema50'] = df['close'].ewm(span=50, adjust=False).mean()
@@ -66,88 +64,107 @@ def calcular_indicadores(df):
     return df
 
 # =========================
-# DETECCIÓN DE TENDENCIA (umbral ADX más bajo)
+# DETECCIÓN DE TENDENCIA (a favor de la cual operaremos)
 # =========================
 def detectar_tendencia(df):
-    """Retorna (dirección, fuerza) si hay tendencia: ADX > 15 y EMAs alineadas."""
-    last = df.iloc[-1]
-    if last['adx'] < 15:
+    """Retorna la dirección de la tendencia ('CALL'/'PUT') y su fuerza (ADX) si ADX > 20."""
+    if len(df) < 50:
         return None, 0
-    if last['ema9'] > last['ema21'] and last['ema9'] > last['ema50']:
-        fuerza = last['adx'] + last['vol_ratio'] * 10
-        return 'CALL', min(fuerza, 100)
-    elif last['ema9'] < last['ema21'] and last['ema9'] < last['ema50']:
-        fuerza = last['adx'] + last['vol_ratio'] * 10
-        return 'PUT', min(fuerza, 100)
+    last = df.iloc[-1]
+    if last['adx'] < 20:
+        return None, 0
+    if last['ema9'] > last['ema21'] and last['ema21'] > last['ema50']:
+        return 'CALL', last['adx']
+    elif last['ema9'] < last['ema21'] and last['ema21'] < last['ema50']:
+        return 'PUT', last['adx']
     return None, 0
 
 # =========================
-# CÁLCULO DE NIVELES FIBONACCI
+# CÁLCULO DE FUERZA DEL ACTIVO (para seleccionar los mejores)
 # =========================
-def calcular_fibonacci(df, ventana=20):
-    if len(df) < ventana:
-        return None
-    ultimas = df.iloc[-ventana:]
-    maximo = ultimas['high'].max()
-    minimo = ultimas['low'].min()
-    dif = maximo - minimo
-    return {
-        '382': maximo - 0.382 * dif,
-        '500': maximo - 0.5 * dif,
-        '618': maximo - 0.618 * dif,
-        'max': maximo,
-        'min': minimo
-    }
-
-# =========================
-# DETECCIÓN DE RETROCESO A NIVEL FIBONACCI
-# =========================
-def retroceso_a_fibonacci(df, direccion, fib, tolerancia=0.5):
-    if fib is None:
-        return None
+def calcular_fuerza(df):
+    """Fuerza basada en ADX + volumen + RSI."""
     last = df.iloc[-1]
-    atr = last['atr']
+    fuerza = last['adx'] + (last['vol_ratio'] * 10)
+    # Bonus por RSI en zona de continuación (45-55)
+    if 45 <= last['rsi'] <= 55:
+        fuerza += 10
+    return min(fuerza, 100)
+
+# =========================
+# DETECCIÓN DE NIVELES (soportes, resistencias, líneas de tendencia)
+# =========================
+def detectar_niveles_sr(df, ventana=50, num_toques=2):
+    """Detecta niveles horizontales (soportes/resistencias) con al menos `num_toques` toques."""
+    if len(df) < ventana:
+        return []
+    df = df.iloc[-ventana:].copy()
+    highs = df['high']
+    lows = df['low']
+    conteo = defaultdict(int)
+    for i in range(1, len(df)-1):
+        if highs.iloc[i] > highs.iloc[i-1] and highs.iloc[i] > highs.iloc[i+1]:
+            conteo[round(highs.iloc[i], 5)] += 1
+        if lows.iloc[i] < lows.iloc[i-1] and lows.iloc[i] < lows.iloc[i+1]:
+            conteo[round(lows.iloc[i], 5)] += 1
     niveles = []
-    for key in ['382', '500', '618']:
-        nivel = fib[key]
-        if abs(last['close'] - nivel) / last['close'] < 0.001 or abs(last['close'] - nivel) < atr * tolerancia:
-            niveles.append((nivel, key))
-    if not niveles:
-        return None
-    nivel, clave = min(niveles, key=lambda x: abs(x[0] - last['close']))
-    return {'nivel': nivel, 'clave': clave, 'distancia': abs(last['close'] - nivel)}
+    precio_actual = df['close'].iloc[-1]
+    for precio, cnt in conteo.items():
+        if cnt >= num_toques:
+            tipo = 'resistencia' if precio > precio_actual else 'soporte'
+            niveles.append({'precio': precio, 'tipo': tipo, 'toques': cnt})
+    niveles.sort(key=lambda x: abs(x['precio'] - precio_actual))
+    return niveles
+
+def detectar_lineas_tendencia(df, ventana=30):
+    """Detecta líneas de tendencia alcistas y bajistas con 2 toques."""
+    if len(df) < ventana:
+        return []
+    df = df.iloc[-ventana:].copy()
+    indices = np.arange(len(df))
+    minimos = df['low'].values
+    maximos = df['high'].values
+
+    lineas = []
+    # Tendencia alcista: 2 mínimos crecientes
+    for i in range(len(minimos)-5):
+        for j in range(i+3, len(minimos)):
+            if minimos[j] > minimos[i] and (j - i) > 3:
+                pendiente = (minimos[j] - minimos[i]) / (j - i)
+                intercepto = minimos[i] - pendiente * i
+                precio_linea = intercepto + pendiente * (len(df)-1)
+                lineas.append({
+                    'tipo': 'alcista',
+                    'precio': precio_linea,
+                    'pendiente': pendiente,
+                    'toques': 2
+                })
+    # Tendencia bajista: 2 máximos decrecientes
+    for i in range(len(maximos)-5):
+        for j in range(i+3, len(maximos)):
+            if maximos[j] < maximos[i] and (j - i) > 3:
+                pendiente = (maximos[j] - maximos[i]) / (j - i)
+                intercepto = maximos[i] - pendiente * i
+                precio_linea = intercepto + pendiente * (len(df)-1)
+                lineas.append({
+                    'tipo': 'bajista',
+                    'precio': precio_linea,
+                    'pendiente': pendiente,
+                    'toques': 2
+                })
+    # Ordenar por cercanía al precio actual
+    precio_actual = df['close'].iloc[-1]
+    for l in lineas:
+        l['distancia'] = abs(precio_actual - l['precio'])
+    lineas.sort(key=lambda x: x['distancia'])
+    return lineas[:3]  # las 3 más cercanas
 
 # =========================
-# CONFIRMACIÓN CON VELA DE 1 MINUTO
-# =========================
-def confirmar_vela_1min(api, asset, direccion_esperada):
-    try:
-        candles = api.get_candles(asset, 60, 1, time.time())
-        if not candles:
-            return False
-        df = pd.DataFrame(candles)
-        last = df.iloc[-1]
-        # Volumen promedio de 20 velas anteriores
-        candles_avg = api.get_candles(asset, 60, 20, time.time())
-        if candles_avg and len(candles_avg) >= 20:
-            vol_avg = pd.DataFrame(candles_avg)['volume'].mean()
-            vol_ratio = last['volume'] / vol_avg if vol_avg > 0 else 1
-        else:
-            vol_ratio = 1
-        if direccion_esperada == 'CALL':
-            return last['close'] > last['open'] and vol_ratio > 1.2
-        else:
-            return last['close'] < last['open'] and vol_ratio > 1.2
-    except Exception as e:
-        logger.error(f"Error en confirmación 1min de {asset}: {e}")
-        return False
-
-# =========================
-# EVALUAR UN ACTIVO
+# EVALUAR UN ACTIVO (fuerza + niveles + línea de tendencia)
 # =========================
 def evaluar_activo(api, asset):
     try:
-        candles = api.get_candles(asset, 300, 100, time.time())
+        candles = api.get_candles(asset, 60, 100, time.time())  # velas de 1 minuto
         if not candles or len(candles) < 50:
             return None
         df = pd.DataFrame(candles)
@@ -158,42 +175,58 @@ def evaluar_activo(api, asset):
             return None
 
         df = calcular_indicadores(df)
-        direccion, fuerza = detectar_tendencia(df)
-        if direccion is None:
-            return None
+        tendencia, fuerza_tendencia = detectar_tendencia(df)
+        fuerza = calcular_fuerza(df)
+        niveles = detectar_niveles_sr(df, ventana=50, num_toques=2)
+        lineas = detectar_lineas_tendencia(df, ventana=30)
 
-        fib = calcular_fibonacci(df)
+        # Si no hay tendencia clara, no operamos
+        if tendencia is None:
+            return {
+                'asset': asset,
+                'tendencia': None,
+                'fuerza': fuerza,
+                'niveles': niveles,
+                'lineas': lineas,
+                'precio': df['close'].iloc[-1]
+            }
+
         return {
             'asset': asset,
-            'direccion': direccion,
+            'tendencia': tendencia,
+            'fuerza_tendencia': fuerza_tendencia,
             'fuerza': fuerza,
-            'fib': fib,
-            'precio': df['close'].iloc[-1],
-            'timestamp': datetime.now(ecuador)
+            'niveles': niveles,
+            'lineas': lineas,
+            'precio': df['close'].iloc[-1]
         }
     except Exception as e:
         logger.error(f"Error evaluando {asset}: {e}")
         return None
 
 # =========================
-# OBTENER ACTIVOS ABIERTOS (con fallback ampliado)
+# OBTENER ACTIVOS ABIERTOS
 # =========================
 def obtener_activos_abiertos(api, tipo_mercado="AMBOS"):
     try:
         open_time = api.get_all_open_time()
         activos = []
+        otc_count = 0
+        real_count = 0
         if 'binary' in open_time:
             for asset, data in open_time['binary'].items():
                 if data.get('open', False):
-                    if tipo_mercado == 'OTC' and '-OTC' in asset:
-                        activos.append(asset)
-                    elif tipo_mercado == 'REAL' and '-OTC' not in asset:
-                        activos.append(asset)
-                    elif tipo_mercado == 'AMBOS':
-                        activos.append(asset)
-        logger.info(f"Activos obtenidos: {len(activos)}")
+                    if '-OTC' in asset:
+                        otc_count += 1
+                        if tipo_mercado in ['OTC', 'AMBOS']:
+                            activos.append(asset)
+                    else:
+                        real_count += 1
+                        if tipo_mercado in ['REAL', 'AMBOS']:
+                            activos.append(asset)
+        logger.info(f"Activos disponibles: OTC={otc_count}, REAL={real_count}, total={len(activos)}")
         if not activos:
-            logger.warning("Usando lista de fallback")
+            logger.warning("Usando lista de activos predeterminada (fallback)")
             if tipo_mercado == 'OTC':
                 return [a for a in FALLBACK_ACTIVOS if '-OTC' in a]
             elif tipo_mercado == 'REAL':
@@ -206,15 +239,18 @@ def obtener_activos_abiertos(api, tipo_mercado="AMBOS"):
         return FALLBACK_ACTIVOS
 
 # =========================
-# SELECCIONAR EL MEJOR ACTIVO (hasta 60 por ronda)
+# SELECCIONAR LOS N ACTIVOS MÁS FUERTES
 # =========================
-def seleccionar_mejor_activo(api, lista_activos):
-    mejor = None
-    mejor_fuerza = -1
+def seleccionar_activos_fuertes(api, lista_activos, num_activos=5):
+    puntuaciones = []
     for asset in lista_activos:
         res = evaluar_activo(api, asset)
-        if res and res['fuerza'] > mejor_fuerza:
-            mejor_fuerza = res['fuerza']
-            mejor = res
+        if res and res['fuerza'] > 0:
+            # Priorizamos los que tienen tendencia clara
+            if res['tendencia']:
+                puntuaciones.append((res['fuerza'] + res['fuerza_tendencia'], asset, res))
+            else:
+                puntuaciones.append((res['fuerza'], asset, res))
         time.sleep(0.1)
-    return mejor
+    puntuaciones.sort(reverse=True)
+    return [p[2] for p in puntuaciones[:num_activos]]
