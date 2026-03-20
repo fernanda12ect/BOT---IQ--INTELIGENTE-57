@@ -11,8 +11,8 @@ from bot import (
 )
 
 st.set_page_config(
-    page_title="NEUROTRADER OTC - SEGUIMIENTO",
-    page_icon="📈",
+    page_title="NEUROTRADER OTC - AUTOMÁTICO",
+    page_icon="🤖",
     layout="wide",
     initial_sidebar_state="expanded"
 )
@@ -52,39 +52,40 @@ st.markdown("""
         background: linear-gradient(90deg, #00b4ff, #0077ee);
         box-shadow: 0 6px 15px rgba(0,163,255,0.5);
     }
-    .signal-card {
+    .status-card {
         background: linear-gradient(145deg, #1a2032, #0f1422);
         border-radius: 20px;
         padding: 20px;
         margin: 15px 0;
         box-shadow: 0 20px 35px -10px rgba(0,0,0,0.5);
         border: 1px solid rgba(0, 163, 255, 0.3);
-        transition: all 0.3s ease;
     }
-    .call-card {
-        border-left: 5px solid #00ff88;
-        background: linear-gradient(90deg, rgba(0,255,136,0.1) 0%, rgba(0,0,0,0) 100%);
+    .trade-card {
+        background: linear-gradient(145deg, #1a2032, #0f1422);
+        border-radius: 20px;
+        padding: 20px;
+        margin: 10px 0;
+        border-left: 5px solid;
     }
-    .put-card {
-        border-left: 5px solid #ff4b4b;
-        background: linear-gradient(90deg, rgba(255,75,75,0.1) 0%, rgba(0,0,0,0) 100%);
+    .trade-win {
+        border-left-color: #00ff88;
     }
-    .no-signal-card {
-        border-left: 5px solid #ffaa00;
-        background: linear-gradient(90deg, rgba(255,170,0,0.1) 0%, rgba(0,0,0,0) 100%);
+    .trade-loss {
+        border-left-color: #ff4b4b;
+    }
+    .trade-pending {
+        border-left-color: #ffaa00;
     }
     .asset-name {
-        font-size: 1.4rem;
+        font-size: 1.2rem;
         font-weight: bold;
-        margin-bottom: 10px;
+        margin-bottom: 5px;
         color: #fff;
-        text-shadow: 0 2px 5px rgba(0,0,0,0.3);
     }
     .entry-time {
         font-family: monospace;
-        font-size: 1.1rem;
+        font-size: 0.9rem;
         color: #ffaa00;
-        margin-top: 5px;
     }
 </style>
 """, unsafe_allow_html=True)
@@ -100,10 +101,12 @@ if 'saldo' not in st.session_state:
     st.session_state.saldo = 0.0
 if 'monitoreando' not in st.session_state:
     st.session_state.monitoreando = False
-if 'current_asset' not in st.session_state:
-    st.session_state.current_asset = None  # {'asset': str, 'direccion': str, 'descripcion': str}
-if 'ultima_senal' not in st.session_state:
-    st.session_state.ultima_senal = None
+if 'trade_in_progress' not in st.session_state:
+    st.session_state.trade_in_progress = False
+if 'ultima_trade' not in st.session_state:
+    st.session_state.ultima_trade = None  # {asset, direccion, monto, entrada, vencimiento, estado, order_id}
+if 'historial' not in st.session_state:
+    st.session_state.historial = []  # lista de trades finalizados
 if 'log' not in st.session_state:
     st.session_state.log = []
 
@@ -123,7 +126,7 @@ def conectar(email, password):
             st.session_state.log.append(f"✅ Conectado - Saldo: {st.session_state.saldo}")
             return True
         else:
-            st.error(f"Error: {reason}")
+            st.error(f"Error de conexión: {reason}")
             return False
     except Exception as e:
         st.error(f"Excepción: {e}")
@@ -133,10 +136,93 @@ def desconectar():
     st.session_state.api = None
     st.session_state.conectado = False
     st.session_state.monitoreando = False
+    st.session_state.trade_in_progress = False
+
+def ejecutar_trade(asset, direccion, monto, anticipacion=0):
+    """Ejecuta una operación de compra/venta con vencimiento de 1 minuto."""
+    try:
+        # Determinar tipo de opción
+        opcion = "call" if direccion == "CALL" else "put"
+        # Vencimiento: 1 minuto desde ahora
+        expiracion = int(time.time()) + 60
+        # Ejecutar orden
+        success, order_id = st.session_state.api.buy(monto, asset, opcion, expiracion)
+        if success:
+            entrada = datetime.now(ecuador) + timedelta(seconds=anticipacion)
+            entrada_str = entrada.strftime("%H:%M:%S")
+            vencimiento_str = (entrada + timedelta(minutes=1)).strftime("%H:%M:%S")
+            st.session_state.ultima_trade = {
+                'asset': asset,
+                'direccion': direccion,
+                'monto': monto,
+                'entrada': entrada_str,
+                'vencimiento': vencimiento_str,
+                'estado': 'PENDIENTE',
+                'order_id': order_id
+            }
+            st.session_state.trade_in_progress = True
+            st.session_state.log.append(f"💰 Trade ejecutado: {asset} {direccion} ${monto} (ID: {order_id})")
+            # Actualizar saldo (descuento inmediato)
+            st.session_state.saldo -= monto
+            return True
+        else:
+            st.session_state.log.append(f"❌ Error al ejecutar trade: {order_id}")
+            return False
+    except Exception as e:
+        st.session_state.log.append(f"⚠️ Excepción al ejecutar trade: {e}")
+        return False
+
+def verificar_resultado_trade():
+    """Verifica si la operación pendiente ha vencido y obtiene resultado."""
+    if not st.session_state.trade_in_progress or not st.session_state.ultima_trade:
+        return False
+    trade = st.session_state.ultima_trade
+    # Calcular si ya pasó el vencimiento
+    vencimiento_dt = datetime.strptime(trade['vencimiento'], "%H:%M:%S").time()
+    ahora = datetime.now(ecuador).time()
+    # Convertir a datetime para comparar
+    ahora_dt = datetime.combine(datetime.today(), ahora)
+    vencimiento_dt_full = datetime.combine(datetime.today(), vencimiento_dt)
+    if vencimiento_dt_full < ahora_dt:
+        vencimiento_dt_full += timedelta(days=1)
+    if ahora_dt >= vencimiento_dt_full:
+        # Ha vencido, obtener resultado
+        try:
+            resultado = st.session_state.api.check_win_v4(trade['order_id'])
+            if resultado is not None:
+                # resultado puede ser una tupla (estado, ganancia) o un string
+                if isinstance(resultado, tuple):
+                    estado, ganancia = resultado
+                else:
+                    estado = resultado
+                    ganancia = 0
+                if estado == 'win':
+                    st.session_state.saldo += trade['monto'] + ganancia
+                    trade['estado'] = 'GANADA'
+                    st.session_state.log.append(f"✅ Trade {trade['order_id']} GANADA: +{ganancia:.2f}")
+                elif estado == 'loose':
+                    trade['estado'] = 'PERDIDA'
+                    st.session_state.log.append(f"❌ Trade {trade['order_id']} PERDIDA")
+                else:
+                    trade['estado'] = 'DEVUELTA'
+                    st.session_state.saldo += trade['monto']
+                    st.session_state.log.append(f"🔄 Trade {trade['order_id']} DEVUELTA")
+            else:
+                trade['estado'] = 'SIN RESULTADO'
+                st.session_state.log.append(f"⚠️ No se pudo obtener resultado para {trade['order_id']}")
+        except Exception as e:
+            st.session_state.log.append(f"⚠️ Error al verificar resultado: {e}")
+            trade['estado'] = 'ERROR'
+        # Mover al historial
+        st.session_state.historial.append(trade)
+        st.session_state.ultima_trade = None
+        st.session_state.trade_in_progress = False
+        return True
+    return False
 
 # Sidebar
 with st.sidebar:
-    st.markdown("## 📈 NEUROTRADER OTC - SEGUIMIENTO")
+    st.markdown("## 🤖 NEUROTRADER OTC - AUTOMÁTICO")
     st.markdown("---")
     email = st.text_input("📧 Correo electrónico")
     password = st.text_input("🔑 Contraseña", type="password")
@@ -154,17 +240,25 @@ with st.sidebar:
 
     st.markdown("---")
     st.markdown("### ⚙️ Configuración")
-    st.markdown("El bot se enfoca en un activo mientras sea estable.")
-    st.markdown("Si pierde estabilidad, busca otro automáticamente.")
+    tipo_cuenta = st.radio("Tipo de cuenta", ["PRACTICE", "REAL"], index=0, horizontal=True)
+    if tipo_cuenta != st.session_state.tipo_cuenta and st.session_state.conectado:
+        st.session_state.tipo_cuenta = tipo_cuenta
+        st.session_state.api.change_balance(tipo_cuenta)
+        saldo = st.session_state.api.get_balance()
+        st.session_state.saldo = saldo if saldo is not None else 0.0
+        st.session_state.log.append(f"🔄 Cambio a cuenta {tipo_cuenta} - Saldo: {st.session_state.saldo}")
 
+    monto = st.number_input("💵 Monto por operación ($)", min_value=0.5, max_value=100.0, value=1.0, step=0.5)
+
+    st.markdown("---")
     if st.session_state.conectado:
         if not st.session_state.monitoreando:
-            if st.button("▶️ INICIAR", use_container_width=True, type="primary"):
+            if st.button("▶️ INICIAR BOT", use_container_width=True, type="primary"):
                 st.session_state.monitoreando = True
-                st.session_state.log.append("🚀 Monitoreo iniciado")
+                st.session_state.log.append("🚀 Bot automático iniciado")
                 st.rerun()
         else:
-            if st.button("⏹️ DETENER", use_container_width=True, type="secondary"):
+            if st.button("⏹️ DETENER BOT", use_container_width=True, type="secondary"):
                 st.session_state.monitoreando = False
                 st.rerun()
 
@@ -173,7 +267,7 @@ with st.sidebar:
 
 # Área principal
 if st.session_state.conectado:
-    st.title("📊 Señales de 1 minuto (segundo 59) - Enfoque en un activo")
+    st.title("🤖 Bot Automático - 1 minuto")
 
     col1, col2, col3 = st.columns(3)
     with col1:
@@ -181,118 +275,97 @@ if st.session_state.conectado:
     with col2:
         st.metric("Estado", "ACTIVO" if st.session_state.monitoreando else "DETENIDO")
     with col3:
-        st.metric("Activo actual", st.session_state.current_asset['asset'] if st.session_state.current_asset else "Ninguno")
+        if st.session_state.trade_in_progress:
+            st.metric("Operación", "En curso")
+        else:
+            st.metric("Operación", "Listo")
 
-    # Mostrar última señal
-    if st.session_state.ultima_senal:
-        s = st.session_state.ultima_senal
-        card_class = "call-card" if s['direccion'] == "CALL" else "put-card"
+    # Mostrar última operación si está en curso
+    if st.session_state.trade_in_progress and st.session_state.ultima_trade:
+        t = st.session_state.ultima_trade
+        card_class = "trade-pending"
         st.markdown(f"""
-        <div class="signal-card {card_class}">
-            <div class="asset-name">{s['asset']}</div>
-            <div><strong>{s['direccion']}</strong> - {s['descripcion']}</div>
-            <div class="entry-time">⏱️ Entrada: {s['entrada']}</div>
-            <div class="entry-time">⏰ Vencimiento: 1 minuto</div>
+        <div class="status-card trade-card {card_class}">
+            <div class="asset-name">🔄 OPERACIÓN EN CURSO</div>
+            <div><strong>{t['asset']}</strong> - {t['direccion']}</div>
+            <div>Monto: ${t['monto']}</div>
+            <div class="entry-time">Entrada: {t['entrada']}</div>
+            <div class="entry-time">Vencimiento: {t['vencimiento']}</div>
         </div>
         """, unsafe_allow_html=True)
     else:
-        st.markdown("""
-        <div class="signal-card no-signal-card">
-            <div class="asset-name">SIN SEÑAL</div>
-            <div>Esperando condiciones...</div>
-        </div>
-        """, unsafe_allow_html=True)
+        st.info("No hay operación en curso. El bot analizará en el próximo minuto.")
+
+    # Historial de operaciones
+    if st.session_state.historial:
+        st.subheader("📋 Historial de operaciones")
+        for trade in st.session_state.historial[-10:]:
+            card_class = "trade-win" if trade['estado'] == "GANADA" else "trade-loss" if trade['estado'] == "PERDIDA" else "trade-pending"
+            st.markdown(f"""
+            <div class="trade-card {card_class}">
+                <div class="asset-name">{trade['asset']} - {trade['direccion']}</div>
+                <div>Monto: ${trade['monto']}</div>
+                <div>Entrada: {trade['entrada']} | Vencimiento: {trade['vencimiento']}</div>
+                <div>Resultado: {trade['estado']}</div>
+            </div>
+            """, unsafe_allow_html=True)
 
     # Log de eventos
-    with st.expander("📋 Log de eventos", expanded=True):
-        for linea in st.session_state.log[-20:]:
+    with st.expander("📋 Log de eventos", expanded=False):
+        for linea in st.session_state.log[-30:]:
             st.text(linea)
 
-    # Lógica de sincronización al segundo 59 con seguimiento de un activo
+    # Lógica de monitoreo y ejecución automática
     if st.session_state.monitoreando:
         now = datetime.now(ecuador)
         segundo = now.second
 
-        # Si estamos en el segundo 58, preparamos el análisis para el segundo 59
-        if segundo == 58:
-            # Pequeña espera para llegar al segundo 59 exacto
-            time.sleep(0.5)
-            # Evaluar el activo actual si existe
-            if st.session_state.current_asset:
-                asset_name = st.session_state.current_asset['asset']
-                # Analizar si el activo actual sigue siendo válido
-                res = analizar_activo(st.session_state.api, asset_name)
-                if res and res['senal']:
-                    # Sigue siendo válido, reutilizar
-                    direccion, desc = res['senal']
-                    entrada = (now + timedelta(minutes=1)).replace(second=0, microsecond=0)
-                    entrada_str = entrada.strftime("%H:%M:%S")
-                    st.session_state.ultima_senal = {
-                        'asset': asset_name,
-                        'direccion': direccion,
-                        'descripcion': desc,
-                        'entrada': entrada_str
-                    }
-                    st.session_state.log.append(f"🔄 SEÑAL (reutilizando {asset_name}): {direccion} a las {entrada_str}")
-                else:
-                    # El activo actual ya no es estable, buscar otro
-                    st.session_state.log.append(f"⚠️ {asset_name} perdió estabilidad. Buscando nuevo activo...")
-                    st.session_state.current_asset = None
-                    # Realizar búsqueda de un nuevo activo
-                    activos = obtener_activos_otc(st.session_state.api)
-                    mejor = seleccionar_mejor_senal(st.session_state.api, activos)
-                    if mejor:
-                        direccion, desc = mejor['senal']
-                        entrada = (now + timedelta(minutes=1)).replace(second=0, microsecond=0)
-                        entrada_str = entrada.strftime("%H:%M:%S")
-                        st.session_state.current_asset = {
-                            'asset': mejor['asset'],
-                            'direccion': direccion,
-                            'descripcion': desc
-                        }
-                        st.session_state.ultima_senal = {
-                            'asset': mejor['asset'],
-                            'direccion': direccion,
-                            'descripcion': desc,
-                            'entrada': entrada_str
-                        }
-                        st.session_state.log.append(f"🚀 NUEVO ACTIVO: {mejor['asset']} - {direccion} a las {entrada_str}")
-                    else:
-                        st.session_state.log.append("🔍 SIN SEÑAL – ESPERAR PROXIMO MINUTO")
+        # Verificar si hay una operación pendiente que ya venció
+        if st.session_state.trade_in_progress:
+            if verificar_resultado_trade():
+                # Trade finalizado, continuar
+                st.rerun()
             else:
-                # No hay activo actual, buscar el mejor
+                # Mostrar tiempo restante
+                trade = st.session_state.ultima_trade
+                vencimiento_dt = datetime.strptime(trade['vencimiento'], "%H:%M:%S").time()
+                ahora = datetime.now(ecuador).time()
+                ahora_dt = datetime.combine(datetime.today(), ahora)
+                vencimiento_dt_full = datetime.combine(datetime.today(), vencimiento_dt)
+                if vencimiento_dt_full < ahora_dt:
+                    vencimiento_dt_full += timedelta(days=1)
+                seg_rest = (vencimiento_dt_full - ahora_dt).total_seconds()
+                st.info(f"⏳ Operación en curso. Vence en {int(seg_rest)} segundos...")
+                time.sleep(1)
+                st.rerun()
+        else:
+            # No hay operación, buscar señal en segundo 58-59
+            if segundo == 58:
+                time.sleep(0.5)  # llegar cerca del 59
+                st.session_state.log.append("🔍 Analizando activos OTC...")
                 activos = obtener_activos_otc(st.session_state.api)
                 mejor = seleccionar_mejor_senal(st.session_state.api, activos)
                 if mejor:
                     direccion, desc = mejor['senal']
-                    entrada = (now + timedelta(minutes=1)).replace(second=0, microsecond=0)
-                    entrada_str = entrada.strftime("%H:%M:%S")
-                    st.session_state.current_asset = {
-                        'asset': mejor['asset'],
-                        'direccion': direccion,
-                        'descripcion': desc
-                    }
-                    st.session_state.ultima_senal = {
-                        'asset': mejor['asset'],
-                        'direccion': direccion,
-                        'descripcion': desc,
-                        'entrada': entrada_str
-                    }
-                    st.session_state.log.append(f"🚀 SEÑAL: {mejor['asset']} - {direccion} a las {entrada_str}")
+                    # Ejecutar trade
+                    exito = ejecutar_trade(mejor['asset'], direccion, monto, anticipacion=0)
+                    if exito:
+                        st.session_state.log.append(f"🚀 OPERACIÓN EJECUTADA: {mejor['asset']} - {direccion}")
+                    else:
+                        st.session_state.log.append(f"❌ Falló ejecución para {mejor['asset']}")
                 else:
                     st.session_state.log.append("🔍 SIN SEÑAL – ESPERAR PROXIMO MINUTO")
-            # Forzar rerun para mostrar la señal
-            time.sleep(0.2)
-            st.rerun()
-        else:
-            # Mostrar cuánto falta para el próximo segundo 59
-            if segundo < 58:
-                seg_rest = 58 - segundo
+                time.sleep(0.2)
+                st.rerun()
             else:
-                seg_rest = 60 - segundo + 58
-            st.info(f"⏳ Próxima señal en {seg_rest} segundos...")
-            time.sleep(1)
-            st.rerun()
+                # Mostrar cuenta regresiva
+                if segundo < 58:
+                    seg_rest = 58 - segundo
+                else:
+                    seg_rest = 60 - segundo + 58
+                st.info(f"⏳ Próxima señal en {seg_rest} segundos...")
+                time.sleep(1)
+                st.rerun()
 
 else:
     st.info("🔒 Conéctate a IQ Option para comenzar.")
