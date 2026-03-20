@@ -32,7 +32,6 @@ def calcular_indicadores(df):
     df['ema12'] = df['close'].ewm(span=12, adjust=False).mean()
     df['ema26'] = df['close'].ewm(span=26, adjust=False).mean()
     df['ema20'] = df['close'].ewm(span=20, adjust=False).mean()
-    df['ema50'] = df['close'].ewm(span=50, adjust=False).mean()
 
     # RSI
     delta = df['close'].diff()
@@ -65,12 +64,6 @@ def calcular_indicadores(df):
     df['signal'] = df['macd'].ewm(span=9, adjust=False).mean()
     df['hist'] = df['macd'] - df['signal']
 
-    # Bollinger Bands
-    df['bb_ma'] = df['close'].rolling(20).mean()
-    df['bb_std'] = df['close'].rolling(20).std()
-    df['bb_upper'] = df['bb_ma'] + 2 * df['bb_std']
-    df['bb_lower'] = df['bb_ma'] - 2 * df['bb_std']
-
     # Volumen promedio
     df['vol_avg'] = df['volume'].rolling(20).mean()
     df['vol_ratio'] = df['volume'] / df['vol_avg']
@@ -78,120 +71,18 @@ def calcular_indicadores(df):
     return df
 
 # =========================
-# FUNCIONES AUXILIARES PARA OBTENER VELAS
+# DETECCIÓN DE DIVERGENCIAS (RSI y MACD)
 # =========================
-def obtener_velas_5min(api, asset, n=100):
-    try:
-        candles = api.get_candles(asset, 300, n, time.time())
-        if not candles or len(candles) < n:
-            return None
-        df = pd.DataFrame(candles)
-        for col in ['open', 'max', 'min', 'close', 'volume']:
-            df[col] = pd.to_numeric(df[col], errors='coerce')
-        df.dropna(inplace=True)
-        return df
-    except Exception as e:
-        logger.error(f"Error obteniendo velas 5min de {asset}: {e}")
-        return None
-
-def obtener_velas_1min(api, asset, n=100):
-    try:
-        candles = api.get_candles(asset, 60, n, time.time())
-        if not candles or len(candles) < n:
-            return None
-        df = pd.DataFrame(candles)
-        for col in ['open', 'max', 'min', 'close', 'volume']:
-            df[col] = pd.to_numeric(df[col], errors='coerce')
-        df.dropna(inplace=True)
-        return df
-    except Exception as e:
-        logger.error(f"Error obteniendo velas 1min de {asset}: {e}")
-        return None
-
-# =========================
-# DETECCIÓN DE NIVELES (SOPORTE/RESISTENCIA)
-# =========================
-def detectar_niveles_sr(df, num_toques=2, ventana=100):
+def detectar_divergencia(df, ventana=5):
+    """
+    Detecta divergencias alcistas/bajistas en las últimas `ventana` velas.
+    Retorna (direccion, descripcion, fuerza) o None.
+    """
     if len(df) < ventana:
-        return []
-    df = df.iloc[-ventana:].copy()
-    highs = df['high']
-    lows = df['low']
-    conteo = {}
-    for i in range(1, len(df)-1):
-        if highs.iloc[i] > highs.iloc[i-1] and highs.iloc[i] > highs.iloc[i+1]:
-            precio = round(highs.iloc[i], 5)
-            conteo[precio] = conteo.get(precio, 0) + 1
-        if lows.iloc[i] < lows.iloc[i-1] and lows.iloc[i] < lows.iloc[i+1]:
-            precio = round(lows.iloc[i], 5)
-            conteo[precio] = conteo.get(precio, 0) + 1
-    niveles = []
-    precio_actual = df['close'].iloc[-1]
-    for precio, cnt in conteo.items():
-        if cnt >= num_toques:
-            tipo = 'resistencia' if precio > precio_actual else 'soporte'
-            niveles.append({'precio': precio, 'tipo': tipo, 'toques': cnt})
-    niveles.sort(key=lambda x: abs(x['precio'] - precio_actual))
-    return niveles
-
-# =========================
-# DETECCIÓN DE LÍNEAS DE TENDENCIA
-# =========================
-def detectar_lineas_tendencia(df, ventana=50):
-    if len(df) < ventana:
-        return []
-    df = df.iloc[-ventana:].copy()
-    indices = np.arange(len(df))
-    minimos = df['low'].values
-    maximos = df['high'].values
-
-    lineas = []
-    # Tendencia alcista: 2 mínimos crecientes
-    for i in range(len(minimos)-5):
-        for j in range(i+3, len(minimos)):
-            if minimos[j] > minimos[i] and (j - i) > 3:
-                pendiente = (minimos[j] - minimos[i]) / (j - i)
-                intercepto = minimos[i] - pendiente * i
-                precio_linea = intercepto + pendiente * (len(df)-1)
-                lineas.append({
-                    'tipo': 'alcista',
-                    'pendiente': pendiente,
-                    'intercepto': intercepto,
-                    'precio_actual': precio_linea,
-                    'puntos': (i, j)
-                })
-    # Tendencia bajista: 2 máximos decrecientes
-    for i in range(len(maximos)-5):
-        for j in range(i+3, len(maximos)):
-            if maximos[j] < maximos[i] and (j - i) > 3:
-                pendiente = (maximos[j] - maximos[i]) / (j - i)
-                intercepto = maximos[i] - pendiente * i
-                precio_linea = intercepto + pendiente * (len(df)-1)
-                lineas.append({
-                    'tipo': 'bajista',
-                    'pendiente': pendiente,
-                    'intercepto': intercepto,
-                    'precio_actual': precio_linea,
-                    'puntos': (i, j)
-                })
-    # Ordenar por cercanía al precio actual
-    precio_actual = df['close'].iloc[-1]
-    for l in lineas:
-        l['distancia'] = abs(precio_actual - l['precio_actual'])
-    lineas.sort(key=lambda x: x['distancia'])
-    return lineas[:5]
-
-# =========================
-# ESTRATEGIA 1: DIVERGENCIAS (5 min)
-# =========================
-def estrategia_divergencias(df):
-    if len(df) < 5:
         return None
-    last = df.iloc[-1]
-    if last['adx'] < 25:
-        return None
+    segmento = df.iloc[-ventana:].copy()
 
-    segmento = df.iloc[-5:]
+    # Índices de mínimos y máximos
     min_precio_idx = segmento['low'].idxmin()
     max_precio_idx = segmento['high'].idxmax()
     min_rsi_idx = segmento['rsi'].idxmin()
@@ -202,159 +93,88 @@ def estrategia_divergencias(df):
     # Divergencia alcista RSI
     if min_precio_idx < min_rsi_idx and segmento.loc[min_precio_idx, 'low'] < segmento.loc[min_rsi_idx, 'low']:
         if segmento.loc[min_rsi_idx, 'rsi'] > segmento.loc[min_precio_idx, 'rsi']:
-            return ('CALL', 'Divergencia alcista RSI')
+            fuerza = 70 + (segmento['adx'].iloc[-1] / 100) * 30
+            return ('CALL', 'Divergencia alcista RSI', min(fuerza, 100))
+
     # Divergencia bajista RSI
     if max_precio_idx > max_rsi_idx and segmento.loc[max_precio_idx, 'high'] > segmento.loc[max_rsi_idx, 'high']:
         if segmento.loc[max_rsi_idx, 'rsi'] < segmento.loc[max_precio_idx, 'rsi']:
-            return ('PUT', 'Divergencia bajista RSI')
+            fuerza = 70 + (segmento['adx'].iloc[-1] / 100) * 30
+            return ('PUT', 'Divergencia bajista RSI', min(fuerza, 100))
+
     # Divergencia alcista MACD
     if min_precio_idx < min_macd_idx and segmento.loc[min_precio_idx, 'low'] < segmento.loc[min_macd_idx, 'low']:
         if segmento.loc[min_macd_idx, 'macd'] > segmento.loc[min_precio_idx, 'macd']:
-            return ('CALL', 'Divergencia alcista MACD')
+            fuerza = 70 + (segmento['adx'].iloc[-1] / 100) * 30
+            return ('CALL', 'Divergencia alcista MACD', min(fuerza, 100))
+
     # Divergencia bajista MACD
     if max_precio_idx > max_macd_idx and segmento.loc[max_precio_idx, 'high'] > segmento.loc[max_macd_idx, 'high']:
         if segmento.loc[max_macd_idx, 'macd'] < segmento.loc[max_precio_idx, 'macd']:
-            return ('PUT', 'Divergencia bajista MACD')
+            fuerza = 70 + (segmento['adx'].iloc[-1] / 100) * 30
+            return ('PUT', 'Divergencia bajista MACD', min(fuerza, 100))
+
     return None
 
 # =========================
-# ESTRATEGIA 2: CRUCE DE EMAs (5 min)
+# CALCULAR PUNTUACIÓN DE FUERZA DE UN ACTIVO
 # =========================
-def estrategia_cruce_emas(df):
-    if len(df) < 2:
-        return None
+def calcular_fuerza(df):
+    """
+    Calcula una puntuación basada en ADX y volumen relativo.
+    """
     last = df.iloc[-1]
-    prev = df.iloc[-2]
-
-    if prev['ema12'] <= prev['ema26'] and last['ema12'] > last['ema26']:
-        if last['close'] > last['bb_upper'] or last['close'] < last['bb_lower']:
-            return None
-        if 30 <= last['rsi'] <= 70:
-            return ('CALL', 'Cruce EMAs Alcista')
-    if prev['ema12'] >= prev['ema26'] and last['ema12'] < last['ema26']:
-        if last['close'] > last['bb_upper'] or last['close'] < last['bb_lower']:
-            return None
-        if 30 <= last['rsi'] <= 70:
-            return ('PUT', 'Cruce EMAs Bajista')
-    return None
+    fuerza = last['adx'] + (last['vol_ratio'] * 10) if not pd.isna(last['adx']) else 0
+    return min(fuerza, 100)
 
 # =========================
-# ESTRATEGIA 3: SOPORTE/RESISTENCIA + LÍNEAS DE TENDENCIA (1 min)
+# EVALUAR UN ACTIVO (para selección y seguimiento)
 # =========================
-def estrategia_sr_tendencia_1min(api, asset, umbral_distancia=0.001):
-    df = obtener_velas_1min(api, asset, n=50)
-    if df is None or len(df) < 30:
-        return None
-    df = calcular_indicadores(df)
-    precio_actual = df['close'].iloc[-1]
-    atr = df['atr'].iloc[-1]
+def evaluar_activo(api, asset):
+    """
+    Obtiene velas de 5 min, calcula indicadores y devuelve:
+        - dirección de señal si hay divergencia (y fuerza)
+        - fuerza del activo (ADX + volumen)
+        - precio actual
+        - descripción de la divergencia si existe
+    """
+    try:
+        candles = api.get_candles(asset, 300, 100, time.time())
+        if not candles or len(candles) < 50:
+            return None
+        df = pd.DataFrame(candles)
+        for col in ['open', 'max', 'min', 'close', 'volume']:
+            df[col] = pd.to_numeric(df[col], errors='coerce')
+        df.dropna(inplace=True)
+        if len(df) < 50:
+            return None
 
-    # Filtro de volatilidad: ATR no debe ser >0.5% del precio
-    if atr / precio_actual > 0.005:
-        return None
+        df = calcular_indicadores(df)
+        fuerza = calcular_fuerza(df)
+        divergencia = detectar_divergencia(df, ventana=5)
 
-    # Niveles S/R en últimas 20 velas con 2 toques
-    niveles = detectar_niveles_sr(df, num_toques=2, ventana=20)
-    # Líneas de tendencia en últimas 15 velas
-    lineas = detectar_lineas_tendencia(df, ventana=15)
-
-    mejor_distancia = float('inf')
-    tipo = None
-    nivel_precio = None
-    descripcion = ""
-
-    for n in niveles:
-        d = abs(precio_actual - n['precio']) / precio_actual
-        if d < mejor_distancia and d <= umbral_distancia:
-            mejor_distancia = d
-            tipo = n['tipo']
-            nivel_precio = n['precio']
-            descripcion = f"{tipo} con {n['toques']} toques"
-
-    for l in lineas:
-        d = abs(precio_actual - l['precio_actual']) / precio_actual
-        if d < mejor_distancia and d <= umbral_distancia:
-            mejor_distancia = d
-            tipo = l['tipo']
-            nivel_precio = l['precio_actual']
-            descripcion = f"Línea {tipo}"
-
-    if tipo is None:
-        return None
-
-    # Determinar dirección esperada
-    if tipo in ('soporte', 'alcista'):
-        direccion_esperada = 'CALL'
-    else:
-        direccion_esperada = 'PUT'
-
-    # Verificar patrón de vela de rebote en la última vela
-    ultima = df.iloc[-1]
-    cuerpo = abs(ultima['close'] - ultima['open'])
-    rango = ultima['high'] - ultima['low']
-
-    if direccion_esperada == 'CALL':
-        mecha_inf = min(ultima['open'], ultima['close']) - ultima['low']
-        if mecha_inf > 2 * cuerpo and cuerpo < rango * 0.3:
-            pass  # OK
+        if divergencia:
+            direccion, descripcion, fuerza_div = divergencia
+            # La fuerza de la señal se basa en la fuerza del activo y la de la divergencia
+            fuerza_final = (fuerza + fuerza_div) / 2
+            return {
+                'asset': asset,
+                'direccion': direccion,
+                'descripcion': descripcion,
+                'fuerza': fuerza_final,
+                'precio': df['close'].iloc[-1],
+                'timestamp': datetime.now(ecuador)
+            }
         else:
-            return None
-    else:
-        mecha_sup = ultima['high'] - max(ultima['open'], ultima['close'])
-        if mecha_sup > 2 * cuerpo and cuerpo < rango * 0.3:
-            pass
-        else:
-            return None
-
-    # Todo OK, devolvemos la señal
-    return {
-        'direccion': direccion_esperada,
-        'descripcion': descripcion,
-        'nivel': nivel_precio,
-        'distancia': mejor_distancia,
-        'fuerza': 70,  # valor base
-        'estrategia': 'Soporte/Resistencia + Líneas',
-        'vencimiento': 1  # minutos
-    }
-
-# =========================
-# EVALUAR UN ACTIVO (buscar señales de todas las estrategias)
-# =========================
-def evaluar_activo(api, asset, activar_estrategia_1min=True):
-    señales = []
-
-    # Estrategias de 5 min
-    df5 = obtener_velas_5min(api, asset, n=100)
-    if df5 is not None and len(df5) >= 50:
-        df5 = calcular_indicadores(df5)
-        res1 = estrategia_divergencias(df5)
-        if res1:
-            direc, desc = res1
-            señales.append({
-                'direccion': direc,
-                'descripcion': desc,
-                'fuerza': 80,  # ponderación
-                'estrategia': 'Divergencias',
-                'vencimiento': 5
-            })
-        res2 = estrategia_cruce_emas(df5)
-        if res2:
-            direc, desc = res2
-            señales.append({
-                'direccion': direc,
-                'descripcion': desc,
-                'fuerza': 70,
-                'estrategia': 'Cruce EMAs',
-                'vencimiento': 5
-            })
-
-    # Estrategia de 1 min (si está activada)
-    if activar_estrategia_1min:
-        res3 = estrategia_sr_tendencia_1min(api, asset)
-        if res3:
-            señales.append(res3)
-
-    return señales
+            # Si no hay divergencia, devolvemos solo la fuerza para selección
+            return {
+                'asset': asset,
+                'fuerza': fuerza,
+                'precio': df['close'].iloc[-1]
+            }
+    except Exception as e:
+        logger.error(f"Error evaluando {asset}: {e}")
+        return None
 
 # =========================
 # OBTENER ACTIVOS ABIERTOS
@@ -377,22 +197,17 @@ def obtener_activos_abiertos(api, tipo_mercado="AMBOS"):
         return FALLBACK_ACTIVOS
 
 # =========================
-# SELECCIONAR LA MEJOR SEÑAL DE UN LOTE
+# SELECCIONAR LOS N ACTIVOS MÁS FUERTES
 # =========================
-def buscar_mejor_senal(api, lista_activos, activar_estrategia_1min=True):
-    mejor_senal = None
-    mejor_fuerza = -1
+def seleccionar_activos_fuertes(api, lista_activos, num_activos=2):
+    """
+    Evalúa todos los activos y devuelve una lista de los `num_activos` con mayor fuerza.
+    """
+    puntuaciones = []
     for asset in lista_activos:
-        señales = evaluar_activo(api, asset, activar_estrategia_1min)
-        for s in señales:
-            # Asignamos una fuerza combinada (podemos usar la fuerza base o ajustar)
-            fuerza = s.get('fuerza', 50)
-            # Priorizar señales de 1 minuto ligeramente
-            if s['vencimiento'] == 1:
-                fuerza += 5
-            if fuerza > mejor_fuerza:
-                mejor_fuerza = fuerza
-                mejor_senal = s
-                mejor_senal['asset'] = asset
-        time.sleep(0.1)  # pausa entre activos
-    return mejor_senal
+        res = evaluar_activo(api, asset)
+        if res and 'fuerza' in res:
+            puntuaciones.append((res['fuerza'], asset))
+        time.sleep(0.1)
+    puntuaciones.sort(reverse=True)
+    return [asset for _, asset in puntuaciones[:num_activos]]
