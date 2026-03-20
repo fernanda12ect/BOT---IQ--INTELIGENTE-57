@@ -29,9 +29,8 @@ def calcular_indicadores(df):
     df.rename(columns={'max': 'high', 'min': 'low'}, inplace=True)
 
     # EMAs
-    df['ema12'] = df['close'].ewm(span=12, adjust=False).mean()
-    df['ema26'] = df['close'].ewm(span=26, adjust=False).mean()
-    df['ema20'] = df['close'].ewm(span=20, adjust=False).mean()
+    df['ema9'] = df['close'].ewm(span=9, adjust=False).mean()
+    df['ema21'] = df['close'].ewm(span=21, adjust=False).mean()
     df['ema50'] = df['close'].ewm(span=50, adjust=False).mean()
 
     # RSI
@@ -59,9 +58,9 @@ def calcular_indicadores(df):
     df['adx'] = df['dx'].rolling(14).mean()
 
     # MACD
-    df['ema12_macd'] = df['close'].ewm(span=12, adjust=False).mean()
-    df['ema26_macd'] = df['close'].ewm(span=26, adjust=False).mean()
-    df['macd'] = df['ema12_macd'] - df['ema26_macd']
+    df['ema12'] = df['close'].ewm(span=12, adjust=False).mean()
+    df['ema26'] = df['close'].ewm(span=26, adjust=False).mean()
+    df['macd'] = df['ema12'] - df['ema26']
     df['signal'] = df['macd'].ewm(span=9, adjust=False).mean()
     df['hist'] = df['macd'] - df['signal']
 
@@ -71,15 +70,11 @@ def calcular_indicadores(df):
     df['bb_upper'] = df['bb_ma'] + 2 * df['bb_std']
     df['bb_lower'] = df['bb_ma'] - 2 * df['bb_std']
 
-    # Estocástico
+    # Stochastic
     low14 = df['low'].rolling(14).min()
     high14 = df['high'].rolling(14).max()
     df['stoch_k'] = 100 * (df['close'] - low14) / (high14 - low14)
     df['stoch_d'] = df['stoch_k'].rolling(3).mean()
-
-    # Supertrend (simplificado)
-    # Usamos una media móvil simple para simular, pero en realidad se implementaría más complejo
-    df['supertrend'] = df['close'].rolling(10).mean()  # placeholder
 
     # Volumen promedio
     df['vol_avg'] = df['volume'].rolling(20).mean()
@@ -88,38 +83,16 @@ def calcular_indicadores(df):
     return df
 
 # =========================
-# DETECCIÓN DE SOPORTES/RESISTENCIAS (niveles clave)
+# 8 ESTRATEGIAS EFECTIVAS (cada una devuelve dirección y peso)
 # =========================
-def detectar_niveles_sr(df, num_toques=2, ventana=50):
-    if len(df) < ventana:
-        return []
-    df = df.iloc[-ventana:].copy()
-    highs = df['high']
-    lows = df['low']
-    conteo = defaultdict(int)
-    for i in range(1, len(df)-1):
-        if highs.iloc[i] > highs.iloc[i-1] and highs.iloc[i] > highs.iloc[i+1]:
-            conteo[round(highs.iloc[i], 5)] += 1
-        if lows.iloc[i] < lows.iloc[i-1] and lows.iloc[i] < lows.iloc[i+1]:
-            conteo[round(lows.iloc[i], 5)] += 1
-    niveles = []
-    precio_actual = df['close'].iloc[-1]
-    for precio, cnt in conteo.items():
-        if cnt >= num_toques:
-            tipo = 'resistencia' if precio > precio_actual else 'soporte'
-            niveles.append({'precio': precio, 'tipo': tipo, 'toques': cnt})
-    niveles.sort(key=lambda x: abs(x['precio'] - precio_actual))
-    return niveles
 
-# =========================
-# ESTRATEGIA 1: DIVERGENCIAS (la original mejorada)
-# =========================
-def estrategia_divergencias(df):
+def estrategia_1_divergencia(df):
+    """Divergencia RSI/MACD + ADX > 20 + volumen"""
     if len(df) < 5:
-        return None
+        return None, 0
     last = df.iloc[-1]
-    if last['adx'] < 18:
-        return None
+    if last['adx'] < 20:
+        return None, 0
 
     segmento = df.iloc[-5:]
     min_precio_idx = segmento['low'].idxmin()
@@ -129,181 +102,135 @@ def estrategia_divergencias(df):
     min_macd_idx = segmento['macd'].idxmin()
     max_macd_idx = segmento['macd'].idxmax()
 
-    def vol_confirm(direccion):
-        ultimas = df.iloc[-3:]
-        if direccion == 'CALL':
-            alcistas = ultimas[ultimas['close'] > ultimas['open']]
-            if len(alcistas) > 0:
-                return alcistas['volume'].mean() > ultimas['volume'].mean() * 1.2
-        else:
-            bajistas = ultimas[ultimas['close'] < ultimas['open']]
-            if len(bajistas) > 0:
-                return bajistas['volume'].mean() > ultimas['volume'].mean() * 1.2
-        return False
+    # Volumen confirmación
+    ultimas = df.iloc[-3:]
+    vol_alcista = ultimas[ultimas['close'] > ultimas['open']]['volume'].mean()
+    vol_bajista = ultimas[ultimas['close'] < ultimas['open']]['volume'].mean()
+    vol_total = ultimas['volume'].mean()
 
+    # Divergencia alcista RSI
     if min_precio_idx < min_rsi_idx and segmento.loc[min_precio_idx, 'low'] < segmento.loc[min_rsi_idx, 'low']:
-        if segmento.loc[min_rsi_idx, 'rsi'] > segmento.loc[min_precio_idx, 'rsi'] and vol_confirm('CALL'):
-            fuerza = 70 + (last['adx'] / 100) * 30
-            return ('CALL', 'Divergencia alcista RSI', min(fuerza, 100))
+        if segmento.loc[min_rsi_idx, 'rsi'] > segmento.loc[min_precio_idx, 'rsi'] and vol_alcista > vol_total * 1.2:
+            return 'CALL', 10
+    # Divergencia bajista RSI
     if max_precio_idx > max_rsi_idx and segmento.loc[max_precio_idx, 'high'] > segmento.loc[max_rsi_idx, 'high']:
-        if segmento.loc[max_rsi_idx, 'rsi'] < segmento.loc[max_precio_idx, 'rsi'] and vol_confirm('PUT'):
-            fuerza = 70 + (last['adx'] / 100) * 30
-            return ('PUT', 'Divergencia bajista RSI', min(fuerza, 100))
+        if segmento.loc[max_rsi_idx, 'rsi'] < segmento.loc[max_precio_idx, 'rsi'] and vol_bajista > vol_total * 1.2:
+            return 'PUT', 10
+    # Divergencia alcista MACD
     if min_precio_idx < min_macd_idx and segmento.loc[min_precio_idx, 'low'] < segmento.loc[min_macd_idx, 'low']:
-        if segmento.loc[min_macd_idx, 'macd'] > segmento.loc[min_precio_idx, 'macd'] and vol_confirm('CALL'):
-            fuerza = 70 + (last['adx'] / 100) * 30
-            return ('CALL', 'Divergencia alcista MACD', min(fuerza, 100))
+        if segmento.loc[min_macd_idx, 'macd'] > segmento.loc[min_precio_idx, 'macd'] and vol_alcista > vol_total * 1.2:
+            return 'CALL', 10
+    # Divergencia bajista MACD
     if max_precio_idx > max_macd_idx and segmento.loc[max_precio_idx, 'high'] > segmento.loc[max_macd_idx, 'high']:
-        if segmento.loc[max_macd_idx, 'macd'] < segmento.loc[max_precio_idx, 'macd'] and vol_confirm('PUT'):
-            fuerza = 70 + (last['adx'] / 100) * 30
-            return ('PUT', 'Divergencia bajista MACD', min(fuerza, 100))
-    return None
+        if segmento.loc[max_macd_idx, 'macd'] < segmento.loc[max_precio_idx, 'macd'] and vol_bajista > vol_total * 1.2:
+            return 'PUT', 10
+    return None, 0
 
-# =========================
-# ESTRATEGIA 2: CRUCE DE EMAs
-# =========================
-def estrategia_cruce_emas(df):
+def estrategia_2_cruce_ema(df):
+    """EMA9 cruza EMA21 + ADX > 20 + RSI en zona no extrema"""
     if len(df) < 2:
-        return None
+        return None, 0
     last = df.iloc[-1]
     prev = df.iloc[-2]
-    if last['adx'] < 25:
-        return None
-    if prev['ema12'] <= prev['ema26'] and last['ema12'] > last['ema26']:
-        if last['close'] > last['bb_lower'] and last['close'] < last['bb_upper']:  # dentro de BB
-            fuerza = 70 + (last['adx'] / 100) * 20
-            return ('CALL', 'Cruce EMAs alcista', min(fuerza, 100))
-    if prev['ema12'] >= prev['ema26'] and last['ema12'] < last['ema26']:
-        if last['close'] > last['bb_lower'] and last['close'] < last['bb_upper']:
-            fuerza = 70 + (last['adx'] / 100) * 20
-            return ('PUT', 'Cruce EMAs bajista', min(fuerza, 100))
-    return None
+    if last['adx'] < 20:
+        return None, 0
+    if 30 <= last['rsi'] <= 70:
+        if prev['ema9'] <= prev['ema21'] and last['ema9'] > last['ema21']:
+            return 'CALL', 9
+        if prev['ema9'] >= prev['ema21'] and last['ema9'] < last['ema21']:
+            return 'PUT', 9
+    return None, 0
 
-# =========================
-# ESTRATEGIA 3: RSI + BOLLINGER
-# =========================
-def estrategia_rsi_bb(df):
+def estrategia_3_bb_rsi(df):
+    """Bollinger + RSI extremo (sobreventa/sobrecompra)"""
     last = df.iloc[-1]
-    if last['rsi'] < 30 and last['close'] <= last['bb_lower']:
-        fuerza = 70 + (100 - last['rsi']) / 3
-        return ('CALL', 'RSI sobreventa + BB inferior', min(fuerza, 100))
-    if last['rsi'] > 70 and last['close'] >= last['bb_upper']:
-        fuerza = 70 + (last['rsi'] - 70) / 3
-        return ('PUT', 'RSI sobrecompra + BB superior', min(fuerza, 100))
-    return None
+    if last['close'] <= last['bb_lower'] and last['rsi'] < 30:
+        return 'CALL', 8
+    if last['close'] >= last['bb_upper'] and last['rsi'] > 70:
+        return 'PUT', 8
+    return None, 0
 
-# =========================
-# ESTRATEGIA 4: SUPERTREND + ADX (simulado)
-# =========================
-def estrategia_supertrend_adx(df):
+def estrategia_4_macd_cruce_senal(df):
+    """MACD cruza línea de señal con histograma expandiéndose"""
     if len(df) < 2:
-        return None
+        return None, 0
     last = df.iloc[-1]
     prev = df.iloc[-2]
-    if last['adx'] < 25:
-        return None
-    # Simulamos Supertrend con cruce de precio y EMA20
-    if prev['close'] <= prev['ema20'] and last['close'] > last['ema20']:
-        fuerza = 60 + (last['adx'] / 100) * 20
-        return ('CALL', 'Supertrend alcista', min(fuerza, 100))
-    if prev['close'] >= prev['ema20'] and last['close'] < last['ema20']:
-        fuerza = 60 + (last['adx'] / 100) * 20
-        return ('PUT', 'Supertrend bajista', min(fuerza, 100))
-    return None
+    if prev['macd'] <= prev['signal'] and last['macd'] > last['signal'] and last['hist'] > 0:
+        return 'CALL', 8
+    if prev['macd'] >= prev['signal'] and last['macd'] < last['signal'] and last['hist'] < 0:
+        return 'PUT', 8
+    return None, 0
 
-# =========================
-# ESTRATEGIA 5: PATRÓN DE VELAS + VOLUMEN
-# =========================
-def estrategia_patron_velas(df):
+def estrategia_5_stoch_adx(df):
+    """Stochastic oversold/overbought + ADX > 20"""
     if len(df) < 2:
-        return None
-    last = df.iloc[-1]
-    cuerpo = abs(last['close'] - last['open'])
-    rango = last['high'] - last['low']
-    if rango == 0:
-        return None
-    mecha_inf = min(last['open'], last['close']) - last['low']
-    mecha_sup = last['high'] - max(last['open'], last['close'])
-    # Martillo (alcista)
-    if mecha_inf > 2 * cuerpo and cuerpo < rango * 0.3 and last['close'] > last['open']:
-        if last['vol_ratio'] > 1.5:
-            return ('CALL', 'Martillo alcista', 75)
-    # Estrella fugaz (bajista)
-    if mecha_sup > 2 * cuerpo and cuerpo < rango * 0.3 and last['close'] < last['open']:
-        if last['vol_ratio'] > 1.5:
-            return ('PUT', 'Estrella fugaz bajista', 75)
-    # Envolvente alcista
-    if len(df) > 1:
-        prev = df.iloc[-2]
-        if last['close'] > last['open'] and prev['close'] < prev['open'] and last['close'] > prev['high'] and last['open'] < prev['low']:
-            if last['vol_ratio'] > 1.2:
-                return ('CALL', 'Envolvente alcista', 70)
-    # Envolvente bajista
-        if last['close'] < last['open'] and prev['close'] > prev['open'] and last['close'] < prev['low'] and last['open'] > prev['high']:
-            if last['vol_ratio'] > 1.2:
-                return ('PUT', 'Envolvente bajista', 70)
-    return None
-
-# =========================
-# ESTRATEGIA 6: MACD CRUCE CERO
-# =========================
-def estrategia_macd_zero(df):
-    if len(df) < 2:
-        return None
+        return None, 0
     last = df.iloc[-1]
     prev = df.iloc[-2]
-    if prev['macd'] <= 0 and last['macd'] > 0 and last['hist'] > prev['hist']:
-        fuerza = 60 + (last['adx'] / 100) * 20
-        return ('CALL', 'MACD cruce cero alcista', min(fuerza, 100))
-    if prev['macd'] >= 0 and last['macd'] < 0 and last['hist'] < prev['hist']:
-        fuerza = 60 + (last['adx'] / 100) * 20
-        return ('PUT', 'MACD cruce cero bajista', min(fuerza, 100))
-    return None
-
-# =========================
-# ESTRATEGIA 7: ESTOCÁSTICO + ADX
-# =========================
-def estrategia_stoch_adx(df):
-    if len(df) < 2:
-        return None
-    last = df.iloc[-1]
-    prev = df.iloc[-2]
-    if last['adx'] < 25:
-        return None
+    if last['adx'] < 20:
+        return None, 0
     if prev['stoch_k'] < 20 and last['stoch_k'] > last['stoch_d']:
-        fuerza = 65 + (last['adx'] / 100) * 20
-        return ('CALL', 'Estocástico sale sobreventa', min(fuerza, 100))
+        return 'CALL', 7
     if prev['stoch_k'] > 80 and last['stoch_k'] < last['stoch_d']:
-        fuerza = 65 + (last['adx'] / 100) * 20
-        return ('PUT', 'Estocástico sale sobrecompra', min(fuerza, 100))
-    return None
+        return 'PUT', 7
+    return None, 0
 
-# =========================
-# ESTRATEGIA 8: SOPORTE/RESISTENCIA + RSI
-# =========================
-def estrategia_sr_rsi(df):
-    niveles = detectar_niveles_sr(df, num_toques=2, ventana=50)
-    if not niveles:
-        return None
+def estrategia_6_heiken_ashi_ema(df):
+    """Heiken Ashi + EMA9 (tendencia)"""
+    if len(df) < 2:
+        return None, 0
+    # Calcular Heiken Ashi simplificado
+    ha_close = (df['open'] + df['high'] + df['low'] + df['close']) / 4
+    ha_open = (df['open'].shift(1) + df['close'].shift(1)) / 2
     last = df.iloc[-1]
-    nivel_cercano = niveles[0]
-    distancia = abs(last['close'] - nivel_cercano['precio']) / last['close']
-    if distancia > 0.002:
-        return None
-    if nivel_cercano['tipo'] == 'soporte' and last['rsi'] < 40:
-        fuerza = 65 + (100 - last['rsi']) / 10
-        return ('CALL', f'Soporte + RSI', min(fuerza, 100))
-    if nivel_cercano['tipo'] == 'resistencia' and last['rsi'] > 60:
-        fuerza = 65 + (last['rsi'] - 60) / 10
-        return ('PUT', f'Resistencia + RSI', min(fuerza, 100))
-    return None
+    if ha_close.iloc[-1] > ha_open.iloc[-1] and last['close'] > last['ema9']:
+        return 'CALL', 7
+    if ha_close.iloc[-1] < ha_open.iloc[-1] and last['close'] < last['ema9']:
+        return 'PUT', 7
+    return None, 0
+
+def estrategia_7_volume_spike(df):
+    """Pico de volumen + vela grande en dirección"""
+    last = df.iloc[-1]
+    if last['vol_ratio'] > 1.8:
+        cuerpo = abs(last['close'] - last['open'])
+        rango = last['high'] - last['low']
+        if cuerpo > rango * 0.6:
+            if last['close'] > last['open']:
+                return 'CALL', 7
+            else:
+                return 'PUT', 7
+    return None, 0
+
+def estrategia_8_tendencia_adx(df):
+    """ADX > 25 y EMAs alineadas"""
+    last = df.iloc[-1]
+    if last['adx'] > 25:
+        if last['ema9'] > last['ema21'] and last['ema9'] > last['ema50']:
+            return 'CALL', 6
+        if last['ema9'] < last['ema21'] and last['ema9'] < last['ema50']:
+            return 'PUT', 6
+    return None, 0
+
+# Lista de estrategias (nombre, función, peso base)
+ESTRATEGIAS = [
+    ("Divergencia RSI/MACD", estrategia_1_divergencia, 10),
+    ("Cruce EMAs", estrategia_2_cruce_ema, 9),
+    ("Bollinger + RSI", estrategia_3_bb_rsi, 8),
+    ("MACD señal", estrategia_4_macd_cruce_senal, 8),
+    ("Stochastic + ADX", estrategia_5_stoch_adx, 7),
+    ("Heiken Ashi + EMA9", estrategia_6_heiken_ashi_ema, 7),
+    ("Volumen Spike", estrategia_7_volume_spike, 7),
+    ("Tendencia ADX", estrategia_8_tendencia_adx, 6)
+]
 
 # =========================
-# EVALUAR TODAS LAS ESTRATEGIAS PARA UN ACTIVO
+# EVALUAR UN ACTIVO (con votación)
 # =========================
 def evaluar_activo(api, asset):
     try:
-        candles = api.get_candles(asset, 300, 100, time.time())
+        candles = api.get_candles(asset, 300, 100, time.time())  # 5 min velas
         if not candles or len(candles) < 50:
             return None
         df = pd.DataFrame(candles)
@@ -315,83 +242,67 @@ def evaluar_activo(api, asset):
 
         df = calcular_indicadores(df)
 
-        estrategias = [
-            estrategia_divergencias,
-            estrategia_cruce_emas,
-            estrategia_rsi_bb,
-            estrategia_supertrend_adx,
-            estrategia_patron_velas,
-            estrategia_macd_zero,
-            estrategia_stoch_adx,
-            estrategia_sr_rsi
-        ]
-
         votos_call = 0
         votos_put = 0
         peso_call = 0
         peso_put = 0
-        descripciones_call = []
-        descripciones_put = []
+        estrategias_activas = []
 
-        for func in estrategias:
+        for nombre, func, peso_base in ESTRATEGIAS:
             try:
-                res = func(df)
-                if res:
-                    direccion, desc, peso = res
-                    if direccion == 'CALL':
+                direc, peso_extra = func(df)
+                if direc:
+                    estrategias_activas.append(nombre)
+                    if direc == 'CALL':
                         votos_call += 1
-                        peso_call += peso
-                        descripciones_call.append(desc)
+                        peso_call += peso_base + (peso_extra or 0)
                     else:
                         votos_put += 1
-                        peso_put += peso
-                        descripciones_put.append(desc)
+                        peso_put += peso_base + (peso_extra or 0)
             except Exception as e:
+                logger.error(f"Error en estrategia {nombre}: {e}")
                 continue
 
         if votos_call + votos_put == 0:
-            # No hay señales, solo devolvemos fuerza para selección
-            fuerza = df['adx'].iloc[-1] + (df['vol_ratio'].iloc[-1] * 10)
-            return {'asset': asset, 'fuerza': min(fuerza, 100)}
+            return None
 
-        # Decidir dirección por consenso (mayoría simple)
-        if votos_call > votos_put:
+        # Decidir dirección por peso total
+        if peso_call > peso_put:
             direccion = 'CALL'
-            fuerza = peso_call / votos_call
-            descripcion = ', '.join(descripciones_call[:3])  # máx 3
-        elif votos_put > votos_call:
+            peso_total = peso_call
+            fuerza = (peso_call / (peso_call + peso_put)) * 100 if (peso_call + peso_put) > 0 else 0
+        elif peso_put > peso_call:
             direccion = 'PUT'
-            fuerza = peso_put / votos_put
-            descripcion = ', '.join(descripciones_put[:3])
+            peso_total = peso_put
+            fuerza = (peso_put / (peso_call + peso_put)) * 100
         else:
-            # Empate, decidir por peso total
-            if peso_call > peso_put:
+            # Empate, decidir por número de votos
+            if votos_call > votos_put:
                 direccion = 'CALL'
-                fuerza = peso_call / votos_call if votos_call > 0 else 0
-                descripcion = ', '.join(descripciones_call[:3])
-            else:
+                fuerza = (votos_call / (votos_call + votos_put)) * 100
+            elif votos_put > votos_call:
                 direccion = 'PUT'
-                fuerza = peso_put / votos_put if votos_put > 0 else 0
-                descripcion = ', '.join(descripciones_put[:3])
+                fuerza = (votos_put / (votos_call + votos_put)) * 100
+            else:
+                return None
 
-        # Normalizar fuerza a 0-100
-        fuerza = min(max(fuerza, 0), 100)
+        # Fuerza final combinada (peso y número de estrategias)
+        fuerza = min(fuerza + (peso_total / 10), 100)
 
         return {
             'asset': asset,
             'direccion': direccion,
-            'descripcion': descripcion,
+            'estrategias': estrategias_activas,
             'fuerza': fuerza,
-            'votos_call': votos_call,
-            'votos_put': votos_put,
-            'precio': df['close'].iloc[-1]
+            'precio': df['close'].iloc[-1],
+            'timestamp': datetime.now(ecuador)
         }
     except Exception as e:
         logger.error(f"Error evaluando {asset}: {e}")
         return None
 
 # =========================
-# OBTENER ACTIVOS ABIERTOS (con conteo)
+# OBTENER ACTIVOS ABIERTOS
 # =========================
 def obtener_activos_abiertos(api, tipo_mercado="AMBOS"):
     try:
@@ -425,14 +336,15 @@ def obtener_activos_abiertos(api, tipo_mercado="AMBOS"):
         return FALLBACK_ACTIVOS
 
 # =========================
-# SELECCIONAR LOS N ACTIVOS MÁS FUERTES (por fuerza, sin señal)
+# SELECCIONAR EL MEJOR ACTIVO (mayor fuerza)
 # =========================
-def seleccionar_activos_fuertes(api, lista_activos, num_activos=3):
-    puntuaciones = []
+def seleccionar_mejor_activo(api, lista_activos):
+    mejor = None
+    mejor_fuerza = -1
     for asset in lista_activos:
         res = evaluar_activo(api, asset)
-        if res and 'fuerza' in res:
-            puntuaciones.append((res['fuerza'], asset))
+        if res and res['fuerza'] > mejor_fuerza:
+            mejor_fuerza = res['fuerza']
+            mejor = res
         time.sleep(0.1)
-    puntuaciones.sort(reverse=True)
-    return [asset for _, asset in puntuaciones[:num_activos]]
+    return mejor
