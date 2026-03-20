@@ -17,7 +17,7 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# Estilos CSS profesionales (3D cards)
+# Estilos CSS profesionales (igual que antes)
 st.markdown("""
 <style>
     .stApp {
@@ -36,9 +36,6 @@ st.markdown("""
         box-shadow: 0 10px 20px rgba(0,0,0,0.3);
         border: 1px solid rgba(0, 163, 255, 0.2);
         transition: transform 0.2s;
-    }
-    div[data-testid="stMetric"]:hover {
-        transform: translateY(-3px);
     }
     .stButton > button {
         background: linear-gradient(90deg, #00a3ff, #0066cc);
@@ -70,16 +67,6 @@ st.markdown("""
         transform: translateY(-5px);
         box-shadow: 0 25px 40px -12px rgba(0,0,0,0.6);
         border-color: #00a3ff;
-    }
-    .asset-card::before {
-        content: '';
-        position: absolute;
-        top: 0;
-        left: 0;
-        width: 100%;
-        height: 100%;
-        background: linear-gradient(120deg, rgba(0,163,255,0.1) 0%, rgba(0,0,0,0) 70%);
-        pointer-events: none;
     }
     .asset-name {
         font-size: 1.4rem;
@@ -145,17 +132,17 @@ if 'saldo' not in st.session_state:
 if 'monitoreando' not in st.session_state:
     st.session_state.monitoreando = False
 if 'activos_seleccionados' not in st.session_state:
-    st.session_state.activos_seleccionados = []  # lista de los N activos (hasta 3)
+    st.session_state.activos_seleccionados = []
 if 'señales_activas' not in st.session_state:
-    st.session_state.señales_activas = {}  # dict {asset: dict con señal activa}
+    st.session_state.señales_activas = {}  # dict {asset: señal_dict}
 if 'ultima_senal_tiempo' not in st.session_state:
-    st.session_state.ultima_senal_tiempo = None  # para esperar 5 min después de cualquier señal
+    st.session_state.ultima_senal_tiempo = None
 if 'log' not in st.session_state:
     st.session_state.log = []
 if 'activos_totales' not in st.session_state:
     st.session_state.activos_totales = []
 if 'indice_ronda' not in st.session_state:
-    st.session_state.indice_ronda = 0  # <-- AÑADIDO
+    st.session_state.indice_ronda = 0  # <--- AGREGADO para evitar AttributeError
 
 # Zona horaria
 ecuador = pytz.timezone("America/Guayaquil")
@@ -171,9 +158,6 @@ def conectar(email, password):
             saldo = api.get_balance()
             st.session_state.saldo = saldo if saldo is not None else 0.0
             st.session_state.log.append(f"✅ Conectado - Saldo: {st.session_state.saldo}")
-            # Obtener activos disponibles para mostrar conteo
-            activos = obtener_activos_abiertos(api, "AMBOS")
-            st.session_state.activos_totales = activos
             return True
         else:
             st.error(f"Error: {reason}")
@@ -255,13 +239,12 @@ if st.session_state.conectado:
     with col3:
         st.metric("Señales activas", len([s for s in st.session_state.señales_activas.values() if s.get('activa', False)]))
 
-    # Mostrar tarjetas de activos (hasta 3)
+    # Mostrar tarjetas de activos
     if st.session_state.activos_seleccionados:
         st.subheader("📌 Activos en seguimiento")
         cols = st.columns(len(st.session_state.activos_seleccionados))
         for idx, asset in enumerate(st.session_state.activos_seleccionados):
             with cols[idx]:
-                # Obtener la señal actual para este activo (si existe)
                 senal = st.session_state.señales_activas.get(asset, {})
                 if senal and senal.get('activa'):
                     # Tarjeta con señal activa
@@ -271,13 +254,11 @@ if st.session_state.conectado:
                     vencimiento = senal['vencimiento']
                     descripcion = senal['descripcion']
                     card_class = "signal-call" if direccion == "CALL" else "signal-put"
-                    # Texto legible
-                    operacion = "COMPRA (CALL)" if direccion == "CALL" else "VENTA (PUT)"
                     st.markdown(f"""
                     <div class="asset-card {card_class}">
                         <div class="asset-name">{asset}</div>
                         <div class="asset-status">✅ SEÑAL ACTIVA</div>
-                        <div><strong>{operacion}</strong> - {descripcion}</div>
+                        <div><strong>{direccion}</strong> - {descripcion}</div>
                         <div>Fuerza: {fuerza:.1f}%</div>
                         <div class="force-bar"><div class="force-fill" style="width: {fuerza}%;"></div></div>
                         <div class="entry-time">⏱️ Entrada: {entrada}</div>
@@ -285,7 +266,7 @@ if st.session_state.conectado:
                     </div>
                     """, unsafe_allow_html=True)
                 else:
-                    # Tarjeta en estado neutro
+                    # Tarjeta neutra
                     st.markdown(f"""
                     <div class="asset-card signal-neutral">
                         <div class="asset-name">{asset}</div>
@@ -295,24 +276,22 @@ if st.session_state.conectado:
                     </div>
                     """, unsafe_allow_html=True)
 
-    # Historial de señales activas (log)
-    with st.expander("📋 Historial de señales activas", expanded=True):
-        if st.session_state.señales_activas:
+    # Historial de señales activas (tabla)
+    with st.expander("📋 Señales activas", expanded=True):
+        activas = [s for s in st.session_state.señales_activas.values() if s.get('activa')]
+        if activas:
             data = []
-            for asset, senal in st.session_state.señales_activas.items():
-                if senal.get('activa'):
-                    operacion = "COMPRA" if senal['direccion'] == "CALL" else "VENTA"
-                    data.append({
-                        'Activo': asset,
-                        'Operación': operacion,
-                        'Descripción': senal['descripcion'],
-                        'Fuerza': f"{senal['fuerza']:.1f}%",
-                        'Entrada': senal['entrada'],
-                        'Vencimiento': senal['vencimiento']
-                    })
-            if data:
-                df = pd.DataFrame(data)
-                st.dataframe(df, use_container_width=True, hide_index=True)
+            for s in activas:
+                data.append({
+                    'Activo': s['asset'],
+                    'Dirección': s['direccion'],
+                    'Descripción': s['descripcion'],
+                    'Fuerza': f"{s['fuerza']:.1f}%",
+                    'Entrada': s['entrada'],
+                    'Vencimiento': s['vencimiento']
+                })
+            df = pd.DataFrame(data)
+            st.dataframe(df, use_container_width=True, hide_index=True)
         else:
             st.info("No hay señales activas.")
 
@@ -325,7 +304,7 @@ if st.session_state.conectado:
     if st.session_state.monitoreando:
         now = datetime.now(ecuador)
 
-        # 1. Verificar señales expiradas (5 minutos después de la entrada)
+        # 1. Eliminar señales expiradas (5 minutos después de la entrada)
         activas = st.session_state.señales_activas.copy()
         for asset, senal in activas.items():
             if senal.get('activa'):
@@ -337,50 +316,16 @@ if st.session_state.conectado:
                     senal['activa'] = False
                     st.session_state.señales_activas[asset] = senal
                     st.session_state.log.append(f"🗑️ Señal expirada para {asset}")
-                    # Esperar para no saturar
-                    time.sleep(0.5)
 
-        # 2. Si hay alguna señal activa, no generar nuevas hasta que pasen 5 min desde la última entrada
-        hay_senal_activa = any(s.get('activa') for s in st.session_state.señales_activas.values())
-        if hay_senal_activa:
-            # Esperar un poco antes de volver a evaluar
+        # 2. Si hay alguna señal activa, no evaluamos nuevos (esperamos)
+        if any(s.get('activa') for s in st.session_state.señales_activas.values()):
             time.sleep(5)
             st.rerun()
 
-        # 3. Evaluar los activos seleccionados
+        # 3. Evaluar activos
         if st.session_state.activos_seleccionados:
-            # Actualizar la fuerza de cada activo (para posible reemplazo)
-            nuevas_fuerzas = {}
             for asset in st.session_state.activos_seleccionados:
-                res = evaluar_activo(st.session_state.api, asset)
-                if res and 'fuerza' in res:
-                    nuevas_fuerzas[asset] = res['fuerza']
-                else:
-                    nuevas_fuerzas[asset] = 0
-
-            # Verificar si algún activo perdió fuerza (umbral bajo)
-            umbral_minimo = 20  # si la fuerza cae por debajo de 20, se reemplaza
-            activos_a_reemplazar = [a for a in st.session_state.activos_seleccionados if nuevas_fuerzas.get(a, 0) < umbral_minimo]
-            if activos_a_reemplazar:
-                st.session_state.log.append(f"⚠️ Activos con baja fuerza: {', '.join(activos_a_reemplazar)}. Buscando reemplazos...")
-                # Obtener lista de todos los activos (excluyendo los actuales)
-                todos = st.session_state.activos_totales
-                candidatos = [a for a in todos if a not in st.session_state.activos_seleccionados]
-                if candidatos:
-                    # Seleccionar nuevos activos fuertes para reemplazar
-                    nuevos = seleccionar_activos_fuertes(st.session_state.api, candidatos, len(activos_a_reemplazar))
-                    # Reemplazar
-                    for i, old in enumerate(activos_a_reemplazar):
-                        if i < len(nuevos):
-                            idx = st.session_state.activos_seleccionados.index(old)
-                            st.session_state.activos_seleccionados[idx] = nuevos[i]
-                            st.session_state.log.append(f"🔄 Reemplazo: {old} → {nuevos[i]}")
-                else:
-                    st.session_state.log.append("⚠️ No hay candidatos para reemplazo.")
-
-            # 4. Generar señales para activos sin señal activa
-            for asset in st.session_state.activos_seleccionados:
-                # Saltar si ya tiene señal activa (por si acaso)
+                # Si ya tiene una señal activa (no debería porque ya las eliminamos), saltar
                 if st.session_state.señales_activas.get(asset, {}).get('activa'):
                     continue
 
@@ -392,32 +337,30 @@ if st.session_state.conectado:
                     vencimiento_str = (entrada + timedelta(minutes=5)).strftime("%H:%M:%S")
                     st.session_state.señales_activas[asset] = {
                         'activa': True,
+                        'asset': asset,
                         'direccion': res['direccion'],
                         'descripcion': res['descripcion'],
                         'fuerza': res['fuerza'],
                         'entrada': entrada_str,
                         'vencimiento': vencimiento_str
                     }
-                    st.session_state.log.append(f"🚀 SEÑAL: {asset} - {'COMPRA' if res['direccion']=='CALL' else 'VENTA'} a las {entrada_str} (Fuerza: {res['fuerza']:.1f}%)")
-                    # Forzar actualización inmediata
+                    st.session_state.log.append(f"🚀 SEÑAL: {asset} - {res['direccion']} a las {entrada_str} (Fuerza: {res['fuerza']:.1f}%)")
                     st.rerun()
                 # Pequeña pausa entre activos
                 time.sleep(1)
 
-            # Si no hubo señales, esperar el ciclo y luego volver
+            # Si no hubo señales, esperar y luego actualizar fuerza de activos
+            time.sleep(pausa_entre_ciclos)
+            # Opcional: cada cierto tiempo, reevaluar la lista de activos fuertes
             st.session_state.indice_ronda += 1
-            # Cada 10 ciclos, refrescar lista de activos fuertes (opcional)
             if st.session_state.indice_ronda % 10 == 0:
-                st.session_state.log.append("🔄 Refrescando lista de activos...")
+                # Cada 10 ciclos, refrescar activos
                 activos_totales = obtener_activos_abiertos(st.session_state.api, tipo_mercado)
                 if activos_totales:
-                    st.session_state.activos_totales = activos_totales
-                    # Seleccionar activos fuertes de nuevo (manteniendo cantidad)
                     nuevos = seleccionar_activos_fuertes(st.session_state.api, activos_totales, num_activos)
                     if nuevos != st.session_state.activos_seleccionados:
                         st.session_state.activos_seleccionados = nuevos
                         st.session_state.log.append(f"🔄 Activos actualizados: {', '.join(nuevos)}")
-            time.sleep(pausa_entre_ciclos)
             st.rerun()
         else:
             # No hay activos seleccionados, buscar nuevos
