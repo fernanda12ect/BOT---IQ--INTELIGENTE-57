@@ -17,7 +17,7 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# Estilos CSS profesionales (igual que antes)
+# Estilos CSS (igual que antes)
 st.markdown("""
 <style>
     .stApp {
@@ -104,9 +104,9 @@ if 'monitoreando' not in st.session_state:
 if 'trade_in_progress' not in st.session_state:
     st.session_state.trade_in_progress = False
 if 'ultima_trade' not in st.session_state:
-    st.session_state.ultima_trade = None  # {asset, direccion, monto, entrada, vencimiento, estado, order_id}
+    st.session_state.ultima_trade = None
 if 'historial' not in st.session_state:
-    st.session_state.historial = []  # lista de trades finalizados
+    st.session_state.historial = []
 if 'log' not in st.session_state:
     st.session_state.log = []
 
@@ -138,13 +138,30 @@ def desconectar():
     st.session_state.monitoreando = False
     st.session_state.trade_in_progress = False
 
+def is_asset_open(api, asset):
+    """Verifica si el activo está abierto para opciones binarias."""
+    try:
+        open_time = api.get_all_open_time()
+        if 'binary' in open_time:
+            for a, data in open_time['binary'].items():
+                if a == asset:
+                    return data.get('open', False)
+        return False
+    except:
+        return True  # si falla, asumimos que está abierto (para no bloquear)
+
 def ejecutar_trade(asset, direccion, monto, anticipacion=0):
     """Ejecuta una operación de compra/venta con vencimiento de 1 minuto."""
     try:
+        # Verificar que el activo esté abierto
+        if not is_asset_open(st.session_state.api, asset):
+            st.session_state.log.append(f"⚠️ {asset} no está disponible para trading en este momento.")
+            return False
+
         # Determinar tipo de opción
         opcion = "call" if direccion == "CALL" else "put"
-        # Vencimiento: 1 minuto desde ahora
-        expiracion = int(time.time()) + 60
+        # Vencimiento: 55 segundos desde ahora (evitar el límite exacto del minuto)
+        expiracion = int(time.time()) + 55
         # Ejecutar orden
         success, order_id = st.session_state.api.buy(monto, asset, opcion, expiracion)
         if success:
@@ -166,10 +183,14 @@ def ejecutar_trade(asset, direccion, monto, anticipacion=0):
             st.session_state.saldo -= monto
             return True
         else:
-            st.session_state.log.append(f"❌ Error al ejecutar trade: {order_id}")
+            # Manejo específico del error de tiempo
+            if "Time for purchasing options is over" in str(order_id):
+                st.session_state.log.append(f"⏰ {asset} no disponible en este momento (tiempo expirado).")
+            else:
+                st.session_state.log.append(f"❌ Error al ejecutar trade en {asset}: {order_id}")
             return False
     except Exception as e:
-        st.session_state.log.append(f"⚠️ Excepción al ejecutar trade: {e}")
+        st.session_state.log.append(f"⚠️ Excepción al ejecutar trade en {asset}: {e}")
         return False
 
 def verificar_resultado_trade():
@@ -177,20 +198,16 @@ def verificar_resultado_trade():
     if not st.session_state.trade_in_progress or not st.session_state.ultima_trade:
         return False
     trade = st.session_state.ultima_trade
-    # Calcular si ya pasó el vencimiento
     vencimiento_dt = datetime.strptime(trade['vencimiento'], "%H:%M:%S").time()
     ahora = datetime.now(ecuador).time()
-    # Convertir a datetime para comparar
     ahora_dt = datetime.combine(datetime.today(), ahora)
     vencimiento_dt_full = datetime.combine(datetime.today(), vencimiento_dt)
     if vencimiento_dt_full < ahora_dt:
         vencimiento_dt_full += timedelta(days=1)
     if ahora_dt >= vencimiento_dt_full:
-        # Ha vencido, obtener resultado
         try:
             resultado = st.session_state.api.check_win_v4(trade['order_id'])
             if resultado is not None:
-                # resultado puede ser una tupla (estado, ganancia) o un string
                 if isinstance(resultado, tuple):
                     estado, ganancia = resultado
                 else:
@@ -213,14 +230,13 @@ def verificar_resultado_trade():
         except Exception as e:
             st.session_state.log.append(f"⚠️ Error al verificar resultado: {e}")
             trade['estado'] = 'ERROR'
-        # Mover al historial
         st.session_state.historial.append(trade)
         st.session_state.ultima_trade = None
         st.session_state.trade_in_progress = False
         return True
     return False
 
-# Sidebar
+# Sidebar (igual que antes)
 with st.sidebar:
     st.markdown("## 🤖 NEUROTRADER OTC - AUTOMÁTICO")
     st.markdown("---")
@@ -265,7 +281,7 @@ with st.sidebar:
     if st.session_state.conectado:
         st.metric("💰 Saldo", f"${st.session_state.saldo:.2f}")
 
-# Área principal
+# Área principal (igual que antes, con la lógica actualizada)
 if st.session_state.conectado:
     st.title("🤖 Bot Automático - 1 minuto")
 
@@ -280,12 +296,10 @@ if st.session_state.conectado:
         else:
             st.metric("Operación", "Listo")
 
-    # Mostrar última operación si está en curso
     if st.session_state.trade_in_progress and st.session_state.ultima_trade:
         t = st.session_state.ultima_trade
-        card_class = "trade-pending"
         st.markdown(f"""
-        <div class="status-card trade-card {card_class}">
+        <div class="status-card trade-card trade-pending">
             <div class="asset-name">🔄 OPERACIÓN EN CURSO</div>
             <div><strong>{t['asset']}</strong> - {t['direccion']}</div>
             <div>Monto: ${t['monto']}</div>
@@ -296,7 +310,6 @@ if st.session_state.conectado:
     else:
         st.info("No hay operación en curso. El bot analizará en el próximo minuto.")
 
-    # Historial de operaciones
     if st.session_state.historial:
         st.subheader("📋 Historial de operaciones")
         for trade in st.session_state.historial[-10:]:
@@ -310,23 +323,19 @@ if st.session_state.conectado:
             </div>
             """, unsafe_allow_html=True)
 
-    # Log de eventos
     with st.expander("📋 Log de eventos", expanded=False):
         for linea in st.session_state.log[-30:]:
             st.text(linea)
 
-    # Lógica de monitoreo y ejecución automática
+    # Lógica de monitoreo
     if st.session_state.monitoreando:
         now = datetime.now(ecuador)
         segundo = now.second
 
-        # Verificar si hay una operación pendiente que ya venció
         if st.session_state.trade_in_progress:
             if verificar_resultado_trade():
-                # Trade finalizado, continuar
                 st.rerun()
             else:
-                # Mostrar tiempo restante
                 trade = st.session_state.ultima_trade
                 vencimiento_dt = datetime.strptime(trade['vencimiento'], "%H:%M:%S").time()
                 ahora = datetime.now(ecuador).time()
@@ -339,26 +348,23 @@ if st.session_state.conectado:
                 time.sleep(1)
                 st.rerun()
         else:
-            # No hay operación, buscar señal en segundo 58-59
             if segundo == 58:
-                time.sleep(0.5)  # llegar cerca del 59
+                time.sleep(0.5)
                 st.session_state.log.append("🔍 Analizando activos OTC...")
                 activos = obtener_activos_otc(st.session_state.api)
                 mejor = seleccionar_mejor_senal(st.session_state.api, activos)
                 if mejor:
                     direccion, desc = mejor['senal']
-                    # Ejecutar trade
                     exito = ejecutar_trade(mejor['asset'], direccion, monto, anticipacion=0)
                     if exito:
                         st.session_state.log.append(f"🚀 OPERACIÓN EJECUTADA: {mejor['asset']} - {direccion}")
                     else:
-                        st.session_state.log.append(f"❌ Falló ejecución para {mejor['asset']}")
+                        st.session_state.log.append(f"❌ No se pudo ejecutar trade para {mejor['asset']}")
                 else:
                     st.session_state.log.append("🔍 SIN SEÑAL – ESPERAR PROXIMO MINUTO")
                 time.sleep(0.2)
                 st.rerun()
             else:
-                # Mostrar cuenta regresiva
                 if segundo < 58:
                     seg_rest = 58 - segundo
                 else:
