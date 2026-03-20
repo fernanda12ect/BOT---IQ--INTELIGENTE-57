@@ -71,9 +71,9 @@ def calcular_indicadores(df):
     return df
 
 # =========================
-# DETECCIÓN DE DIVERGENCIAS (RSI y MACD)
+# DETECCIÓN DE DIVERGENCIAS (más sensible, ventana 3)
 # =========================
-def detectar_divergencia(df, ventana=5):
+def detectar_divergencia(df, ventana=3):
     """
     Detecta divergencias alcistas/bajistas en las últimas `ventana` velas.
     Retorna (direccion, descripcion, fuerza) o None.
@@ -82,37 +82,91 @@ def detectar_divergencia(df, ventana=5):
         return None
     segmento = df.iloc[-ventana:].copy()
 
-    # Índices de mínimos y máximos
+    # Para ventana pequeña, necesitamos al menos 3 puntos para comparar
+    if len(segmento) < 3:
+        return None
+
+    # Divergencia alcista: precio hace mínimo más bajo, indicador hace mínimo más alto
+    # Buscamos el mínimo más bajo de precio y el mínimo más alto del indicador
+    min_precio = segmento['low'].min()
     min_precio_idx = segmento['low'].idxmin()
-    max_precio_idx = segmento['high'].idxmax()
+    min_rsi = segmento['rsi'].min()
     min_rsi_idx = segmento['rsi'].idxmin()
-    max_rsi_idx = segmento['rsi'].idxmax()
+    min_macd = segmento['macd'].min()
     min_macd_idx = segmento['macd'].idxmin()
+
+    # Divergencia bajista: precio hace máximo más alto, indicador hace máximo más bajo
+    max_precio = segmento['high'].max()
+    max_precio_idx = segmento['high'].idxmax()
+    max_rsi = segmento['rsi'].max()
+    max_rsi_idx = segmento['rsi'].idxmax()
+    max_macd = segmento['macd'].max()
     max_macd_idx = segmento['macd'].idxmax()
 
+    # ADX para dar fuerza
+    adx_actual = df['adx'].iloc[-1] if not pd.isna(df['adx'].iloc[-1]) else 0
+    fuerza_base = 50 + min(adx_actual, 50)  # hasta 100
+
     # Divergencia alcista RSI
-    if min_precio_idx < min_rsi_idx and segmento.loc[min_precio_idx, 'low'] < segmento.loc[min_rsi_idx, 'low']:
+    if min_precio_idx != min_rsi_idx and segmento.loc[min_precio_idx, 'low'] < segmento.loc[min_rsi_idx, 'low']:
         if segmento.loc[min_rsi_idx, 'rsi'] > segmento.loc[min_precio_idx, 'rsi']:
-            fuerza = 70 + (segmento['adx'].iloc[-1] / 100) * 30
+            fuerza = fuerza_base + (segmento['vol_ratio'].iloc[-1] * 10)
             return ('CALL', 'Divergencia alcista RSI', min(fuerza, 100))
 
     # Divergencia bajista RSI
-    if max_precio_idx > max_rsi_idx and segmento.loc[max_precio_idx, 'high'] > segmento.loc[max_rsi_idx, 'high']:
+    if max_precio_idx != max_rsi_idx and segmento.loc[max_precio_idx, 'high'] > segmento.loc[max_rsi_idx, 'high']:
         if segmento.loc[max_rsi_idx, 'rsi'] < segmento.loc[max_precio_idx, 'rsi']:
-            fuerza = 70 + (segmento['adx'].iloc[-1] / 100) * 30
+            fuerza = fuerza_base + (segmento['vol_ratio'].iloc[-1] * 10)
             return ('PUT', 'Divergencia bajista RSI', min(fuerza, 100))
 
     # Divergencia alcista MACD
-    if min_precio_idx < min_macd_idx and segmento.loc[min_precio_idx, 'low'] < segmento.loc[min_macd_idx, 'low']:
+    if min_precio_idx != min_macd_idx and segmento.loc[min_precio_idx, 'low'] < segmento.loc[min_macd_idx, 'low']:
         if segmento.loc[min_macd_idx, 'macd'] > segmento.loc[min_precio_idx, 'macd']:
-            fuerza = 70 + (segmento['adx'].iloc[-1] / 100) * 30
+            fuerza = fuerza_base + (segmento['vol_ratio'].iloc[-1] * 10)
             return ('CALL', 'Divergencia alcista MACD', min(fuerza, 100))
 
     # Divergencia bajista MACD
-    if max_precio_idx > max_macd_idx and segmento.loc[max_precio_idx, 'high'] > segmento.loc[max_macd_idx, 'high']:
+    if max_precio_idx != max_macd_idx and segmento.loc[max_precio_idx, 'high'] > segmento.loc[max_macd_idx, 'high']:
         if segmento.loc[max_macd_idx, 'macd'] < segmento.loc[max_precio_idx, 'macd']:
-            fuerza = 70 + (segmento['adx'].iloc[-1] / 100) * 30
+            fuerza = fuerza_base + (segmento['vol_ratio'].iloc[-1] * 10)
             return ('PUT', 'Divergencia bajista MACD', min(fuerza, 100))
+
+    return None
+
+# =========================
+# DETECCIÓN DE RUPTURA FUERTE (continuación)
+# =========================
+def detectar_ruptura_fuerte(df, ventana=5, umbral_volumen=1.5, umbral_adx=30):
+    """
+    Detecta ruptura de máximos/mínimos recientes con ADX alto y volumen alto.
+    Retorna (direccion, descripcion, fuerza) o None.
+    """
+    if len(df) < ventana + 1:
+        return None
+    last = df.iloc[-1]
+    prev = df.iloc[-2]
+
+    # Verificar ADX
+    if last['adx'] < umbral_adx:
+        return None
+
+    # Verificar volumen
+    if last['vol_ratio'] < umbral_volumen:
+        return None
+
+    # Máximo de las últimas ventana velas (excluyendo la actual)
+    max_anterior = df.iloc[-ventana-1:-1]['high'].max()
+    min_anterior = df.iloc[-ventana-1:-1]['low'].min()
+
+    # Ruptura alcista: precio actual supera el máximo anterior
+    if last['close'] > max_anterior:
+        fuerza = 70 + (last['adx'] / 100) * 30
+        return ('CALL', 'Ruptura alcista fuerte', min(fuerza, 100))
+
+    # Ruptura bajista: precio actual perfora el mínimo anterior
+    if last['close'] < min_anterior:
+        fuerza = 70 + (last['adx'] / 100) * 30
+        return ('PUT', 'Ruptura bajista fuerte', min(fuerza, 100))
 
     return None
 
@@ -133,10 +187,10 @@ def calcular_fuerza(df):
 def evaluar_activo(api, asset):
     """
     Obtiene velas de 5 min, calcula indicadores y devuelve:
-        - dirección de señal si hay divergencia (y fuerza)
+        - dirección de señal si hay divergencia o ruptura
         - fuerza del activo (ADX + volumen)
         - precio actual
-        - descripción de la divergencia si existe
+        - descripción de la señal
     """
     try:
         candles = api.get_candles(asset, 300, 100, time.time())
@@ -151,11 +205,11 @@ def evaluar_activo(api, asset):
 
         df = calcular_indicadores(df)
         fuerza = calcular_fuerza(df)
-        divergencia = detectar_divergencia(df, ventana=5)
 
+        # Primero buscar divergencia
+        divergencia = detectar_divergencia(df, ventana=3)
         if divergencia:
             direccion, descripcion, fuerza_div = divergencia
-            # La fuerza de la señal se basa en la fuerza del activo y la de la divergencia
             fuerza_final = (fuerza + fuerza_div) / 2
             return {
                 'asset': asset,
@@ -165,13 +219,27 @@ def evaluar_activo(api, asset):
                 'precio': df['close'].iloc[-1],
                 'timestamp': datetime.now(ecuador)
             }
-        else:
-            # Si no hay divergencia, devolvemos solo la fuerza para selección
+
+        # Si no hay divergencia, buscar ruptura fuerte
+        ruptura = detectar_ruptura_fuerte(df, ventana=5)
+        if ruptura:
+            direccion, descripcion, fuerza_rup = ruptura
+            fuerza_final = (fuerza + fuerza_rup) / 2
             return {
                 'asset': asset,
-                'fuerza': fuerza,
-                'precio': df['close'].iloc[-1]
+                'direccion': direccion,
+                'descripcion': descripcion,
+                'fuerza': fuerza_final,
+                'precio': df['close'].iloc[-1],
+                'timestamp': datetime.now(ecuador)
             }
+
+        # Si no hay señal, devolvemos solo la fuerza para selección
+        return {
+            'asset': asset,
+            'fuerza': fuerza,
+            'precio': df['close'].iloc[-1]
+        }
     except Exception as e:
         logger.error(f"Error evaluando {asset}: {e}")
         return None
