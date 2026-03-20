@@ -160,8 +160,8 @@ def ejecutar_trade(asset, direccion, monto, anticipacion=0):
 
         # Determinar tipo de opción
         opcion = "call" if direccion == "CALL" else "put"
-        # Vencimiento: 55 segundos desde ahora (evitar el límite exacto del minuto)
-        expiracion = int(time.time()) + 55
+        # Vencimiento: 50 segundos desde ahora (da margen de 10 segundos antes del próximo minuto)
+        expiracion = int(time.time()) + 50
         # Ejecutar orden
         success, order_id = st.session_state.api.buy(monto, asset, opcion, expiracion)
         if success:
@@ -178,7 +178,7 @@ def ejecutar_trade(asset, direccion, monto, anticipacion=0):
                 'order_id': order_id
             }
             st.session_state.trade_in_progress = True
-            st.session_state.log.append(f"💰 Trade ejecutado: {asset} {direccion} ${monto} (ID: {order_id})")
+            st.session_state.log.append(f"💰 Trade ejecutado: {asset} {direccion} ${monto} (ID: {order_id}, expira en 50s)")
             # Actualizar saldo (descuento inmediato)
             st.session_state.saldo -= monto
             return True
@@ -236,7 +236,7 @@ def verificar_resultado_trade():
         return True
     return False
 
-# Sidebar (igual que antes)
+# Sidebar
 with st.sidebar:
     st.markdown("## 🤖 NEUROTRADER OTC - AUTOMÁTICO")
     st.markdown("---")
@@ -281,7 +281,7 @@ with st.sidebar:
     if st.session_state.conectado:
         st.metric("💰 Saldo", f"${st.session_state.saldo:.2f}")
 
-# Área principal (igual que antes, con la lógica actualizada)
+# Área principal
 if st.session_state.conectado:
     st.title("🤖 Bot Automático - 1 minuto")
 
@@ -349,12 +349,15 @@ if st.session_state.conectado:
                 st.rerun()
         else:
             if segundo == 58:
-                time.sleep(0.5)
+                # Pequeña pausa para evitar el límite exacto
+                time.sleep(0.2)
                 st.session_state.log.append("🔍 Analizando activos OTC...")
                 activos = obtener_activos_otc(st.session_state.api)
                 mejor = seleccionar_mejor_senal(st.session_state.api, activos)
                 if mejor:
                     direccion, desc = mejor['senal']
+                    # Pequeña pausa antes de ejecutar para asegurar que estamos dentro del margen
+                    time.sleep(0.1)
                     exito = ejecutar_trade(mejor['asset'], direccion, monto, anticipacion=0)
                     if exito:
                         st.session_state.log.append(f"🚀 OPERACIÓN EJECUTADA: {mejor['asset']} - {direccion}")
