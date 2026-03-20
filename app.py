@@ -10,7 +10,8 @@ from bot import (
     obtener_activos_abiertos,
     retroceso_a_fibonacci,
     confirmar_vela_1min,
-    calcular_fibonacci
+    calcular_fibonacci,
+    calcular_indicadores  # importamos para usar en app
 )
 
 st.set_page_config(
@@ -20,7 +21,7 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# Estilos CSS (igual que antes, omito por brevedad)
+# Estilos CSS (igual que antes)
 st.markdown("""
 <style>
     .stApp { background: linear-gradient(135deg, #0a0c15 0%, #121724 100%); font-family: 'Segoe UI', sans-serif; }
@@ -53,7 +54,7 @@ if 'saldo' not in st.session_state:
 if 'monitoreando' not in st.session_state:
     st.session_state.monitoreando = False
 if 'activo_seleccionado' not in st.session_state:
-    st.session_state.activo_seleccionado = None  # dict con datos del activo en seguimiento
+    st.session_state.activo_seleccionado = None
 if 'esperando_retroceso' not in st.session_state:
     st.session_state.esperando_retroceso = False
 if 'senal_generada' not in st.session_state:
@@ -112,9 +113,9 @@ with st.sidebar:
     st.markdown("### ⚙️ Configuración")
 
     tipo_mercado = st.selectbox("Mercado", ["OTC", "REAL", "AMBOS"], index=2)
-    umbral_fuerza = st.slider("Fuerza mínima de tendencia (%)", 0, 100, 40, 5,
+    umbral_fuerza = st.slider("Fuerza mínima de tendencia (%)", 0, 100, 30, 5,
                               help="Solo se consideran activos con fuerza mayor a este valor")
-    pausa_ronda = st.slider("Pausa entre rondas (seg)", 10, 60, 20, 5)
+    pausa_ronda = st.slider("Pausa entre rondas (seg)", 5, 30, 10, 5)
     anticipacion = st.slider("Anticipación señal (seg antes del cierre de vela 1min)", 5, 30, 20, 5)
 
     st.markdown("---")
@@ -146,7 +147,7 @@ if st.session_state.conectado:
     with col3:
         st.metric("Señales generadas", len([l for l in st.session_state.log if "🚀" in l]))
 
-    # Mostrar información del activo seleccionado (si existe)
+    # Mostrar información del activo seleccionado
     if st.session_state.activo_seleccionado:
         s = st.session_state.activo_seleccionado
         st.markdown(f"""
@@ -186,7 +187,6 @@ if st.session_state.conectado:
     if st.session_state.monitoreando:
         now = datetime.now(ecuador)
 
-        # Si hay señal generada, esperar a que expire (5 minutos después de entrada)
         if st.session_state.senal_generada:
             entrada_dt = datetime.strptime(st.session_state.senal_generada['entrada'], "%H:%M:%S").time()
             entrada_completa = datetime.combine(now.date(), entrada_dt)
@@ -207,14 +207,13 @@ if st.session_state.conectado:
                 time.sleep(1)
                 st.rerun()
         else:
-            # Si no hay señal, primero asegurar que tenemos un activo seleccionado
+            # Si no hay activo seleccionado, hacer ronda de búsqueda (60 activos, pausa reducida)
             if not st.session_state.activo_seleccionado:
-                # Realizar ronda de búsqueda (45 activos, pausa de 20 segundos)
                 st.session_state.log.append("🔍 Buscando el mejor activo con tendencia fuerte...")
                 if not st.session_state.activos_totales:
                     st.session_state.activos_totales = obtener_activos_abiertos(st.session_state.api, tipo_mercado)
-                # Tomar primeros 45 activos (o todos si son menos)
-                candidatos = st.session_state.activos_totales[:45]
+                # Tomar los primeros 60 activos (o todos)
+                candidatos = st.session_state.activos_totales[:60]
                 mejor = seleccionar_mejor_activo(st.session_state.api, candidatos)
                 if mejor and mejor['fuerza'] >= umbral_fuerza:
                     st.session_state.activo_seleccionado = mejor
@@ -223,16 +222,15 @@ if st.session_state.conectado:
                     st.session_state.log.append(f"   Niveles Fibonacci: 38.2%={mejor['fib']['382']:.5f}, 50%={mejor['fib']['500']:.5f}, 61.8%={mejor['fib']['618']:.5f}")
                 else:
                     st.session_state.log.append("⚠️ No se encontró ningún activo con tendencia suficiente. Reintentando...")
-                # Pausa antes de siguiente ronda
                 time.sleep(pausa_ronda)
                 st.rerun()
             else:
-                # Ya tenemos un activo seleccionado, esperar retroceso a Fibonacci
+                # Ya tenemos activo, esperar retroceso a Fibonacci
                 asset = st.session_state.activo_seleccionado['asset']
                 direccion = st.session_state.activo_seleccionado['direccion']
                 fib = st.session_state.activo_seleccionado['fib']
 
-                # Obtener velas actuales (5 minutos) para verificar si llegó al nivel
+                # Obtener velas de 5 minutos
                 try:
                     candles = st.session_state.api.get_candles(asset, 300, 5, time.time())
                     if not candles:
@@ -245,9 +243,7 @@ if st.session_state.conectado:
                     if len(df) < 5:
                         time.sleep(1)
                         st.rerun()
-                    # Calcular indicadores para obtener ATR
-                    df_indicadores = bot.calcular_indicadores(df)  # necesitamos importar función
-                    # Pero ya tenemos función calcular_indicadores en bot, podemos llamarla
+                    # Calcular indicadores
                     from bot import calcular_indicadores
                     df_indicadores = calcular_indicadores(df)
                     retroceso = retroceso_a_fibonacci(df_indicadores, direccion, fib, tolerancia=0.5)
@@ -257,14 +253,11 @@ if st.session_state.conectado:
                     st.rerun()
 
                 if retroceso:
-                    # Se alcanzó el nivel de Fibonacci
                     st.session_state.log.append(f"📉 Precio alcanzó nivel Fibonacci {retroceso['clave']} en {asset}. Esperando confirmación de vela 1min...")
-                    # Esperar confirmación con vela de 1 minuto
-                    # Para no bloquear, haremos un bucle corto (hasta 10 intentos)
+                    # Confirmación con vela de 1 minuto
                     for _ in range(10):
                         if confirmar_vela_1min(st.session_state.api, asset, direccion):
                             # Generar señal con anticipación
-                            # Obtener la hora actual y calcular la hora de entrada: al inicio de la próxima vela de 1 minuto
                             now = datetime.now(ecuador)
                             # Redondear al siguiente minuto (segundo 00)
                             entrada = now.replace(second=0, microsecond=0) + timedelta(minutes=1)
@@ -280,14 +273,11 @@ if st.session_state.conectado:
                             }
                             st.session_state.log.append(f"🚀 SEÑAL GENERADA: {asset} - {direccion} a las {entrada_str} (nivel {retroceso['clave']})")
                             st.rerun()
-                        # Esperar un poco y reintentar (puede que la vela aún no haya cerrado)
                         time.sleep(2)
-                    # Si después de varios intentos no confirma, se descarta el activo
                     st.session_state.log.append(f"⚠️ No hubo confirmación en {asset} tras alcanzar Fibonacci. Buscando otro activo...")
                     st.session_state.activo_seleccionado = None
                     st.rerun()
                 else:
-                    # Aún no alcanza el nivel, seguir esperando
                     time.sleep(2)
                     st.rerun()
 
