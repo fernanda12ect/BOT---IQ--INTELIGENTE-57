@@ -30,7 +30,7 @@ def calcular_indicadores(df):
 
     # EMAs
     df['ema9'] = df['close'].ewm(span=9, adjust=False).mean()
-    df['ema21'] = df['close'].ewm(span=21, adjust=False).mean()
+    df['ema20'] = df['close'].ewm(span=20, adjust=False).mean()
     df['ema50'] = df['close'].ewm(span=50, adjust=False).mean()
 
     # RSI
@@ -70,12 +70,6 @@ def calcular_indicadores(df):
     df['bb_upper'] = df['bb_ma'] + 2 * df['bb_std']
     df['bb_lower'] = df['bb_ma'] - 2 * df['bb_std']
 
-    # Stochastic
-    low14 = df['low'].rolling(14).min()
-    high14 = df['high'].rolling(14).max()
-    df['stoch_k'] = 100 * (df['close'] - low14) / (high14 - low14)
-    df['stoch_d'] = df['stoch_k'].rolling(3).mean()
-
     # Volumen promedio
     df['vol_avg'] = df['volume'].rolling(20).mean()
     df['vol_ratio'] = df['volume'] / df['vol_avg']
@@ -83,254 +77,89 @@ def calcular_indicadores(df):
     return df
 
 # =========================
-# DETECCIÓN DE TENDENCIA (para filtrar dirección)
+# DETECCIÓN DE SOPORTES Y RESISTENCIAS (niveles con 2+ toques)
 # =========================
-def detectar_tendencia(df, umbral_adx=20):
-    """Retorna dirección de la tendencia ('CALL'/'PUT') y su fuerza (ADX)."""
-    last = df.iloc[-1]
-    if last['adx'] < umbral_adx:
-        return None, 0
-    if last['ema9'] > last['ema21'] and last['ema9'] > last['ema50']:
-        return 'CALL', last['adx']
-    elif last['ema9'] < last['ema21'] and last['ema9'] < last['ema50']:
-        return 'PUT', last['adx']
-    return None, 0
-
-# =========================
-# DETECCIÓN DE NIVELES (Soporte/Resistencia)
-# =========================
-def detectar_niveles_sr(df, num_toques=2, ventana=100):
+def detectar_niveles_sr(df, num_toques=2, ventana=50):
+    """
+    Detecta niveles horizontales con al menos num_toques toques en las últimas ventana velas.
+    """
     if len(df) < ventana:
         return []
     df = df.iloc[-ventana:].copy()
     highs = df['high']
     lows = df['low']
-    conteo = defaultdict(int)
+    conteo = {}
     for i in range(1, len(df)-1):
         if highs.iloc[i] > highs.iloc[i-1] and highs.iloc[i] > highs.iloc[i+1]:
-            conteo[round(highs.iloc[i], 5)] += 1
+            precio = round(highs.iloc[i], 5)
+            conteo[precio] = conteo.get(precio, 0) + 1
         if lows.iloc[i] < lows.iloc[i-1] and lows.iloc[i] < lows.iloc[i+1]:
-            conteo[round(lows.iloc[i], 5)] += 1
+            precio = round(lows.iloc[i], 5)
+            conteo[precio] = conteo.get(precio, 0) + 1
     niveles = []
     precio_actual = df['close'].iloc[-1]
     for precio, cnt in conteo.items():
         if cnt >= num_toques:
             tipo = 'resistencia' if precio > precio_actual else 'soporte'
             niveles.append({'precio': precio, 'tipo': tipo, 'toques': cnt})
+    # Ordenar por cercanía
     niveles.sort(key=lambda x: abs(x['precio'] - precio_actual))
     return niveles
 
 # =========================
-# CÁLCULO DE FIBONACCI (último movimiento)
+# DETECCIÓN DE NIVELES DE FIBONACCI (38.2% del último movimiento)
 # =========================
-def calcular_fibonacci(df, ventana=20):
+def detectar_fibonacci(df, ventana=30):
+    """
+    Calcula el nivel de Fibonacci 38.2% del último movimiento (máximo-mínimo).
+    """
     if len(df) < ventana:
         return None
-    segmento = df.iloc[-ventana:]
-    maximo = segmento['high'].max()
-    minimo = segmento['low'].min()
-    diff = maximo - minimo
-    return {
-        'max': maximo,
-        'min': minimo,
-        '382': maximo - 0.382 * diff,
-        '500': maximo - 0.5 * diff,
-        '618': maximo - 0.618 * diff
-    }
-
-# =========================
-# DETECCIÓN DE ZONAS DE OFERTA/DEMANDA (simplificada)
-# =========================
-def detectar_zonas_od(df, ventana=20):
-    """Detecta zonas de alta actividad de volumen (posibles niveles ocultos)."""
-    if len(df) < ventana:
-        return []
     df = df.iloc[-ventana:].copy()
-    zonas = []
-    # Buscar velas con volumen > 1.5x promedio
-    for i, row in df.iterrows():
-        if row['vol_ratio'] > 1.5:
-            zonas.append({
-                'precio': row['close'],
-                'tipo': 'volumen alto',
-                'intensidad': row['vol_ratio']
-            })
-    # Agrupar por cercanía
-    zonas_unicas = []
-    tolerancia = 0.001
-    for z in zonas:
-        if not zonas_unicas or abs(z['precio'] - zonas_unicas[-1]['precio']) / z['precio'] > tolerancia:
-            zonas_unicas.append(z)
-    return zonas_unicas[:3]
+    maximo = df['high'].max()
+    minimo = df['low'].min()
+    movimiento = maximo - minimo
+    nivel_382 = maximo - movimiento * 0.382
+    return nivel_382
 
 # =========================
-# 8 ESTRATEGIAS (ahora con confirmación de niveles)
+# DETECCIÓN DE VELA DE RECHAZO (martillo/estrella fugaz)
 # =========================
-# Nota: Cada estrategia ahora devuelve (dirección, peso) si se cumple, y además puede proporcionar un nivel sugerido.
-def estrategia_1_divergencia(df, niveles):
-    """Divergencia + ADX + cerca de nivel"""
-    if len(df) < 5:
-        return None, 0, None
+def es_vela_rechazo(df, direccion_esperada):
+    """
+    Determina si la última vela es una vela de rechazo en la dirección esperada.
+    Para CALL (alcista): martillo (mecha inferior larga, cuerpo pequeño)
+    Para PUT (bajista): estrella fugaz (mecha superior larga, cuerpo pequeño)
+    """
+    if len(df) < 1:
+        return False
     last = df.iloc[-1]
-    if last['adx'] < 20:
-        return None, 0, None
-    # Buscar divergencia (simplificada)
-    segmento = df.iloc[-5:]
-    min_precio_idx = segmento['low'].idxmin()
-    max_precio_idx = segmento['high'].idxmax()
-    min_rsi_idx = segmento['rsi'].idxmin()
-    max_rsi_idx = segmento['rsi'].idxmax()
-    # Divergencia alcista
-    if min_precio_idx < min_rsi_idx and segmento.loc[min_precio_idx, 'low'] < segmento.loc[min_rsi_idx, 'low']:
-        if segmento.loc[min_rsi_idx, 'rsi'] > segmento.loc[min_precio_idx, 'rsi']:
-            # Buscar soporte cercano
-            for n in niveles:
-                if n['tipo'] == 'soporte' and abs(last['close'] - n['precio']) / last['close'] < 0.002:
-                    return 'CALL', 10, n['precio']
-    # Divergencia bajista
-    if max_precio_idx > max_rsi_idx and segmento.loc[max_precio_idx, 'high'] > segmento.loc[max_rsi_idx, 'high']:
-        if segmento.loc[max_rsi_idx, 'rsi'] < segmento.loc[max_precio_idx, 'rsi']:
-            for n in niveles:
-                if n['tipo'] == 'resistencia' and abs(last['close'] - n['precio']) / last['close'] < 0.002:
-                    return 'PUT', 10, n['precio']
-    return None, 0, None
+    cuerpo = abs(last['close'] - last['open'])
+    rango = last['high'] - last['low']
+    mecha_inf = min(last['open'], last['close']) - last['low']
+    mecha_sup = last['high'] - max(last['open'], last['close'])
 
-def estrategia_2_cruce_ema(df, niveles):
-    """Cruce EMAs + ADX + cerca de nivel"""
-    if len(df) < 2:
-        return None, 0, None
-    last = df.iloc[-1]
-    prev = df.iloc[-2]
-    if last['adx'] < 20:
-        return None, 0, None
-    if prev['ema9'] <= prev['ema21'] and last['ema9'] > last['ema21']:
-        for n in niveles:
-            if n['tipo'] == 'soporte' and abs(last['close'] - n['precio']) / last['close'] < 0.002:
-                return 'CALL', 9, n['precio']
-    if prev['ema9'] >= prev['ema21'] and last['ema9'] < last['ema21']:
-        for n in niveles:
-            if n['tipo'] == 'resistencia' and abs(last['close'] - n['precio']) / last['close'] < 0.002:
-                return 'PUT', 9, n['precio']
-    return None, 0, None
-
-def estrategia_3_bb_rsi(df, niveles):
-    """Bollinger + RSI extremo + cerca de nivel"""
-    last = df.iloc[-1]
-    if last['close'] <= last['bb_lower'] and last['rsi'] < 30:
-        for n in niveles:
-            if n['tipo'] == 'soporte' and abs(last['close'] - n['precio']) / last['close'] < 0.002:
-                return 'CALL', 8, n['precio']
-    if last['close'] >= last['bb_upper'] and last['rsi'] > 70:
-        for n in niveles:
-            if n['tipo'] == 'resistencia' and abs(last['close'] - n['precio']) / last['close'] < 0.002:
-                return 'PUT', 8, n['precio']
-    return None, 0, None
-
-def estrategia_4_macd_cruce_senal(df, niveles):
-    """MACD cruce señal + cerca de nivel"""
-    if len(df) < 2:
-        return None, 0, None
-    last = df.iloc[-1]
-    prev = df.iloc[-2]
-    if prev['macd'] <= prev['signal'] and last['macd'] > last['signal'] and last['hist'] > 0:
-        for n in niveles:
-            if n['tipo'] == 'soporte' and abs(last['close'] - n['precio']) / last['close'] < 0.002:
-                return 'CALL', 8, n['precio']
-    if prev['macd'] >= prev['signal'] and last['macd'] < last['signal'] and last['hist'] < 0:
-        for n in niveles:
-            if n['tipo'] == 'resistencia' and abs(last['close'] - n['precio']) / last['close'] < 0.002:
-                return 'PUT', 8, n['precio']
-    return None, 0, None
-
-def estrategia_5_stoch_adx(df, niveles):
-    """Stochastic + ADX + cerca de nivel"""
-    if len(df) < 2:
-        return None, 0, None
-    last = df.iloc[-1]
-    prev = df.iloc[-2]
-    if last['adx'] < 20:
-        return None, 0, None
-    if prev['stoch_k'] < 20 and last['stoch_k'] > last['stoch_d']:
-        for n in niveles:
-            if n['tipo'] == 'soporte' and abs(last['close'] - n['precio']) / last['close'] < 0.002:
-                return 'CALL', 7, n['precio']
-    if prev['stoch_k'] > 80 and last['stoch_k'] < last['stoch_d']:
-        for n in niveles:
-            if n['tipo'] == 'resistencia' and abs(last['close'] - n['precio']) / last['close'] < 0.002:
-                return 'PUT', 7, n['precio']
-    return None, 0, None
-
-def estrategia_6_heiken_ashi_tendencia(df, niveles):
-    """Heiken Ashi (2 velas consecutivas) + EMA + nivel"""
-    if len(df) < 3:
-        return None, 0, None
-    ha_close = (df['open'] + df['high'] + df['low'] + df['close']) / 4
-    ha_open = (df['open'].shift(1) + df['close'].shift(1)) / 2
-    ha_open = ha_open.fillna(ha_close)
-    color1 = 1 if ha_close.iloc[-1] > ha_open.iloc[-1] else -1
-    color2 = 1 if ha_close.iloc[-2] > ha_open.iloc[-2] else -1
-    last = df.iloc[-1]
-    if color1 == 1 and color2 == 1:
-        if last['ema9'] > last['ema21']:
-            for n in niveles:
-                if n['tipo'] == 'soporte' and abs(last['close'] - n['precio']) / last['close'] < 0.002:
-                    return 'CALL', 7, n['precio']
-    if color1 == -1 and color2 == -1:
-        if last['ema9'] < last['ema21']:
-            for n in niveles:
-                if n['tipo'] == 'resistencia' and abs(last['close'] - n['precio']) / last['close'] < 0.002:
-                    return 'PUT', 7, n['precio']
-    return None, 0, None
-
-def estrategia_7_volume_spike(df, niveles):
-    """Pico de volumen + vela grande + cerca de nivel"""
-    last = df.iloc[-1]
-    if last['vol_ratio'] > 1.8:
-        cuerpo = abs(last['close'] - last['open'])
-        rango = last['high'] - last['low']
-        if cuerpo > rango * 0.6:
-            if last['close'] > last['open']:
-                for n in niveles:
-                    if n['tipo'] == 'soporte' and abs(last['close'] - n['precio']) / last['close'] < 0.002:
-                        return 'CALL', 7, n['precio']
-            else:
-                for n in niveles:
-                    if n['tipo'] == 'resistencia' and abs(last['close'] - n['precio']) / last['close'] < 0.002:
-                        return 'PUT', 7, n['precio']
-    return None, 0, None
-
-def estrategia_8_tendencia_adx(df, niveles):
-    """ADX > 25 + EMAs alineadas + cerca de nivel"""
-    last = df.iloc[-1]
-    if last['adx'] > 25:
-        if last['ema9'] > last['ema21'] and last['ema9'] > last['ema50']:
-            for n in niveles:
-                if n['tipo'] == 'soporte' and abs(last['close'] - n['precio']) / last['close'] < 0.002:
-                    return 'CALL', 6, n['precio']
-        if last['ema9'] < last['ema21'] and last['ema9'] < last['ema50']:
-            for n in niveles:
-                if n['tipo'] == 'resistencia' and abs(last['close'] - n['precio']) / last['close'] < 0.002:
-                    return 'PUT', 6, n['precio']
-    return None, 0, None
-
-# Lista de estrategias (nombre, función, peso base)
-ESTRATEGIAS = [
-    ("Divergencia RSI/MACD", estrategia_1_divergencia, 10),
-    ("Cruce EMAs", estrategia_2_cruce_ema, 9),
-    ("Bollinger + RSI", estrategia_3_bb_rsi, 8),
-    ("MACD señal", estrategia_4_macd_cruce_senal, 8),
-    ("Stochastic + ADX", estrategia_5_stoch_adx, 7),
-    ("Heiken Ashi", estrategia_6_heiken_ashi_tendencia, 7),
-    ("Volumen Spike", estrategia_7_volume_spike, 7),
-    ("Tendencia ADX", estrategia_8_tendencia_adx, 6)
-]
+    if direccion_esperada == 'CALL':
+        if mecha_inf > 2 * cuerpo and cuerpo < rango * 0.3:
+            return True
+    else:
+        if mecha_sup > 2 * cuerpo and cuerpo < rango * 0.3:
+            return True
+    return False
 
 # =========================
-# EVALUAR UN ACTIVO (con niveles y tendencia)
+# EVALUAR ACTIVO (tendencia + fuerza + punto de entrada)
 # =========================
 def evaluar_activo(api, asset):
+    """
+    Retorna un dict con la información de la señal si cumple:
+        - Tendencia fuerte (ADX > 25, EMAs alineadas)
+        - Nivel cercano (soporte/resistencia o Fibonacci)
+        - Volumen > 1.2x
+        - Vela de rechazo en la dirección correcta
+    """
     try:
-        candles = api.get_candles(asset, 300, 100, time.time())
+        candles = api.get_candles(asset, 300, 100, time.time())  # 5 min velas
         if not candles or len(candles) < 50:
             return None
         df = pd.DataFrame(candles)
@@ -341,72 +170,64 @@ def evaluar_activo(api, asset):
             return None
 
         df = calcular_indicadores(df)
-        # Detectar tendencia
-        tendencia_dir, fuerza_tendencia = detectar_tendencia(df)
-        if tendencia_dir is None:
-            return None  # sin tendencia clara, no operamos
+        last = df.iloc[-1]
 
-        # Detectar niveles
-        niveles = detectar_niveles_sr(df, num_toques=2)
-        # También podríamos añadir Fibonacci, pero por simplicidad usamos niveles
-        # Opcional: añadir Fibonacci
-        fib = calcular_fibonacci(df)
-
-        # Aplicar estrategias
-        votos_call = 0
-        votos_put = 0
-        peso_call = 0
-        peso_put = 0
-        estrategias_activas = []
-        nivel_sugerido = None
-
-        for nombre, func, peso_base in ESTRATEGIAS:
-            try:
-                direc, peso_extra, nivel = func(df, niveles)
-                if direc:
-                    estrategias_activas.append(nombre)
-                    if direc == 'CALL':
-                        votos_call += 1
-                        peso_call += peso_base + (peso_extra or 0)
-                        if nivel is not None:
-                            nivel_sugerido = nivel
-                    else:
-                        votos_put += 1
-                        peso_put += peso_base + (peso_extra or 0)
-                        if nivel is not None:
-                            nivel_sugerido = nivel
-            except Exception as e:
-                logger.error(f"Error en estrategia {nombre}: {e}")
-                continue
-
-        if votos_call + votos_put == 0:
+        # 1. Determinar tendencia
+        if last['adx'] < 25:
             return None
-
-        # Decidir dirección
-        if peso_call > peso_put:
-            direccion = 'CALL'
-            fuerza = (peso_call / (peso_call + peso_put)) * 100
-        elif peso_put > peso_call:
-            direccion = 'PUT'
-            fuerza = (peso_put / (peso_call + peso_put)) * 100
+        if last['ema20'] > last['ema50'] and last['ema9'] > last['ema20']:
+            tendencia = 'CALL'
+        elif last['ema20'] < last['ema50'] and last['ema9'] < last['ema20']:
+            tendencia = 'PUT'
         else:
-            # Empate
             return None
 
-        # Verificar que la dirección coincida con la tendencia principal
-        if direccion != tendencia_dir:
-            return None  # no operar en contra de la tendencia
+        # 2. Detectar nivel clave cercano
+        niveles = detectar_niveles_sr(df, num_toques=2)
+        nivel_fib = detectar_fibonacci(df)
+        precio_actual = last['close']
 
-        # Ajustar fuerza con la tendencia
-        fuerza = (fuerza + fuerza_tendencia) / 2
+        # Buscar el nivel más cercano (soporte para CALL, resistencia para PUT)
+        nivel_cercano = None
+        if tendencia == 'CALL':
+            # Buscar soporte
+            for n in niveles:
+                if n['tipo'] == 'soporte' and abs(precio_actual - n['precio']) < 0.5 * last['atr']:
+                    nivel_cercano = n
+                    break
+            if nivel_cercano is None and nivel_fib and precio_actual > nivel_fib:
+                if (precio_actual - nivel_fib) < 0.5 * last['atr']:
+                    nivel_cercano = {'precio': nivel_fib, 'tipo': 'soporte', 'desc': 'Fibonacci 38.2%'}
+        else:  # PUT
+            for n in niveles:
+                if n['tipo'] == 'resistencia' and abs(precio_actual - n['precio']) < 0.5 * last['atr']:
+                    nivel_cercano = n
+                    break
+            if nivel_cercano is None and nivel_fib and precio_actual < nivel_fib:
+                if (nivel_fib - precio_actual) < 0.5 * last['atr']:
+                    nivel_cercano = {'precio': nivel_fib, 'tipo': 'resistencia', 'desc': 'Fibonacci 38.2%'}
+
+        if nivel_cercano is None:
+            return None
+
+        # 3. Verificar volumen
+        if last['vol_ratio'] < 1.2:
+            return None
+
+        # 4. Verificar vela de rechazo en la última vela
+        if not es_vela_rechazo(df, tendencia):
+            return None
+
+        # 5. Calcular fuerza (basada en ADX y volumen)
+        fuerza = min(50 + last['adx'] * 0.5 + last['vol_ratio'] * 5, 100)
 
         return {
             'asset': asset,
-            'direccion': direccion,
-            'estrategias': estrategias_activas,
-            'fuerza': min(fuerza, 100),
-            'nivel': nivel_sugerido,
-            'precio': df['close'].iloc[-1],
+            'direccion': tendencia,
+            'fuerza': fuerza,
+            'nivel': nivel_cercano['precio'],
+            'descripcion': nivel_cercano.get('desc', f"{nivel_cercano['tipo']} con {nivel_cercano.get('toques', '?')} toques"),
+            'precio': precio_actual,
             'timestamp': datetime.now(ecuador)
         }
     except Exception as e:
@@ -430,14 +251,20 @@ def obtener_activos_abiertos(api, tipo_mercado="AMBOS"):
                         if tipo_mercado in ['REAL', 'AMBOS']:
                             activos.append(asset)
         if not activos:
-            return FALLBACK_ACTIVOS
+            logger.warning("Usando lista de activos predeterminada (fallback)")
+            if tipo_mercado == 'OTC':
+                return [a for a in FALLBACK_ACTIVOS if '-OTC' in a]
+            elif tipo_mercado == 'REAL':
+                return [a for a in FALLBACK_ACTIVOS if '-OTC' not in a]
+            else:
+                return FALLBACK_ACTIVOS
         return activos
     except Exception as e:
         logger.error(f"Error obteniendo activos: {e}")
         return FALLBACK_ACTIVOS
 
 # =========================
-# SELECCIONAR EL MEJOR ACTIVO (mayor fuerza)
+# SELECCIONAR EL MEJOR ACTIVO (el que tenga mayor fuerza)
 # =========================
 def seleccionar_mejor_activo(api, lista_activos):
     mejor = None
