@@ -7,17 +7,17 @@ from iqoptionapi.stable_api import IQ_Option
 from bot import (
     obtener_activos_otc,
     seleccionar_mejor_senal,
-    obtener_precio_actual
+    analizar_activo
 )
 
 st.set_page_config(
-    page_title="NEUROTRADER OTC",
+    page_title="NEUROTRADER OTC - SEGUIMIENTO",
     page_icon="📈",
     layout="wide",
     initial_sidebar_state="expanded"
 )
 
-# Estilos CSS profesionales (tarjetas 3D)
+# Estilos CSS profesionales (igual que antes)
 st.markdown("""
 <style>
     .stApp {
@@ -100,6 +100,8 @@ if 'saldo' not in st.session_state:
     st.session_state.saldo = 0.0
 if 'monitoreando' not in st.session_state:
     st.session_state.monitoreando = False
+if 'current_asset' not in st.session_state:
+    st.session_state.current_asset = None  # {'asset': str, 'direccion': str, 'descripcion': str}
 if 'ultima_senal' not in st.session_state:
     st.session_state.ultima_senal = None
 if 'log' not in st.session_state:
@@ -134,7 +136,7 @@ def desconectar():
 
 # Sidebar
 with st.sidebar:
-    st.markdown("## 📈 NEUROTRADER OTC")
+    st.markdown("## 📈 NEUROTRADER OTC - SEGUIMIENTO")
     st.markdown("---")
     email = st.text_input("📧 Correo electrónico")
     password = st.text_input("🔑 Contraseña", type="password")
@@ -152,8 +154,8 @@ with st.sidebar:
 
     st.markdown("---")
     st.markdown("### ⚙️ Configuración")
-    st.markdown("Las señales se generan en el **segundo 59** de cada minuto.")
-    st.markdown("Se analizan **todos los activos OTC** y se selecciona la mejor oportunidad.")
+    st.markdown("El bot se enfoca en un activo mientras sea estable.")
+    st.markdown("Si pierde estabilidad, busca otro automáticamente.")
 
     if st.session_state.conectado:
         if not st.session_state.monitoreando:
@@ -171,7 +173,7 @@ with st.sidebar:
 
 # Área principal
 if st.session_state.conectado:
-    st.title("📊 Señales de 1 minuto (segundo 59)")
+    st.title("📊 Señales de 1 minuto (segundo 59) - Enfoque en un activo")
 
     col1, col2, col3 = st.columns(3)
     with col1:
@@ -179,7 +181,7 @@ if st.session_state.conectado:
     with col2:
         st.metric("Estado", "ACTIVO" if st.session_state.monitoreando else "DETENIDO")
     with col3:
-        st.metric("Última señal", "Sí" if st.session_state.ultima_senal else "No")
+        st.metric("Activo actual", st.session_state.current_asset['asset'] if st.session_state.current_asset else "Ninguno")
 
     # Mostrar última señal
     if st.session_state.ultima_senal:
@@ -206,7 +208,7 @@ if st.session_state.conectado:
         for linea in st.session_state.log[-20:]:
             st.text(linea)
 
-    # Lógica de sincronización al segundo 59
+    # Lógica de sincronización al segundo 59 con seguimiento de un activo
     if st.session_state.monitoreando:
         now = datetime.now(ecuador)
         segundo = now.second
@@ -215,23 +217,70 @@ if st.session_state.conectado:
         if segundo == 58:
             # Pequeña espera para llegar al segundo 59 exacto
             time.sleep(0.5)
-            # Realizar análisis en el segundo 58.5-59
-            st.session_state.log.append(f"🔍 Analizando activos OTC...")
-            activos = obtener_activos_otc(st.session_state.api)
-            mejor = seleccionar_mejor_senal(st.session_state.api, activos)
-            if mejor:
-                direccion, desc = mejor['senal']
-                entrada = (now + timedelta(minutes=1)).replace(second=0, microsecond=0)
-                entrada_str = entrada.strftime("%H:%M:%S")
-                st.session_state.ultima_senal = {
-                    'asset': mejor['asset'],
-                    'direccion': direccion,
-                    'descripcion': desc,
-                    'entrada': entrada_str
-                }
-                st.session_state.log.append(f"🚀 SEÑAL: {mejor['asset']} - {direccion} a las {entrada_str}")
+            # Evaluar el activo actual si existe
+            if st.session_state.current_asset:
+                asset_name = st.session_state.current_asset['asset']
+                # Analizar si el activo actual sigue siendo válido
+                res = analizar_activo(st.session_state.api, asset_name)
+                if res and res['senal']:
+                    # Sigue siendo válido, reutilizar
+                    direccion, desc = res['senal']
+                    entrada = (now + timedelta(minutes=1)).replace(second=0, microsecond=0)
+                    entrada_str = entrada.strftime("%H:%M:%S")
+                    st.session_state.ultima_senal = {
+                        'asset': asset_name,
+                        'direccion': direccion,
+                        'descripcion': desc,
+                        'entrada': entrada_str
+                    }
+                    st.session_state.log.append(f"🔄 SEÑAL (reutilizando {asset_name}): {direccion} a las {entrada_str}")
+                else:
+                    # El activo actual ya no es estable, buscar otro
+                    st.session_state.log.append(f"⚠️ {asset_name} perdió estabilidad. Buscando nuevo activo...")
+                    st.session_state.current_asset = None
+                    # Realizar búsqueda de un nuevo activo
+                    activos = obtener_activos_otc(st.session_state.api)
+                    mejor = seleccionar_mejor_senal(st.session_state.api, activos)
+                    if mejor:
+                        direccion, desc = mejor['senal']
+                        entrada = (now + timedelta(minutes=1)).replace(second=0, microsecond=0)
+                        entrada_str = entrada.strftime("%H:%M:%S")
+                        st.session_state.current_asset = {
+                            'asset': mejor['asset'],
+                            'direccion': direccion,
+                            'descripcion': desc
+                        }
+                        st.session_state.ultima_senal = {
+                            'asset': mejor['asset'],
+                            'direccion': direccion,
+                            'descripcion': desc,
+                            'entrada': entrada_str
+                        }
+                        st.session_state.log.append(f"🚀 NUEVO ACTIVO: {mejor['asset']} - {direccion} a las {entrada_str}")
+                    else:
+                        st.session_state.log.append("🔍 SIN SEÑAL – ESPERAR PROXIMO MINUTO")
             else:
-                st.session_state.log.append("🔍 SIN SEÑAL – ESPERAR PROXIMO MINUTO")
+                # No hay activo actual, buscar el mejor
+                activos = obtener_activos_otc(st.session_state.api)
+                mejor = seleccionar_mejor_senal(st.session_state.api, activos)
+                if mejor:
+                    direccion, desc = mejor['senal']
+                    entrada = (now + timedelta(minutes=1)).replace(second=0, microsecond=0)
+                    entrada_str = entrada.strftime("%H:%M:%S")
+                    st.session_state.current_asset = {
+                        'asset': mejor['asset'],
+                        'direccion': direccion,
+                        'descripcion': desc
+                    }
+                    st.session_state.ultima_senal = {
+                        'asset': mejor['asset'],
+                        'direccion': direccion,
+                        'descripcion': desc,
+                        'entrada': entrada_str
+                    }
+                    st.session_state.log.append(f"🚀 SEÑAL: {mejor['asset']} - {direccion} a las {entrada_str}")
+                else:
+                    st.session_state.log.append("🔍 SIN SEÑAL – ESPERAR PROXIMO MINUTO")
             # Forzar rerun para mostrar la señal
             time.sleep(0.2)
             st.rerun()
@@ -240,7 +289,6 @@ if st.session_state.conectado:
             if segundo < 58:
                 seg_rest = 58 - segundo
             else:
-                # después del 59, esperar al siguiente minuto
                 seg_rest = 60 - segundo + 58
             st.info(f"⏳ Próxima señal en {seg_rest} segundos...")
             time.sleep(1)
