@@ -13,6 +13,16 @@ logger = logging.getLogger(__name__)
 # Zona horaria de Ecuador
 ecuador = pytz.timezone("America/Guayaquil")
 
+# Lista de activos de fallback ampliada (para cuando la API no devuelva datos)
+FALLBACK_ACTIVOS = [
+    "EURUSD-OTC", "GBPUSD-OTC", "AUDUSD-OTC", "USDJPY-OTC",
+    "USDCHF-OTC", "NZDUSD-OTC", "USDCAD-OTC", "GBPJPY-OTC",
+    "EURJPY-OTC", "AUDCAD-OTC", "AUDJPY-OTC", "EURGBP-OTC",
+    "EURUSD", "GBPUSD", "AUDUSD", "USDJPY", "USDCHF", "NZDUSD",
+    "USDCAD", "GBPJPY", "EURJPY", "AUDCAD", "AUDJPY", "EURGBP",
+    "EURCHF", "GBPCHF", "CADCHF", "AUDNZD"
+]
+
 # =========================
 # INDICADORES COMUNES
 # =========================
@@ -56,12 +66,12 @@ def calcular_indicadores(df):
     return df
 
 # =========================
-# DETECCIÓN DE TENDENCIA (filtro principal)
+# DETECCIÓN DE TENDENCIA (umbral ADX más bajo)
 # =========================
 def detectar_tendencia(df):
-    """Retorna (dirección, fuerza) si hay tendencia clara: ADX > 20 y EMAs alineadas."""
+    """Retorna (dirección, fuerza) si hay tendencia: ADX > 15 y EMAs alineadas."""
     last = df.iloc[-1]
-    if last['adx'] < 20:
+    if last['adx'] < 15:
         return None, 0
     if last['ema9'] > last['ema21'] and last['ema9'] > last['ema50']:
         fuerza = last['adx'] + last['vol_ratio'] * 10
@@ -72,10 +82,9 @@ def detectar_tendencia(df):
     return None, 0
 
 # =========================
-# CÁLCULO DE NIVELES FIBONACCI (del último movimiento)
+# CÁLCULO DE NIVELES FIBONACCI
 # =========================
 def calcular_fibonacci(df, ventana=20):
-    """Calcula los niveles de Fibonacci del último movimiento (máximo - mínimo) en ventana velas de 5 min."""
     if len(df) < ventana:
         return None
     ultimas = df.iloc[-ventana:]
@@ -94,7 +103,6 @@ def calcular_fibonacci(df, ventana=20):
 # DETECCIÓN DE RETROCESO A NIVEL FIBONACCI
 # =========================
 def retroceso_a_fibonacci(df, direccion, fib, tolerancia=0.5):
-    """Verifica si el precio actual está cerca de un nivel Fibonacci (tolerancia en ATR)."""
     if fib is None:
         return None
     last = df.iloc[-1]
@@ -106,7 +114,6 @@ def retroceso_a_fibonacci(df, direccion, fib, tolerancia=0.5):
             niveles.append((nivel, key))
     if not niveles:
         return None
-    # Tomar el más cercano
     nivel, clave = min(niveles, key=lambda x: abs(x[0] - last['close']))
     return {'nivel': nivel, 'clave': clave, 'distancia': abs(last['close'] - nivel)}
 
@@ -114,14 +121,13 @@ def retroceso_a_fibonacci(df, direccion, fib, tolerancia=0.5):
 # CONFIRMACIÓN CON VELA DE 1 MINUTO
 # =========================
 def confirmar_vela_1min(api, asset, direccion_esperada):
-    """Obtiene la última vela de 1 minuto y verifica si cierra en la dirección esperada con volumen > promedio."""
     try:
         candles = api.get_candles(asset, 60, 1, time.time())
         if not candles:
             return False
         df = pd.DataFrame(candles)
         last = df.iloc[-1]
-        # Calcular volumen promedio de 20 velas anteriores
+        # Volumen promedio de 20 velas anteriores
         candles_avg = api.get_candles(asset, 60, 20, time.time())
         if candles_avg and len(candles_avg) >= 20:
             vol_avg = pd.DataFrame(candles_avg)['volume'].mean()
@@ -137,10 +143,9 @@ def confirmar_vela_1min(api, asset, direccion_esperada):
         return False
 
 # =========================
-# EVALUAR UN ACTIVO (para selección y seguimiento)
+# EVALUAR UN ACTIVO
 # =========================
 def evaluar_activo(api, asset):
-    """Retorna un dict con tendencia, fuerza, niveles Fibonacci y precio actual."""
     try:
         candles = api.get_candles(asset, 300, 100, time.time())
         if not candles or len(candles) < 50:
@@ -171,7 +176,7 @@ def evaluar_activo(api, asset):
         return None
 
 # =========================
-# OBTENER ACTIVOS ABIERTOS (real + OTC)
+# OBTENER ACTIVOS ABIERTOS (con fallback ampliado)
 # =========================
 def obtener_activos_abiertos(api, tipo_mercado="AMBOS"):
     try:
@@ -186,19 +191,22 @@ def obtener_activos_abiertos(api, tipo_mercado="AMBOS"):
                         activos.append(asset)
                     elif tipo_mercado == 'AMBOS':
                         activos.append(asset)
-        logger.info(f"Activos disponibles: {len(activos)}")
+        logger.info(f"Activos obtenidos: {len(activos)}")
         if not activos:
-            # Fallback
-            fallback = ["EURUSD-OTC", "GBPUSD-OTC", "AUDUSD-OTC", "USDJPY-OTC", "USDCHF-OTC", "NZDUSD-OTC"]
-            logger.warning("Usando fallback")
-            return fallback
+            logger.warning("Usando lista de fallback")
+            if tipo_mercado == 'OTC':
+                return [a for a in FALLBACK_ACTIVOS if '-OTC' in a]
+            elif tipo_mercado == 'REAL':
+                return [a for a in FALLBACK_ACTIVOS if '-OTC' not in a]
+            else:
+                return FALLBACK_ACTIVOS
         return activos
     except Exception as e:
         logger.error(f"Error obteniendo activos: {e}")
-        return []
+        return FALLBACK_ACTIVOS
 
 # =========================
-# SELECCIONAR EL MEJOR ACTIVO (mayor fuerza)
+# SELECCIONAR EL MEJOR ACTIVO (hasta 60 por ronda)
 # =========================
 def seleccionar_mejor_activo(api, lista_activos):
     mejor = None
@@ -208,5 +216,5 @@ def seleccionar_mejor_activo(api, lista_activos):
         if res and res['fuerza'] > mejor_fuerza:
             mejor_fuerza = res['fuerza']
             mejor = res
-        time.sleep(0.1)  # pausa corta
+        time.sleep(0.1)
     return mejor
