@@ -72,7 +72,7 @@ def calcular_indicadores(df):
     return df
 
 # =========================
-# DETECCIÓN DE TENDENCIA (para filtrar señales)
+# DETECCIÓN DE TENDENCIA
 # =========================
 def detectar_tendencia(df):
     """Retorna la dirección de la tendencia basada en EMA20/50 y ADX."""
@@ -86,52 +86,49 @@ def detectar_tendencia(df):
     return None, 0
 
 # =========================
-# CÁLCULO DE FUERZA DEL ACTIVO (para selección)
+# CÁLCULO DE FUERZA DEL ACTIVO
 # =========================
 def calcular_fuerza(df):
     """Fuerza basada en ADX + volumen + alineación de tendencia."""
     last = df.iloc[-1]
     fuerza = last['adx'] + (last['vol_ratio'] * 10) if not pd.isna(last['adx']) else 0
-    # Bonus por tendencia fuerte (ADX > 25)
     if last['adx'] > 25:
         fuerza += 10
     return min(fuerza, 100)
 
 # =========================
-# DETECCIÓN DE DIVERGENCIAS (con volumen)
+# DETECCIÓN DE SEÑALES (Divergencia + Movimiento fuerte)
 # =========================
-def detectar_divergencia(df, ventana=5, umbral_adx=20):
-    """Detecta divergencias con confirmación de volumen."""
+def detectar_senal(df, ventana=5, umbral_adx=18):
+    """
+    Detecta señales de compra/venta basadas en:
+    1. Divergencia RSI/MACD (con confirmación de volumen)
+    2. Movimiento fuerte con volumen y ADX (cuando no hay divergencia pero hay tendencia fuerte)
+    """
     if len(df) < ventana:
         return None
     segmento = df.iloc[-ventana:].copy()
     last = df.iloc[-1]
 
-    # Filtro ADX mínimo
+    # Filtro ADX mínimo (más bajo para capturar más)
     if last['adx'] < umbral_adx:
         return None
 
-    # Índices de mínimos y máximos
-    min_precio_idx = segmento['low'].idxmin()
-    max_precio_idx = segmento['high'].idxmax()
-    min_rsi_idx = segmento['rsi'].idxmin()
-    max_rsi_idx = segmento['rsi'].idxmax()
-    min_macd_idx = segmento['macd'].idxmin()
-    max_macd_idx = segmento['macd'].idxmax()
+    tendencia_dir, _ = detectar_tendencia(df)
+    if tendencia_dir is None:
+        return None
 
-    # Función para calcular presión de volumen
+    # Función para confirmación de volumen en la dirección esperada
     def volumen_confirmacion(direccion):
-        # Últimas 3 velas
         ultimas = df.iloc[-3:]
         if direccion == 'CALL':
-            # Queremos que las velas alcistas tengan volumen > promedio
             alcistas = ultimas[ultimas['close'] > ultimas['open']]
             if len(alcistas) > 0:
                 vol_alcista = alcistas['volume'].mean()
                 vol_total = ultimas['volume'].mean()
                 if vol_alcista > vol_total * 1.2:
                     return True
-        else:  # PUT
+        else:
             bajistas = ultimas[ultimas['close'] < ultimas['open']]
             if len(bajistas) > 0:
                 vol_bajista = bajistas['volume'].mean()
@@ -140,38 +137,61 @@ def detectar_divergencia(df, ventana=5, umbral_adx=20):
                     return True
         return False
 
+    # 1. BUSCAR DIVERGENCIAS
+    min_precio_idx = segmento['low'].idxmin()
+    max_precio_idx = segmento['high'].idxmax()
+    min_rsi_idx = segmento['rsi'].idxmin()
+    max_rsi_idx = segmento['rsi'].idxmax()
+    min_macd_idx = segmento['macd'].idxmin()
+    max_macd_idx = segmento['macd'].idxmax()
+
     # Divergencia alcista RSI
     if min_precio_idx < min_rsi_idx and segmento.loc[min_precio_idx, 'low'] < segmento.loc[min_rsi_idx, 'low']:
         if segmento.loc[min_rsi_idx, 'rsi'] > segmento.loc[min_precio_idx, 'rsi']:
             if volumen_confirmacion('CALL'):
                 fuerza = 70 + (last['adx'] / 100) * 30
-                return ('CALL', 'Divergencia alcista RSI', min(fuerza, 100))
+                if tendencia_dir == 'CALL':
+                    return ('CALL', 'Divergencia alcista RSI', min(fuerza, 100))
 
     # Divergencia bajista RSI
     if max_precio_idx > max_rsi_idx and segmento.loc[max_precio_idx, 'high'] > segmento.loc[max_rsi_idx, 'high']:
         if segmento.loc[max_rsi_idx, 'rsi'] < segmento.loc[max_precio_idx, 'rsi']:
             if volumen_confirmacion('PUT'):
                 fuerza = 70 + (last['adx'] / 100) * 30
-                return ('PUT', 'Divergencia bajista RSI', min(fuerza, 100))
+                if tendencia_dir == 'PUT':
+                    return ('PUT', 'Divergencia bajista RSI', min(fuerza, 100))
 
     # Divergencia alcista MACD
     if min_precio_idx < min_macd_idx and segmento.loc[min_precio_idx, 'low'] < segmento.loc[min_macd_idx, 'low']:
         if segmento.loc[min_macd_idx, 'macd'] > segmento.loc[min_precio_idx, 'macd']:
             if volumen_confirmacion('CALL'):
                 fuerza = 70 + (last['adx'] / 100) * 30
-                return ('CALL', 'Divergencia alcista MACD', min(fuerza, 100))
+                if tendencia_dir == 'CALL':
+                    return ('CALL', 'Divergencia alcista MACD', min(fuerza, 100))
 
     # Divergencia bajista MACD
     if max_precio_idx > max_macd_idx and segmento.loc[max_precio_idx, 'high'] > segmento.loc[max_macd_idx, 'high']:
         if segmento.loc[max_macd_idx, 'macd'] < segmento.loc[max_precio_idx, 'macd']:
             if volumen_confirmacion('PUT'):
                 fuerza = 70 + (last['adx'] / 100) * 30
-                return ('PUT', 'Divergencia bajista MACD', min(fuerza, 100))
+                if tendencia_dir == 'PUT':
+                    return ('PUT', 'Divergencia bajista MACD', min(fuerza, 100))
+
+    # 2. SI NO HAY DIVERGENCIAS, PERO HAY MOVIMIENTO FUERTE (volumen > 2x y vela grande)
+    if last['vol_ratio'] > 1.8 and (last['close'] - last['open']) / last['atr'] > 1.0:
+        # Vela muy grande
+        if last['close'] > last['open']:
+            direccion = 'CALL'
+        else:
+            direccion = 'PUT'
+        if direccion == tendencia_dir:
+            fuerza = 60 + (last['adx'] / 100) * 20
+            return (direccion, f'Movimiento fuerte ({direccion})', min(fuerza, 100))
 
     return None
 
 # =========================
-# EVALUAR UN ACTIVO (para selección y seguimiento)
+# EVALUAR UN ACTIVO
 # =========================
 def evaluar_activo(api, asset):
     try:
@@ -187,12 +207,10 @@ def evaluar_activo(api, asset):
 
         df = calcular_indicadores(df)
         fuerza = calcular_fuerza(df)
-        tendencia_dir, _ = detectar_tendencia(df)
-        divergencia = detectar_divergencia(df)
+        senal = detectar_senal(df)
 
-        # Solo consideramos divergencia si va en la dirección de la tendencia
-        if divergencia and tendencia_dir and divergencia[0] == tendencia_dir:
-            direccion, descripcion, fuerza_senal = divergencia
+        if senal:
+            direccion, descripcion, fuerza_senal = senal
             return {
                 'asset': asset,
                 'direccion': direccion,
@@ -202,7 +220,6 @@ def evaluar_activo(api, asset):
                 'timestamp': datetime.now(ecuador)
             }
         else:
-            # Sin señal, pero devolvemos fuerza para selección
             return {
                 'asset': asset,
                 'fuerza': fuerza,
@@ -213,7 +230,7 @@ def evaluar_activo(api, asset):
         return None
 
 # =========================
-# OBTENER ACTIVOS ABIERTOS (con conteo)
+# OBTENER ACTIVOS ABIERTOS
 # =========================
 def obtener_activos_abiertos(api, tipo_mercado="AMBOS"):
     try:
